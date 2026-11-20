@@ -165,6 +165,31 @@ export default function AuthModal({
     const [password, setPassword] = useState("");
     const [confirmPassword, setConfirmPassword] = useState("");
     const [loading, setLoading] = useState(false);
+    const [loginError, setLoginError] = useState("");
+    const [loginLockNotice, setLoginLockNotice] = useState<{
+        until: number; shownAt: number; lockoutCount: number; recoveryAvailable: boolean;
+    } | null>(null);
+    const loginEmailRef = useRef("");
+    const [loginLockSeconds, setLoginLockSeconds] = useState(0);
+
+    useEffect(() => {
+        if (!loginLockNotice) return;
+        const update = () => setLoginLockSeconds(Math.max(0, Math.ceil((loginLockNotice.until - Date.now()) / 1000)));
+        update();
+        const interval = window.setInterval(() => {
+            update();
+            if (Date.now() >= loginLockNotice.until) window.clearInterval(interval);
+        }, 250);
+        return () => window.clearInterval(interval);
+    }, [loginLockNotice]);
+    const [recoveryStage, setRecoveryStage] = useState<"none" | "email" | "otp" | "password" | "success">("none");
+    const [recoveryEmail, setRecoveryEmail] = useState("");
+    const [recoveryToken, setRecoveryToken] = useState("");
+    const [newPassword, setNewPassword] = useState("");
+    const [newConfirmPassword, setNewConfirmPassword] = useState("");
+    const [recoveryError, setRecoveryError] = useState("");
+    const [otpResendTimer, setOtpResendTimer] = useState(0);
+    const [otpBlocked, setOtpBlocked] = useState(false);
 
     const [signupStep, setSignupStep] = useState(1);
     // Animation state is independent from the existing login, OTP, and onboarding logic.
@@ -263,16 +288,20 @@ export default function AuthModal({
     };
 
     const passwordChecks = {
-        length: password.length >= 8,
-        uppercase: /[A-Z]/.test(password),
-        number: /\d/.test(password),
-        special: /[^A-Za-z0-9]/.test(password),
+        length: Array.from(password).length >= 15,
+        bytes: new TextEncoder().encode(password).length <= 72,
     };
 
     const passwordValid = Object.values(passwordChecks).every(Boolean);
 
     useEffect(() => {
-        if (!otpDialogOpen || otpTimer <= 0) return;
+        if (otpResendTimer <= 0) return;
+        const timeout = window.setTimeout(() => setOtpResendTimer(value => Math.max(0, value - 1)), 1000);
+        return () => window.clearTimeout(timeout);
+    }, [otpDialogOpen, otpResendTimer]);
+
+    useEffect(() => {
+        if (otpTimer <= 0) return;
 
         const timeout = window.setTimeout(() => {
             setOtpTimer((current) => Math.max(0, current - 1));
@@ -282,13 +311,14 @@ export default function AuthModal({
     }, [otpDialogOpen, otpTimer]);
 
     useEffect(() => {
-        if (otpDialogOpen && otpTimer === 0) {
+        if (otpDialogOpen && otpTimer === 0 && !otpVerificationSuccess && !otpLoading) {
             setOtp("");
         }
-    }, [otpDialogOpen, otpTimer]);
+    }, [otpDialogOpen, otpTimer, otpVerificationSuccess, otpLoading]);
 
     const saveCommonSession = (data: AuthSessionData) => {
         sessionStorage.clear();
+        localStorage.removeItem("token");
         sessionStorage.setItem("token", data.token);
         sessionStorage.setItem("store_id", String(data.store_id));
         sessionStorage.setItem("store_name", data.store_name || "");
@@ -398,61 +428,6 @@ export default function AuthModal({
             }
         }
 
-        if (mode === "login") {
-            // Try platform-admin login first. This makes a real network
-            // call to the server — no credentials or role decisions are
-            // ever made in the browser. If the email isn't the admin
-            // account, the server just responds 401/404 and we fall
-            // through to normal owner/manager login below.
-            setLoading(true);
-
-            try {
-                const adminResponse = await fetch("/api/auth", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                    },
-                    body: JSON.stringify({
-                        action: "platform_admin_login",
-                        email,
-                        password,
-                    }),
-                });
-
-                if (adminResponse.ok) {
-                    const adminData = await adminResponse.json();
-
-                    if (adminData.token) {
-                        sessionStorage.clear();
-                        sessionStorage.setItem("token", adminData.token);
-                        sessionStorage.setItem("role", "PLATFORM_ADMIN");
-                        sessionStorage.setItem(
-                            "user",
-                            JSON.stringify(adminData.user || {})
-                        );
-                        sessionStorage.setItem(
-                            "full_name",
-                            adminData.user?.full_name ||
-                            "Platform Administrator"
-                        );
-                        sessionStorage.setItem("isLoggedIn", "true");
-
-                        onClose();
-                        router.replace("/platform-admin/dashboard");
-                        setLoading(false);
-                        return;
-                    }
-                }
-                // Any non-OK / non-admin response falls through to the
-                // normal owner/manager login flow below.
-            } catch {
-                // Network error talking to the admin check — fall through
-                // to normal login rather than silently failing.
-            }
-
-            setLoading(false);
-        }
-
         if (mode === "signup") {
             const signupBody: PendingSignup = {
                 owner_name: ownerName.trim(),
@@ -487,7 +462,9 @@ export default function AuthModal({
                 setOtpVerificationSuccess(false);
                 setOtpVerificationError("");
                 setOtp("");
-                setOtpTimer(90);
+                setOtpTimer(Number(data.expires_in || 300));
+                setOtpResendTimer(Number(data.resend_in || 60));
+                setOtpBlocked(false);
                 setOtpDialogOpen(true);
             } catch {
                 alert("Something went wrong while sending OTP.");
@@ -498,6 +475,9 @@ export default function AuthModal({
             return;
         }
 
+        setLoginError("");
+        const submittedEmail = email.trim().toLowerCase();
+        loginEmailRef.current = submittedEmail;
         setLoading(true);
 
         try {
@@ -516,22 +496,100 @@ export default function AuthModal({
             const data = await response.json();
 
             if (!response.ok || !data.token) {
-                alert(data.error || "Authentication failed.");
+                // Do not display the previous account's result after the email has changed.
+                if (loginEmailRef.current !== submittedEmail) return;
+                if (data.code === "ACCOUNT_LOCKED" && Number(data.retry_after_seconds) > 0) {
+                    const seconds = Math.ceil(Number(data.retry_after_seconds));
+                    const now = Date.now();
+                    setLoginLockSeconds(seconds);
+                    setLoginLockNotice({
+                        until: now + seconds * 1000,
+                        shownAt: now,
+                        lockoutCount: Math.max(1, Number(data.lockout_count) || 1),
+                        recoveryAvailable: data.password_recovery_available === true,
+                    });
+                } else {
+                    setLoginLockNotice(null);
+                    setLoginError(data.error === "Invalid email or password." || data.code === "AUTH_FAILED"
+                        ? "Invalid email or password. Try again."
+                        : data.error || "Authentication failed.");
+                }
                 return;
             }
 
+            setLoginLockNotice(null);
+            if (data.role === "PLATFORM_ADMIN") {
+                sessionStorage.clear();
+                localStorage.removeItem("token");
+                sessionStorage.setItem("token", data.token);
+                sessionStorage.setItem("role", "PLATFORM_ADMIN");
+                sessionStorage.setItem("user", JSON.stringify(data.user || {}));
+                sessionStorage.setItem("full_name", data.user?.full_name || "Platform Administrator");
+                sessionStorage.setItem("isLoggedIn", "true");
+                onClose();
+                router.replace("/platform-admin/dashboard");
+                return;
+            }
             saveCommonSession(data);
             onClose();
             router.push("/dashboard");
         } catch {
-            alert("Something went wrong. Please try again.");
+            if (loginEmailRef.current === submittedEmail) setLoginError("Something went wrong. Please try again.");
         } finally {
             setLoading(false);
         }
     };
 
+    const resetRecovery = () => {
+        setRecoveryStage("none"); setRecoveryEmail(""); setRecoveryToken("");
+        setNewPassword(""); setNewConfirmPassword(""); setRecoveryError("");
+        setOtpDialogOpen(false); setOtp(""); setOtpBlocked(false); setOtpVerificationError("");
+    };
+    const startRecovery = () => {
+        setRecoveryEmail(email.trim()); setPassword(""); setConfirmPassword(""); setLoginError(""); setLoginLockNotice(null);
+        setRecoveryToken(""); setNewPassword(""); setNewConfirmPassword(""); setRecoveryError(""); setRecoveryStage("email");
+    };
+    const requestRecovery = async (event?: React.FormEvent) => {
+        event?.preventDefault();
+        if (otpLoading || loading || (recoveryStage === "otp" && otpResendTimer > 0)) return;
+        if (!/^\S+@\S+\.\S+$/.test(recoveryEmail.trim())) { setRecoveryError("Enter a valid email address."); return; }
+        setLoading(true); setOtpLoading(true); setRecoveryError(""); setOtpVerificationError("");
+        try {
+            const response = await fetch("/api/auth", { method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "request_password_reset", email: recoveryEmail }) });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || "Unable to request a verification code.");
+            setRecoveryStage("otp"); setOtp(""); setOtpBlocked(false); setOtpVerificationSuccess(false);
+            setOtpTimer(Number(data.expires_in || 300)); setOtpResendTimer(Number(data.resend_in || 60)); setOtpDialogOpen(true);
+        } catch (err) {
+            const message = err instanceof Error ? err.message : "Unable to request a verification code.";
+            setRecoveryError(message); setOtpVerificationError(message);
+        } finally { setLoading(false); setOtpLoading(false); }
+    };
+    const submitPasswordReset = async (event: React.FormEvent) => {
+        event.preventDefault();
+        if (loading) return;
+        if (Array.from(newPassword).length < 15 || new TextEncoder().encode(newPassword).length > 72 || newPassword !== newConfirmPassword) {
+            setRecoveryError("Use at least 15 characters and at most 72 UTF-8 bytes. Passwords must match."); return;
+        }
+        setLoading(true); setRecoveryError("");
+        try {
+            const response = await fetch("/api/auth", { method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "reset_password", email: recoveryEmail, reset_token: recoveryToken, new_password: newPassword, confirm_password: newConfirmPassword }) });
+            const data = await response.json();
+            if (!response.ok) {
+                if (data.code === "RESET_INVALID") { setRecoveryToken(""); setRecoveryStage("email"); }
+                throw new Error(data.error || "Password reset failed.");
+            }
+            sessionStorage.clear(); localStorage.removeItem("token");
+            setRecoveryToken(""); setNewPassword(""); setNewConfirmPassword(""); setPassword("");
+            setEmail(recoveryEmail); setRecoveryStage("success");
+        } catch (err) { setRecoveryError(err instanceof Error ? err.message : "Password reset failed."); }
+        finally { setLoading(false); }
+    };
+
     const handleVerifyOtp = async () => {
-        if (!pendingSignup || otpLoading || otpVerificationSuccess) return;
+        if ((!pendingSignup && recoveryStage !== "otp") || otpLoading || otpVerificationSuccess || otpBlocked) return;
         const normalizedOtp = otp.replace(/\D/g, "").slice(0, 6);
         if (!/^\d{6}$/.test(normalizedOtp) || otpTimer <= 0) return;
 
@@ -541,19 +599,29 @@ export default function AuthModal({
             const response = await fetch("/api/auth", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ action: "verify_signup_otp", ...pendingSignup, otp: normalizedOtp }),
+                body: JSON.stringify(recoveryStage === "otp"
+                    ? { action: "verify_password_reset_otp", email: recoveryEmail, otp: normalizedOtp }
+                    : { action: "verify_signup_otp", ...pendingSignup, otp: normalizedOtp }),
             });
             const data = await response.json();
-            if (!response.ok || !data.token) {
+            if (!response.ok || !(recoveryStage === "otp" ? data.reset_token : data.token)) {
                 setOtpVerificationError(data.error || "OTP verification failed. Try again.");
+                if (["OTP_ATTEMPTS_EXHAUSTED", "OTP_INVALID"].includes(data.code)) setOtpBlocked(true);
                 setOtp("");
+                return;
+            }
+            if (recoveryStage === "otp") {
+                setRecoveryToken(data.reset_token);
+                setOtpVerificationSuccess(true);
+                await new Promise<void>(resolve => window.setTimeout(resolve, 1800));
+                setOtpDialogOpen(false); setOtp(""); setRecoveryStage("password");
                 return;
             }
 
             // Only the verified backend response may trigger the success animation.
             saveCommonSession(data);
             setOtpVerificationSuccess(true);
-            await new Promise<void>((resolve) => window.setTimeout(resolve, 800));
+            await new Promise<void>((resolve) => window.setTimeout(resolve, 1800));
             setOtpDialogOpen(false);
             setAccountVerified(true);
             setSignupStep(2);
@@ -566,7 +634,8 @@ export default function AuthModal({
     };
 
     const handleResendOtp = async () => {
-        if (otpTimer > 0 || otpLoading) return;
+        if (otpResendTimer > 0 || otpLoading) return;
+        if (recoveryStage === "otp") { await requestRecovery(); return; }
 
         if (!pendingSignup) {
             alert("Signup details are missing. Please try again.");
@@ -591,14 +660,17 @@ export default function AuthModal({
             const data = await response.json();
 
             if (!response.ok) {
-                alert(data.error || "Failed to resend OTP.");
+                setOtpVerificationError(data.error || "Failed to resend OTP.");
+                if (data.retry_after_seconds) setOtpResendTimer(Number(data.retry_after_seconds));
                 return;
             }
 
             setOtpVerificationSuccess(false);
             setOtpVerificationError("");
             setOtp("");
-            setOtpTimer(90);
+            setOtpTimer(Number(data.expires_in || 300));
+            setOtpResendTimer(Number(data.resend_in || 60));
+            setOtpBlocked(false);
         } catch {
             alert("Something went wrong while resending OTP.");
         } finally {
@@ -608,6 +680,7 @@ export default function AuthModal({
 
     const handleSwitchMode = () => {
         resetSignupFlow();
+        resetRecovery(); setLoginError(""); setLoginLockNotice(null);
         onSwitch(mode === "login" ? "signup" : "login");
     };
 
@@ -787,7 +860,7 @@ export default function AuthModal({
 
     const headerTitle =
         mode === "login"
-            ? "Log in"
+            ? recoveryStage === "none" ? "Log in" : recoveryStage === "password" ? "Create new password" : recoveryStage === "success" ? "Password reset successful" : "Forgot password?"
             : setupComplete
                 ? "Setup complete"
                 : signupStep === 1
@@ -800,7 +873,7 @@ export default function AuthModal({
 
     const headerDescription =
         mode === "login"
-            ? "Enter your credentials to access your dashboard."
+            ? recoveryStage === "none" ? "Enter your credentials to access your dashboard." : recoveryStage === "password" ? "Choose a new password to secure your account." : recoveryStage === "success" ? "You can now log in using your new password." : "Enter your registered email to recover your account."
             : setupComplete
                 ? "Your account, first branch, and manager access are ready."
                 : signupStep === 1
@@ -989,13 +1062,21 @@ export default function AuthModal({
                             <OnboardingProgress currentStep={signupStep} />
                         )}
 
-                        {mode === "login" && (
+                        {mode === "login" && recoveryStage === "none" && (
                             <form className="snb-auth-form-stage mt-8 space-y-5" onSubmit={handleSubmit}>
                                 <TextInput
                                     label="Email address"
                                     placeholder="you@yourbusiness.com"
                                     value={email}
-                                    onChange={setEmail}
+                                    onChange={value => {
+                                        const normalized = value.trim().toLowerCase();
+                                        if (normalized !== email.trim().toLowerCase()) {
+                                            setLoginError("");
+                                            setLoginLockNotice(null);
+                                        }
+                                        loginEmailRef.current = normalized;
+                                        setEmail(value);
+                                    }}
                                     icon={
                                         <Mail className="h-5 w-5 text-[#7A6E88]" />
                                     }
@@ -1003,6 +1084,30 @@ export default function AuthModal({
 
                                 <TextInput
                                     key="login-password"
+                                    errorMessage={loginLockNotice ? (
+                                        <div key={loginLockNotice.shownAt} className="snb-login-lock-notice mt-1.5 text-left text-sm text-red-600">
+                                            <p role="status">
+                                                {loginLockSeconds > 0 ? (
+                                                    <>
+                                                        {loginLockNotice.lockoutCount >= 5
+                                                            ? "Your account is temporarily locked due to repeated unsuccessful login attempts. "
+                                                            : "Your account is temporarily locked. "}
+                                                        Try again in <span role="timer" aria-live="off">{String(Math.floor(loginLockSeconds / 60)).padStart(2, "0")}:{String(loginLockSeconds % 60).padStart(2, "0")}</span>.
+                                                    </>
+                                                ) : "You can try logging in again now."}
+                                            </p>
+                                            {loginLockSeconds > 0 && loginLockNotice.lockoutCount >= 2 && (
+                                                <p className="mt-1">
+                                                    {loginLockNotice.recoveryAvailable
+                                                        ? loginLockNotice.lockoutCount === 2
+                                                            ? "You can also reset your password."
+                                                            : "We recommend resetting your password."
+                                                        : "Contact your administrator for account recovery."}
+                                                </p>
+                                            )}
+                                            {loginError && <p role="alert" className="mt-1">{loginError}</p>}
+                                        </div>
+                                    ) : loginError ? <p role="alert" className="mt-1.5 text-left text-sm text-red-600">{loginError}</p> : null}
                                     label="Password"
                                     placeholder="Enter your password"
                                     type="password"
@@ -1013,14 +1118,11 @@ export default function AuthModal({
                                     }
                                 />
 
-                                <div className="flex items-center justify-between text-sm">
-                                    <label className="flex items-center gap-2 text-[#7A6E88]">
-                                        <input type="checkbox" />
-                                        Remember me
-                                    </label>
-
+                                <div className="flex items-center justify-end text-sm">
                                     <button
                                         type="button"
+                                        onClick={startRecovery}
+                                        disabled={loading}
                                         className="font-medium text-[#2D1B4E]"
                                     >
                                         Forgot password?
@@ -1032,12 +1134,35 @@ export default function AuthModal({
                                     disabled={loading}
                                     className="w-full rounded-lg bg-[#2D1B4E] px-5 py-3 font-medium text-white transition hover:bg-[#3D2560] disabled:opacity-60"
                                 >
-                                    {loading ? <RefreshCw className="mr-2 inline h-4 w-4 animate-spin" aria-hidden="true" /> : null}
                                     {loading
-                                        ? "Please wait..."
+                                        ? <span role="status" className="snb-auth-loading-text">Logging in...</span>
                                         : "Log in to StockNBook"}
                                 </button>
                             </form>
+                        )}
+
+                        {mode === "login" && recoveryStage !== "none" && (
+                            <div className="snb-auth-form-stage mt-8 space-y-5">
+                                {(recoveryStage === "email" || recoveryStage === "otp") && (
+                                    <form className="space-y-5" onSubmit={requestRecovery}>
+                                        <TextInput label="Email address" placeholder="you@yourbusiness.com" value={recoveryEmail} onChange={value => { setRecoveryEmail(value); if (recoveryStage === "otp") { setRecoveryStage("email"); setOtpDialogOpen(false); setOtp(""); setOtpBlocked(false); } }} icon={<Mail className="h-5 w-5 text-[#7A6E88]" />} />
+                                        <p className="text-sm text-[#7A6E88]">If your email is registered, a verification code will be sent. Platform Administrators should use the controlled recovery procedure.</p>
+                                        <button type="submit" disabled={loading || (recoveryStage === "otp" && otpResendTimer > 0)} className="w-full rounded-lg bg-[#2D1B4E] px-5 py-3 font-medium text-white disabled:opacity-60">{loading ? "Please wait..." : "Send verification code"}</button>
+                                        {recoveryStage === "otp" && <button type="button" onClick={() => setOtpDialogOpen(true)} className="w-full text-sm font-medium text-[#2D1B4E]">Enter verification code</button>}
+                                    </form>
+                                )}
+                                {recoveryStage === "password" && (
+                                    <form className="space-y-5" onSubmit={submitPasswordReset}>
+                                        <TextInput label="New password" placeholder="Enter new password" type="password" value={newPassword} onChange={setNewPassword} icon={<Lock className="h-5 w-5 text-[#7A6E88]" />} />
+                                        <TextInput label="Confirm new password" placeholder="Confirm new password" type="password" value={newConfirmPassword} onChange={setNewConfirmPassword} icon={<Lock className="h-5 w-5 text-[#7A6E88]" />} />
+                                        <p className="text-sm text-[#7A6E88]">Use at least 15 characters and at most 72 UTF-8 bytes.</p>
+                                        <button disabled={loading} type="submit" className="w-full rounded-lg bg-[#2D1B4E] px-5 py-3 font-medium text-white disabled:opacity-60">{loading ? "Please wait..." : "Reset password"}</button>
+                                    </form>
+                                )}
+                                {recoveryError && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-3 py-3 text-sm text-red-700">{recoveryError}</p>}
+                                {recoveryStage === "success" && <div role="status" className="flex items-center gap-3 rounded-xl bg-green-50 px-4 py-3 text-green-800"><CheckCircle2 className="h-6 w-6" /> Your password has been updated.</div>}
+                                <button type="button" disabled={loading || otpLoading} onClick={resetRecovery} className="w-full rounded-lg border border-[#DED3EE] px-5 py-3 font-medium text-[#2D1B4E] disabled:opacity-60">Back to login</button>
+                            </div>
                         )}
 
                         {mode === "signup" && signupStep === 1 && !setupComplete && (
@@ -1136,10 +1261,8 @@ export default function AuthModal({
 
                                         <div className="mt-3 grid gap-x-6 gap-y-2.5 text-sm sm:grid-cols-2">
                                             {[
-                                                [passwordChecks.length, "At least 8 characters"],
-                                                [passwordChecks.uppercase, "One uppercase letter"],
-                                                [passwordChecks.number, "One number"],
-                                                [passwordChecks.special, "One special character"],
+                                                [passwordChecks.length, "At least 15 characters"],
+                                                [passwordChecks.bytes, "At most 72 UTF-8 bytes"],
                                             ].map(([valid, requirement]) => (
                                                 <p
                                                     key={String(requirement)}
@@ -1231,9 +1354,8 @@ export default function AuthModal({
                                     className="snb-auth-sticky-primary flex w-full items-center justify-center gap-2 rounded-lg bg-[#2D1B4E] px-5 py-3 font-medium text-white transition hover:bg-[#3D2560] disabled:opacity-60"
                                 >
                                     <span className="inline-flex items-center gap-2">
-                                        {loading && <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />}
                                         {loading
-                                            ? "Please wait..."
+                                            ? <span role="status" className="snb-auth-loading-text">Creating...</span>
                                             : accountVerified
                                                 ? "Continue to branches"
                                                 : "Continue"}
@@ -1588,9 +1710,8 @@ export default function AuthModal({
                                         disabled={setupLoading}
                                         className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#2D1B4E] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[#3D2560] disabled:cursor-not-allowed disabled:opacity-60"
                                     >
-                                        {setupLoading && <RefreshCw className="mr-2 inline h-4 w-4 animate-spin" aria-hidden="true" />}
                                         {setupLoading
-                                            ? "Creating setup..."
+                                            ? <span role="status" className="snb-auth-loading-text">Creating...</span>
                                             : "Create branch & send invitations"}
                                     </button>
                                 </div>
@@ -1903,7 +2024,10 @@ export default function AuthModal({
 
             {otpDialogOpen && (
                 <SignupOtpDialog
-                    email={pendingSignup?.email || email}
+                    email={recoveryStage === "otp" ? recoveryEmail : pendingSignup?.email || email}
+                    recovery={recoveryStage === "otp"}
+                    resendTimer={otpResendTimer}
+                    blocked={otpBlocked}
                     otp={otp}
                     setOtp={(value) => { setOtp(value); setOtpVerificationError(""); }}
                     timer={otpTimer}
@@ -1918,6 +2042,10 @@ export default function AuthModal({
 
             {/* Motion lives in this existing file; no new stylesheet or dependency. */}
             <style jsx global>{`
+                @keyframes snbLoginNotice { from { opacity: 0; } to { opacity: 1; } }
+                @keyframes snbAuthLoadingText { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+                .snb-login-lock-notice { animation: snbLoginNotice .25s ease-out both; }
+                .snb-auth-loading-text { animation: snbAuthLoadingText 1.5s ease-in-out infinite; }
                 @keyframes snbAuthIn { from { opacity: 0; transform: translateY(12px) scale(.97); } to { opacity: 1; transform: translateY(0) scale(1); } }
                 @keyframes snbAuthOut { from { opacity: 1; transform: translateY(0) scale(1); } to { opacity: 0; transform: translateY(8px) scale(.985); } }
                 @keyframes snbAuthFade { from { opacity: 0; transform: translateY(9px); } to { opacity: 1; transform: translateY(0); } }
@@ -1982,7 +2110,7 @@ export default function AuthModal({
                     .snb-auth-brand-description, .snb-auth-brand-tagline, .snb-store-scene, .snb-store-awning,
                     .snb-store-plant, .snb-store-check, .snb-store-sparkle, .snb-store-step-accent, .snb-auth-heading-enter,
                     .snb-auth-form-stage, .snb-auth-form-stage > *, .snb-auth-success-icon, .snb-auth-otp-enter { animation: none !important; opacity: 1 !important; transform: none; }
-                    .snb-store-building { animation: none !important; opacity: 1 !important; }
+                    .snb-store-building, .snb-login-lock-notice, .snb-auth-loading-text { animation: none !important; opacity: 1 !important; }
                     .snb-auth-input > svg { transition: none !important; }
                     .snb-auth-sticky-actions { backdrop-filter: none; }
                 }
@@ -2058,12 +2186,15 @@ function OnboardingProgress({ currentStep }: { currentStep: number }) {
 }
 
 function SignupOtpDialog({
-                             email, otp, setOtp, timer, loading, verified, error, onVerify, onResend, onClose,
+                             email, otp, setOtp, timer, resendTimer, blocked, recovery, loading, verified, error, onVerify, onResend, onClose,
                          }: {
     email: string;
     otp: string;
     setOtp: (value: string) => void;
     timer: number;
+    resendTimer: number;
+    blocked: boolean;
+    recovery: boolean;
     loading: boolean;
     verified: boolean;
     error: string;
@@ -2073,9 +2204,9 @@ function SignupOtpDialog({
 }) {
     const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
     const attemptedOtp = useRef("");
-    const isExpired = timer <= 0;
+    const isExpired = timer <= 0 || blocked;
     const otpDigits = Array.from({ length: 6 }, (_, index) => otp[index] || "");
-    const formattedTimer = `${String(Math.floor(timer / 60)).padStart(2, "0")}:${String(timer % 60).padStart(2, "0")}`;
+    const formattedTimer = `${String(Math.floor(resendTimer / 60)).padStart(2, "0")}:${String(resendTimer % 60).padStart(2, "0")}`;
 
     useEffect(() => {
         const focus = window.setTimeout(() => inputRefs.current[0]?.focus(), 40);
@@ -2135,13 +2266,12 @@ function SignupOtpDialog({
                 <button type="button" onClick={onClose} disabled={loading || verified} aria-label="Close OTP verification" className="absolute right-4 top-4 rounded-full p-2 text-[#7A6E88] transition hover:bg-[#F3EFF8] hover:text-[#2D1B4E] disabled:opacity-50"><X className="h-5 w-5" /></button>
                 <div className="relative mx-auto flex h-[86px] w-[86px] items-center justify-center">
                     <div className="absolute inset-0 rounded-full bg-[#EEE5FF]" /><div className="absolute inset-[11px] rounded-full bg-[#DCCBFF]" />
-                    <div className="relative flex h-14 w-14 items-center justify-center rounded-full bg-[#2D1B4E] text-white shadow-lg">{verified ? <Check className="h-8 w-8 text-[#F1C85C]" /> : <Mail className="h-7 w-7" />}</div>
+                    <div className="relative flex h-14 w-14 items-center justify-center rounded-full bg-[#2D1B4E] text-white shadow-lg">{verified ? <Check className="snb-otp-success-icon h-8 w-8 text-[#F1C85C]" /> : <Mail className="h-7 w-7" />}</div>
                     <Sparkles className="absolute -right-1 top-1 h-4 w-4 text-[#C9951A]" /><Sparkles className="absolute -left-1 bottom-3 h-3.5 w-3.5 text-[#C9951A]" />
                 </div>
                 <h2 id="signup-otp-title" className="mt-4 font-serif text-[32px] font-semibold leading-tight text-[#2D1B4E]">{verified ? "Verified Successfully" : "Verify your email"}</h2>
-                <p className="mt-2 text-sm leading-6 text-[#7A6E88]">{verified ? "Your email has been verified." : "Enter the 6-digit code sent to"}</p>
+                <p className="mt-2 text-sm leading-6 text-[#7A6E88]">{verified ? "Your email has been verified." : recovery ? "If the email is registered, enter the 6-digit code sent to" : "Enter the 6-digit code sent to"}</p>
                 {!verified && <p className="mt-0.5 break-all text-sm font-bold text-[#2D1B4E]">{email}</p>}
-                {error && <p role="alert" className="mt-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-700">{error}</p>}
                 <div className="mt-6 flex justify-center gap-2 sm:gap-3">
                     {otpDigits.map((digit, index) => (
                         <div key={index} className="relative">
@@ -2150,6 +2280,7 @@ function SignupOtpDialog({
                                 value={digit} type="text" inputMode="numeric" pattern="[0-9]*"
                                 autoComplete={index === 0 ? "one-time-code" : "off"} maxLength={1}
                                 disabled={isExpired || loading || verified} aria-label={`OTP digit ${index + 1}`}
+                                style={verified ? { animationDelay: `${index * 65}ms` } : undefined}
                                 onChange={(event) => updateDigit(index, event.target.value)}
                                 onKeyDown={(event) => handleKeyDown(index, event)}
                                 onPaste={handlePaste} onFocus={(event) => event.target.select()}
@@ -2159,22 +2290,24 @@ function SignupOtpDialog({
                         </div>
                     ))}
                 </div>
+                {error && <p role="alert" className="mt-3 text-center text-sm font-medium text-red-600">{error}</p>}
                 {verified ? (
                     <div role="status" aria-live="polite" className="snb-otp-confirmed-label mt-5 flex items-center justify-center gap-2 font-semibold text-[#318653]"><Check className="h-6 w-6" /> Verified and secure</div>
                 ) : (
-                    <div role="status" aria-live="polite" className={`mx-auto mt-5 inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold tabular-nums ${isExpired ? "bg-red-50 text-red-600" : "bg-[#F1E9FF] text-[#6F45B8]"}`}><Clock3 className="h-4 w-4" />{formattedTimer}</div>
+                    <div role="status" aria-live="polite" className={`mx-auto mt-5 inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold tabular-nums ${isExpired ? "bg-red-50 text-red-600" : "bg-[#F1E9FF] text-[#6F45B8]"}`}><Clock3 className="h-4 w-4" />{resendTimer > 0 ? `Resend available in ${formattedTimer}` : "Resend available"}</div>
                 )}
                 {loading && !verified && <p role="status" className="mt-3 text-sm font-medium text-[#6F45B8]">Checking your code...</p>}
-                {isExpired && !verified && <p className="mt-3 text-xs text-red-600">This code has expired. Please request another.</p>}
+                {isExpired && !verified && !error && <p className="mt-3 text-center text-xs text-red-600">This code is no longer usable. Request another when available.</p>}
                 <div className="mt-6 flex items-center gap-3"><div className="h-px flex-1 bg-[#EBE4F0]" /><span className="text-xs text-[#7A6E88]">Didn&apos;t receive the code?</span><div className="h-px flex-1 bg-[#EBE4F0]" /></div>
-                <button type="button" disabled={loading || verified || !isExpired} onClick={onResend} aria-label="Resend verification code" className="mx-auto mt-3 inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-bold text-[#6F35C5] transition hover:bg-[#F5EFFF] disabled:cursor-not-allowed disabled:text-[#B9AFCA] disabled:hover:bg-transparent"><RefreshCw className={loading && !verified ? "h-4 w-4 animate-spin" : "h-4 w-4"} />Resend</button>
+                <button type="button" disabled={loading || verified || resendTimer > 0} onClick={onResend} aria-label="Resend verification code" className="mx-auto mt-3 inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-bold text-[#6F35C5] transition hover:bg-[#F5EFFF] disabled:cursor-not-allowed disabled:text-[#B9AFCA] disabled:hover:bg-transparent"><RefreshCw className={loading && !verified ? "h-4 w-4 animate-spin" : "h-4 w-4"} />Resend</button>
                 <div className="mt-5 flex items-center justify-center gap-2 rounded-xl bg-[#FAF8FC] px-4 py-3 text-xs text-[#7A6E88]"><ShieldCheck className="h-4 w-4 shrink-0 text-[#6F45B8]" /><span>For your security, never share this code with anyone.</span></div>
                 <style jsx>{`
                     .snb-otp-filled { box-shadow: 0 0 0 2px rgba(201,149,26,.12), 0 0 12px rgba(201,149,26,.14); animation: snbOtpPop .22s ease-out; }
-                    .snb-otp-confirmed { box-shadow: 0 0 15px rgba(70,163,106,.26); }
-                    .snb-otp-confirmed-label { animation: snbOtpPop .5s ease-out both; }
+                    .snb-otp-confirmed { box-shadow: 0 0 15px rgba(70,163,106,.26); animation: snbOtpPop .65s ease-out both; }
+                    .snb-otp-confirmed-label { animation: snbOtpPop .8s ease-out .2s both; }
+                    .snb-otp-success-icon { animation: snbOtpPop .8s cubic-bezier(.2,.8,.2,1) both; }
                     @keyframes snbOtpPop { from { transform: scale(.9); opacity: .55; } to { transform: scale(1); opacity: 1; } }
-                    @media (prefers-reduced-motion: reduce) { .snb-otp-filled, .snb-otp-confirmed-label { animation: none; } }
+                    @media (prefers-reduced-motion: reduce) { .snb-otp-filled, .snb-otp-confirmed, .snb-otp-confirmed-label, .snb-otp-success-icon { animation: none; } }
                 `}</style>
             </div>
         </div>
@@ -2190,6 +2323,7 @@ function TextInput({
                        icon,
                        disabled = false,
                        helperText,
+                       errorMessage,
                    }: {
     label: string;
     placeholder: string;
@@ -2199,6 +2333,7 @@ function TextInput({
     icon?: React.ReactNode;
     disabled?: boolean;
     helperText?: string;
+    errorMessage?: React.ReactNode;
 }) {
     const [isPasswordVisible, setIsPasswordVisible] = useState(false);
 
@@ -2255,6 +2390,7 @@ function TextInput({
                 )}
             </div>
             {helperText && <p className="mt-1.5 text-xs text-[#7A6E88]">{helperText}</p>}
+            {errorMessage}
         </div>
     );
 }

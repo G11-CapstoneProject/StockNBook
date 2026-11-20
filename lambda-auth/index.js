@@ -757,6 +757,22 @@ function securityError(statusCode, message, code, retryAfter) {
     if (retryAfter) error.retry_after_seconds = retryAfter;
     return error;
 }
+// Keep this release in sync with components/legal/PolicyDialog.tsx.
+// Each role has its own version identifier; draft records are not final legal acceptance.
+const POLICY_RELEASE = "1.0-draft";
+function requirePolicyAcceptance(body, role, branchId) {
+    const version = `${POLICY_RELEASE}-${role}`;
+    if (body.terms_reviewed !== true || body.privacy_reviewed !== true || body.policies_accepted !== true) {
+        throw securityError(400, "Review both documents and agree to the Terms of Service and acknowledge the Privacy Policy before continuing.", "POLICY_ACCEPTANCE_REQUIRED");
+    }
+    if (body.terms_version !== version || body.privacy_version !== version) {
+        throw securityError(400, "The policies have changed. Reopen the form and review the current documents.", "POLICY_VERSION_MISMATCH");
+    }
+    if (role !== "owner" && (branchId == null || body.policy_branch_id == null || String(body.policy_branch_id) !== String(branchId))) {
+        throw securityError(400, "Your branch assignment has changed. Reopen the invitation and review the policies again.", "POLICY_BRANCH_MISMATCH");
+    }
+    return version;
+}
 function passwordPolicy(password) {
     return typeof password === "string" && Array.from(password).length >= 8 &&
         /[A-Z]/.test(password) && /[a-z]/.test(password) && /[0-9]/.test(password) &&
@@ -923,18 +939,18 @@ async function recoveryAction(connection, action, body, headers) {
     const respond = (statusCode, payload) => ({ statusCode, headers, body: JSON.stringify(payload) });
     const email = String(body.email || "").trim().toLowerCase();
     if (action === "request_password_reset") {
-        const generic = { message: "If your email is registered, a verification code will be sent.", expires_in: 300, resend_in: 60 };
-        if (!/^\S+@\S+\.\S+$/.test(email) || email.length > 255) return respond(200, generic);
+        if (!/^\S+@\S+\.\S+$/.test(email) || email.length > 255)
+            throw securityError(400, "Enter a valid email address.", "RECOVERY_EMAIL_INVALID");
         await authLock(connection, `account:${email}`);
         const [rows] = await connection.execute("SELECT id, email, store_id FROM users WHERE email = ? AND status = 'active' AND email_verified_at IS NOT NULL AND password_hash IS NOT NULL LIMIT 1", [email]);
         // Platform administrators use a controlled recovery procedure, not email-only reset.
-        if (!rows.length) return respond(200, generic);
+        if (!rows.length) throw securityError(404, "No account found for password recovery. Check your email or contact your administrator.", "RECOVERY_ACCOUNT_NOT_FOUND");
         const user = rows[0];
         // Send only to the canonical, already verified email stored on the account.
         // MySQL's case/accent-insensitive comparison can match a differently spelled input.
         const verifiedEmail = String(user.email).trim();
         const scope = otpScope("password_reset", verifiedEmail);
-        try { await guardOtpSend(connection, scope); } catch (err) { if (err.statusCode === 429) return respond(200, generic); throw err; }
+        await guardOtpSend(connection, scope);
         const otp = generateOtp();
         const challenge = crypto.randomBytes(16).toString("hex");
         await connection.beginTransaction();
@@ -951,12 +967,19 @@ async function recoveryAction(connection, action, body, headers) {
         } catch {
             await connection.execute("UPDATE otp_codes SET invalidated_at = UTC_TIMESTAMP(), used_at = UTC_TIMESTAMP() WHERE challenge_id = ?", [challenge]);
             securityEvent("password_reset_delivery_failed", { account_id: String(user.id) });
+            return respond(503, { error: "Unable to send a verification code. Please try again later.", code: "RECOVERY_OTP_DELIVERY_FAILED", retry_after_seconds: 60 });
         }
-        return respond(200, generic);
+        return respond(200, { message: "Verification code sent.", otp_sent: true, expires_in: 300, resend_in: 60 });
     }
     if (action === "verify_password_reset_otp") {
         await authLock(connection, `account:${email}`);
-        const scope = otpScope("password_reset", email);
+        const [rows] = await connection.execute("SELECT id, email FROM users WHERE email = ? AND status = 'active' AND email_verified_at IS NOT NULL AND password_hash IS NOT NULL LIMIT 1", [email]);
+        if (!rows.length) throw securityError(400, "Invalid or expired verification code. Request a new code.", "OTP_INVALID");
+        const user = rows[0];
+        const scope = otpScope("password_reset", user.email);
+        // Verification must belong to the same eligible account, not just an email string.
+        scope.where += " AND user_id = ?";
+        scope.params.push(user.id);
         const row = await checkOtp(connection, scope, String(body.otp || ""), false);
         const token = crypto.randomBytes(32).toString("hex");
         await connection.execute(`UPDATE otp_codes SET used_at = UTC_TIMESTAMP(), verified_at = UTC_TIMESTAMP(), reset_token_hash = ?, reset_expires_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL 10 MINUTE) WHERE id = ?`, [resetTokenHash(token), row.id]);
@@ -4051,6 +4074,7 @@ module.exports.handler = async (event) => {
 
         // SEND SIGNUP OTP
         if (action === "send_signup_otp") {
+            requirePolicyAcceptance(body, "owner");
 
             const ownerName = String(
                 body.owner_name ?? body.ownerName ?? ""
@@ -4178,6 +4202,7 @@ module.exports.handler = async (event) => {
 
         // VERIFY SIGNUP OTP AND CREATE OWNER ACCOUNT
         if (action === "verify_signup_otp") {
+            const policyVersion = requirePolicyAcceptance(body, "owner");
 
             const otp = String(body.otp ?? "").trim();
             const otpEmail = String(body.email ?? "").trim().toLowerCase();
@@ -4290,9 +4315,10 @@ module.exports.handler = async (event) => {
                 );
                 const [ownerResult] = await connection.execute(
                     `INSERT INTO users
-                     (store_id, role, full_name, email, password_hash, phone, status, email_verified_at)
-                     VALUES (?, 'owner', ?, ?, ?, ?, 'active', UTC_TIMESTAMP())`,
-                    [result.insertId, ownerName, emailAddress, hashed, phoneNumber]
+                     (store_id, role, full_name, email, password_hash, phone, status, email_verified_at,
+                      terms_version, terms_accepted_at, privacy_version, privacy_acknowledged_at)
+                     VALUES (?, 'owner', ?, ?, ?, ?, 'active', UTC_TIMESTAMP(), ?, UTC_TIMESTAMP(), ?, UTC_TIMESTAMP())`,
+                    [result.insertId, ownerName, emailAddress, hashed, phoneNumber, policyVersion, policyVersion]
                 );
                 ownerUserId = ownerResult.insertId;
                 // Every business starts with an active free Starter subscription
@@ -5055,6 +5081,8 @@ module.exports.handler = async (event) => {
                     manager.manager_email
                 );
 
+                const policyVersion = requirePolicyAcceptance(body, "manager", manager.branch_id);
+
                 const passwordValid = passwordPolicy(accountPassword);
 
                 if (!passwordValid) {
@@ -5085,9 +5113,13 @@ module.exports.handler = async (event) => {
                          permissions = ?,
                          status = 'active',
                          email_verified_at = UTC_TIMESTAMP(),
+                         terms_version = ?, terms_accepted_at = UTC_TIMESTAMP(),
+                         privacy_version = ?, privacy_acknowledged_at = UTC_TIMESTAMP(),
                          invite_token_hash = NULL
                      WHERE id = ?
                        AND role = 'manager'
+                       AND branch_id = ?
+                       AND store_id = ?
                        AND invite_token_hash = SHA2(?, 256)
                        AND email = ?
                        AND status = 'pending'`,
@@ -5096,7 +5128,11 @@ module.exports.handler = async (event) => {
                         phoneNumber,
                         hashedPassword,
                         JSON.stringify(normalizeManagerRolePermissions()),
+                        policyVersion,
+                        policyVersion,
                         manager.manager_id,
+                        manager.branch_id,
+                        manager.store_id,
                         inviteToken,
                         manager.manager_email,
                     ]
@@ -5161,6 +5197,7 @@ module.exports.handler = async (event) => {
                     statusCode: inviteError?.statusCode || 500,
                     headers,
                     body: JSON.stringify({
+                        ...(String(inviteError?.code || "").startsWith("POLICY_") ? { code: inviteError.code } : {}),
                         error:
                             inviteError?.message ||
                             "Unable to activate the manager account.",
@@ -6004,6 +6041,8 @@ module.exports.handler = async (event) => {
                     staff.staff_email
                 );
 
+                const policyVersion = requirePolicyAcceptance(body, "staff", staff.branch_id);
+
                 const passwordValid = passwordPolicy(accountPassword);
 
                 if (!passwordValid) {
@@ -6060,9 +6099,13 @@ module.exports.handler = async (event) => {
                          password_hash = ?,
                          status = 'active',
                          email_verified_at = UTC_TIMESTAMP(),
+                         terms_version = ?, terms_accepted_at = UTC_TIMESTAMP(),
+                         privacy_version = ?, privacy_acknowledged_at = UTC_TIMESTAMP(),
                          invite_token_hash = NULL
                      WHERE id = ?
                        AND role = 'staff'
+                       AND branch_id = ?
+                       AND store_id = ?
                        AND invite_token_hash = SHA2(?, 256)
                        AND email = ?
                        AND status = 'pending'`,
@@ -6070,7 +6113,11 @@ module.exports.handler = async (event) => {
                         finalStaffName,
                         phoneNumber,
                         hashedPassword,
+                        policyVersion,
+                        policyVersion,
                         staff.staff_id,
+                        staff.branch_id,
+                        staff.store_id,
                         inviteToken,
                         staff.staff_email,
                     ]
@@ -6138,6 +6185,7 @@ module.exports.handler = async (event) => {
                     statusCode: inviteError?.statusCode || 500,
                     headers,
                     body: JSON.stringify({
+                        ...(String(inviteError?.code || "").startsWith("POLICY_") ? { code: inviteError.code } : {}),
                         error:
                             inviteError?.message ||
                             "Unable to activate the staff account.",

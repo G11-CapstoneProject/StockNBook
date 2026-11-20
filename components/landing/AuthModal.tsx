@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import { Lora } from "next/font/google";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
     ArrowRight,
@@ -58,7 +58,7 @@ const lora = Lora({
 
 type AuthMode = "login" | "signup";
 
-type PendingSignup = {
+type PendingSignup = PolicyAcceptance & {
     owner_name: string;
     store_name: string;
     phone: string;
@@ -376,6 +376,9 @@ export default function AuthModal({
         setOtpVerificationError("");
         setOtpDialogOpen(false);
         setLegalDocument(null);
+        setHasViewedTerms(false);
+        setHasViewedPrivacy(false);
+        setHasAcceptedPolicies(false);
     };
 
     const handleSubmit = async (event: React.FormEvent) => {
@@ -417,7 +420,7 @@ export default function AuthModal({
 
             if (!hasAcceptedPolicies) {
                 alert(
-                    "Please agree to the Terms of Service and Privacy Policy."
+                    "Please agree to the Terms of Service and acknowledge the Privacy Policy."
                 );
                 return;
             }
@@ -430,6 +433,7 @@ export default function AuthModal({
 
         if (mode === "signup") {
             const signupBody: PendingSignup = {
+                ...policyAcceptance("owner", hasViewedTerms, hasViewedPrivacy, hasAcceptedPolicies),
                 owner_name: ownerName.trim(),
                 store_name: storeName.trim(),
                 phone: normalizeMobileNumber(phone),
@@ -544,21 +548,33 @@ export default function AuthModal({
         setRecoveryStage("none"); setRecoveryEmail(""); setRecoveryToken("");
         setNewPassword(""); setNewConfirmPassword(""); setRecoveryError("");
         setOtpDialogOpen(false); setOtp(""); setOtpBlocked(false); setOtpVerificationError("");
+        setOtpResendTimer(0); setOtpTimer(0);
     };
     const startRecovery = () => {
         setRecoveryEmail(email.trim()); setPassword(""); setConfirmPassword(""); setLoginError(""); setLoginLockNotice(null);
         setRecoveryToken(""); setNewPassword(""); setNewConfirmPassword(""); setRecoveryError(""); setRecoveryStage("email");
+        setOtpResendTimer(0); setOtpTimer(0);
     };
     const requestRecovery = async (event?: React.FormEvent) => {
         event?.preventDefault();
-        if (otpLoading || loading || (recoveryStage === "otp" && otpResendTimer > 0)) return;
+        if (otpLoading || loading || otpResendTimer > 0) return;
         if (!/^\S+@\S+\.\S+$/.test(recoveryEmail.trim())) { setRecoveryError("Enter a valid email address."); return; }
         setLoading(true); setOtpLoading(true); setRecoveryError(""); setOtpVerificationError("");
         try {
             const response = await fetch("/api/auth", { method: "POST", headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ action: "request_password_reset", email: recoveryEmail }) });
             const data = await response.json();
-            if (!response.ok) throw new Error(data.error || "Unable to request a verification code.");
+            if (!response.ok || data.otp_sent !== true) {
+                const retryAfter = Number(data.retry_after_seconds);
+                if (Number.isFinite(retryAfter) && retryAfter > 0) setOtpResendTimer(Math.ceil(retryAfter));
+                if (data.code === "RECOVERY_ACCOUNT_NOT_FOUND") {
+                    setRecoveryStage("email"); setOtpDialogOpen(false); setOtp(""); setOtpBlocked(false); setOtpTimer(0);
+                } else if (data.code === "RECOVERY_OTP_DELIVERY_FAILED" && recoveryStage === "otp") {
+                    // A failed replacement has already invalidated the previous code.
+                    setOtp(""); setOtpBlocked(true); setOtpTimer(0);
+                }
+                throw new Error(data.error || "Unable to request a verification code. Please try again.");
+            }
             setRecoveryStage("otp"); setOtp(""); setOtpBlocked(false); setOtpVerificationSuccess(false);
             setOtpTimer(Number(data.expires_in || 300)); setOtpResendTimer(Number(data.resend_in || 60)); setOtpDialogOpen(true);
         } catch (err) {
@@ -1148,9 +1164,9 @@ export default function AuthModal({
                             <div className="snb-auth-form-stage mt-8 space-y-5">
                                 {(recoveryStage === "email" || recoveryStage === "otp") && (
                                     <form className="space-y-5" onSubmit={requestRecovery}>
-                                        <TextInput label="Email address" placeholder="you@yourbusiness.com" value={recoveryEmail} onChange={value => { setRecoveryEmail(value); if (recoveryStage === "otp") { setRecoveryStage("email"); setOtpDialogOpen(false); setOtp(""); setOtpBlocked(false); } }} icon={<Mail className="h-5 w-5 text-[#7A6E88]" />} />
-                                        <p className="text-sm text-[#7A6E88]">If your email is registered, a verification code will be sent. Platform Administrators should use the controlled recovery procedure.</p>
-                                        <button type="submit" disabled={loading || (recoveryStage === "otp" && otpResendTimer > 0)} className="w-full rounded-lg bg-[#2D1B4E] px-5 py-3 font-medium text-white disabled:opacity-60">{loading ? "Please wait..." : "Send verification code"}</button>
+                                        <TextInput label="Email address" placeholder="you@yourbusiness.com" value={recoveryEmail} disabled={loading || otpLoading} onChange={value => { setRecoveryEmail(value); setRecoveryError(""); setOtpVerificationError(""); setOtpResendTimer(0); if (recoveryStage === "otp") { setRecoveryStage("email"); setOtpDialogOpen(false); setOtp(""); setOtpBlocked(false); setOtpTimer(0); } }} icon={<Mail className="h-5 w-5 text-[#7A6E88]" />} errorMessage={recoveryError && <p role="alert" className="mt-1.5 text-sm text-red-600">{recoveryError}</p>} />
+                                        <p className="text-sm text-[#7A6E88]">Enter your registered email address to receive a verification code. Platform Administrators should contact their administrator for recovery.</p>
+                                        <button type="submit" disabled={loading || otpLoading || otpResendTimer > 0} className="w-full rounded-lg bg-[#2D1B4E] px-5 py-3 font-medium text-white disabled:opacity-60">{loading ? "Please wait..." : otpResendTimer > 0 ? `Try again in ${otpResendTimer}s` : "Send verification code"}</button>
                                         {recoveryStage === "otp" && <button type="button" onClick={() => setOtpDialogOpen(true)} className="w-full text-sm font-medium text-[#2D1B4E]">Enter verification code</button>}
                                     </form>
                                 )}
@@ -1162,7 +1178,7 @@ export default function AuthModal({
                                         <button disabled={loading} type="submit" className="w-full rounded-lg bg-[#2D1B4E] px-5 py-3 font-medium text-white disabled:opacity-60">{loading ? "Please wait..." : "Reset password"}</button>
                                     </form>
                                 )}
-                                {recoveryError && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-3 py-3 text-sm text-red-700">{recoveryError}</p>}
+                                {recoveryStage === "password" && recoveryError && <p role="alert" className="text-sm text-red-600">{recoveryError}</p>}
                                 {recoveryStage === "success" && <div role="status" className="flex items-center gap-3 rounded-xl bg-green-50 px-4 py-3 text-green-800"><CheckCircle2 className="h-6 w-6" /> Your password has been updated.</div>}
                                 <button type="button" disabled={loading || otpLoading} onClick={resetRecovery} className="w-full rounded-lg border border-[#DED3EE] px-5 py-3 font-medium text-[#2D1B4E] disabled:opacity-60">Back to login</button>
                             </div>
@@ -1270,6 +1286,7 @@ export default function AuthModal({
                                         disabled={
                                             !hasViewedTerms ||
                                             !hasViewedPrivacy ||
+                                            loading ||
                                             accountVerified
                                         }
                                         onChange={(event) =>
@@ -1277,7 +1294,7 @@ export default function AuthModal({
                                                 event.target.checked
                                             )
                                         }
-                                        aria-label="Agree to the Terms of Service and Privacy Policy"
+                                        aria-label="Agree to the Terms of Service and acknowledge the Privacy Policy"
                                         className="mt-1 h-4 w-4 shrink-0 accent-[#2D1B4E] disabled:cursor-not-allowed"
                                     />
 
@@ -1297,25 +1314,25 @@ export default function AuthModal({
                                                 setLegalDocument("terms")
                                             }
                                             className={[
-                                                "text-[#2D1B4E] underline underline-offset-2 transition hover:text-[#5B35A5]",
+                                                "underline underline-offset-2 transition hover:text-[#5B35A5] focus-visible:outline focus-visible:outline-2",
                                                 hasViewedTerms
-                                                    ? "font-normal"
-                                                    : "font-semibold",
+                                                    ? "text-[#8060AF] font-medium"
+                                                    : "text-[#2D1B4E] font-semibold",
                                             ].join(" ")}
                                         >
                                             Terms of Service
                                         </button>{" "}
-                                        and{" "}
+                                        and acknowledge the{" "}
                                         <button
                                             type="button"
                                             onClick={() =>
                                                 setLegalDocument("privacy")
                                             }
                                             className={[
-                                                "text-[#2D1B4E] underline underline-offset-2 transition hover:text-[#5B35A5]",
+                                                "underline underline-offset-2 transition hover:text-[#5B35A5] focus-visible:outline focus-visible:outline-2",
                                                 hasViewedPrivacy
-                                                    ? "font-normal"
-                                                    : "font-semibold",
+                                                    ? "text-[#8060AF] font-medium"
+                                                    : "text-[#2D1B4E] font-semibold",
                                             ].join(" ")}
                                         >
                                             Privacy Policy
@@ -1325,7 +1342,7 @@ export default function AuthModal({
 
                                 <button
                                     type="submit"
-                                    disabled={loading}
+                                    disabled={loading || !hasViewedTerms || !hasViewedPrivacy || !hasAcceptedPolicies}
                                     className="snb-auth-sticky-primary flex w-full items-center justify-center gap-2 rounded-lg bg-[#2D1B4E] px-5 py-3 font-medium text-white transition hover:bg-[#3D2560] disabled:opacity-60"
                                 >
                                     <span className="inline-flex items-center gap-2">
@@ -1863,138 +1880,28 @@ export default function AuthModal({
                                 </button>
                             </p>
                         )}
+                        {mode === "login" && !setupComplete && (
+                            <div className="mt-4 flex flex-wrap items-center justify-center gap-3 text-xs text-[#2D1B4E]">
+                                <button type="button" onClick={() => setLegalDocument("terms")} className="underline underline-offset-2 hover:text-[#5B35A5]">Terms of Service</button>
+                                <span aria-hidden="true" className="text-[#82768F]">·</span>
+                                <button type="button" onClick={() => setLegalDocument("privacy")} className="underline underline-offset-2 hover:text-[#5B35A5]">Privacy Policy</button>
+                            </div>
+                        )}
                     </div>
                 </div>
             </div>
 
             {legalDocument && (
-                <div
-                    className="fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto bg-[#160C27]/65 px-3 py-3 backdrop-blur-sm sm:px-4"
-                    onMouseDown={() => setLegalDocument(null)}
-                >
-                    <div
-                        role="dialog"
-                        aria-modal="true"
-                        aria-labelledby="legal-document-title"
-                        className="w-full max-w-2xl overflow-hidden rounded-3xl border border-white/60 bg-white shadow-2xl"
-                        onMouseDown={(event) => event.stopPropagation()}
-                    >
-                        <div className="flex items-start justify-between gap-4 border-b border-[#EBE4F0] px-6 py-5">
-                            <div>
-                                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#C9951A]">
-                                    StockNBook
-                                </p>
-
-                                <h2
-                                    id="legal-document-title"
-                                    className="mt-2 text-2xl font-semibold tracking-[-0.025em] text-[#1A1220]"
-                                >
-                                    {legalDocument === "terms"
-                                        ? "Terms of Service"
-                                        : "Privacy Policy"}
-                                </h2>
-                            </div>
-
-                            <button
-                                type="button"
-                                onClick={() => setLegalDocument(null)}
-                                aria-label="Close legal document"
-                                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[#7A6E88] transition hover:bg-[#F3EFF8] hover:text-[#2D1B4E]"
-                            >
-                                <X className="h-5 w-5" />
-                            </button>
-                        </div>
-
-                        <div className="max-h-[55vh] overflow-y-auto px-6 py-5 text-sm leading-7 text-[#6F6577]">
-                            {legalDocument === "terms" ? (
-                                <div className="space-y-4">
-                                    <p>
-                                        By creating and using a StockNBook account,
-                                        you agree to provide accurate registration
-                                        and business information and to keep your
-                                        login credentials secure.
-                                    </p>
-
-                                    <p>
-                                        You are responsible for the bookings,
-                                        inventory, sales, scheduled orders, customer
-                                        details, staff permissions, and other
-                                        records entered through your account.
-                                    </p>
-
-                                    <p>
-                                        StockNBook is a business-management and
-                                        record-keeping platform. It does not replace
-                                        professional legal, tax, accounting, or
-                                        regulatory advice.
-                                    </p>
-
-                                    <p>
-                                        Access may be limited or suspended when the
-                                        platform is misused, security is threatened,
-                                        or applicable rules are violated.
-                                    </p>
-                                </div>
-                            ) : (
-                                <div className="space-y-4">
-                                    <p>
-                                        StockNBook processes account and business
-                                        information needed to provide login,
-                                        bookings, inventory, sales, scheduled
-                                        orders, staff access, reports, and
-                                        subscription services.
-                                    </p>
-
-                                    <p>
-                                        Information should only be accessed by
-                                        authorized account owners, managers, and
-                                        staff members according to their assigned
-                                        permissions.
-                                    </p>
-
-                                    <p>
-                                        Users are responsible for entering customer
-                                        and business information only when they have
-                                        an appropriate reason and permission to do
-                                        so.
-                                    </p>
-
-                                    <p>
-                                        Account and business information is used to
-                                        operate, secure, maintain, and improve the
-                                        StockNBook service.
-                                    </p>
-                                </div>
-                            )}
-                        </div>
-
-                        <div className="flex flex-col-reverse gap-3 border-t border-[#EBE4F0] px-6 py-5 sm:flex-row sm:justify-end">
-                            <button
-                                type="button"
-                                onClick={() => setLegalDocument(null)}
-                                className="h-11 rounded-xl border border-[#D4CBDD] bg-white px-5 text-sm font-semibold text-[#2D1B4E] transition hover:bg-[#F8F5FF]"
-                            >
-                                Close
-                            </button>
-
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    if (legalDocument === "terms") {
-                                        setHasViewedTerms(true);
-                                    } else {
-                                        setHasViewedPrivacy(true);
-                                    }
-
-                                    setLegalDocument(null);
-                                }}
-                                className="h-11 rounded-xl bg-[#2D1B4E] px-5 text-sm font-semibold text-white transition hover:bg-[#3D2560]"
-                            >
-                                I have read this document
-                            </button>
-                        </div>
-                    </div>
-                </div>
+                <PolicyDialog
+                    document={legalDocument}
+                    role={mode === "signup" ? "owner" : undefined}
+                    onClose={() => setLegalDocument(null)}
+                    onReviewed={mode === "signup" ? () => {
+                        if (legalDocument === "terms") setHasViewedTerms(true);
+                        else setHasViewedPrivacy(true);
+                        setLegalDocument(null);
+                    } : undefined}
+                />
             )}
 
             {otpDialogOpen && (
@@ -2245,7 +2152,7 @@ function SignupOtpDialog({
                     <Sparkles className="absolute -right-1 top-1 h-4 w-4 text-[#C9951A]" /><Sparkles className="absolute -left-1 bottom-3 h-3.5 w-3.5 text-[#C9951A]" />
                 </div>
                 <h2 id="signup-otp-title" className="mt-4 font-serif text-[32px] font-semibold leading-tight text-[#2D1B4E]">{verified ? "Verified Successfully" : "Verify your email"}</h2>
-                <p className="mt-2 text-sm leading-6 text-[#7A6E88]">{verified ? "Your email has been verified." : recovery ? "If the email is registered, enter the 6-digit code sent to" : "Enter the 6-digit code sent to"}</p>
+                <p className="mt-2 text-sm leading-6 text-[#7A6E88]">{verified ? "Your email has been verified." : recovery ? "Enter the 6-digit password reset code sent to" : "Enter the 6-digit code sent to"}</p>
                 {!verified && <p className="mt-0.5 break-all text-sm font-bold text-[#2D1B4E]">{email}</p>}
                 <div className="mt-6 flex justify-center gap-2 sm:gap-3">
                     {otpDigits.map((digit, index) => (
@@ -2401,4 +2308,261 @@ function TextInput({
             {errorMessage}
         </div>
     );
+}
+
+// Shared legal policies and dialog (kept in this existing source file).
+export type PolicyKind = "terms" | "privacy";
+export type PolicyRole = "owner" | "manager" | "staff";
+// Draft release for local acceptance testing. Freeze this text and set a new
+// version (also in lambda-auth/index.js) after formal approval for publication.
+export const POLICY_RELEASE = "1.0-draft";
+export type PolicyAcceptance = {
+    terms_version: string;
+    privacy_version: string;
+    terms_reviewed: boolean;
+    privacy_reviewed: boolean;
+    policies_accepted: boolean;
+};
+export function policyAcceptance(role: PolicyRole, terms: boolean, privacy: boolean, accepted: boolean): PolicyAcceptance {
+    return { terms_version: `${POLICY_RELEASE}-${role}`, privacy_version: `${POLICY_RELEASE}-${role}`,
+        terms_reviewed: terms, privacy_reviewed: privacy, policies_accepted: accepted };
+}
+export function isPolicyRole(value: unknown): value is PolicyRole {
+    return value === "owner" || value === "manager" || value === "staff";
+}
+const roleLabels: Record<PolicyRole, string> = { owner: "Business Owner", manager: "Branch Manager", staff: "Staff" };
+type Block = string | { heading: string } | { bullets: string[] };
+type Section = { title: string; blocks: Block[] };
+const section = (title: string, ...blocks: Block[]): Section => ({ title, blocks });
+const bullets = (...items: string[]): Block => ({ bullets: items });
+const heading = (title: string): Block => ({ heading: title });
+
+const generalTerms = [
+    section("Introduction and Acceptance of Terms",
+        "These Terms of Service govern access to and use of StockNBook, a web-based business management platform developed to support party supplies, rental services, and event-related businesses. The platform integrates operational recordkeeping and business administration within the authorized account and subscription scope.",
+        "StockNBook provides booking and reservation management, consumable and rental inventory, packages, point-of-sale transactions, workforce account administration, subscription services, analytics, and demand forecasting. Availability of these functions depends on the account role, business and branch assignments, and effective subscription entitlements.",
+        "By expressly accepting these Terms when creating or activating an account, the user agrees to the conditions governing authorized use of the platform. Review of the Privacy Policy separately acknowledges the information provided about personal data processing."),
+    section("Definitions and Account Eligibility",
+        "A business or store is the registered business account; a branch is an operational location associated with that business. A Business Owner administers the business, a Branch Manager oversees authorized branch operations, and a Staff member performs individually authorized duties. Platform Administrators perform separate platform-level administrative functions.",
+        "Users must provide accurate, complete, and current account information. Owners must have authority to register and administer the business represented by their account. Managers and Staff must be invited by an authorized business representative. Impersonation, fraudulent registration, and creation of accounts for unauthorized purposes are prohibited."),
+    section("Account Security and Authentication",
+        "Each user is responsible for protecting their account credentials and exercising reasonable care when accessing business records, particularly on shared computers or networks. StockNBook uses account verification, temporary restrictions after unsuccessful authentication, verification-code controls, and password recovery mechanisms to help protect accounts.",
+        "Users must observe the following responsibilities:",
+        bullets("Keep passwords, one-time verification codes, and invitation links confidential.", "Use only their individually authorized accounts and log out when finished using shared devices.", "Keep account details accurate and use the authorized recovery process when credentials are lost or compromised.", "Promptly report suspected unauthorized access, suspicious activity, or unauthorized transactions to the appropriate business representative or support contact."),
+        "Security restrictions are intended to protect the integrity of accounts and records. They do not grant any user authority to bypass authentication or to access another person's account."),
+    section("Role-Based Access and Authorization",
+        "Access is governed by role, associated business, branch assignment, account status, authorized permissions, and subscription entitlements. Owners have authorized business-wide access; Managers have applicable Manager capabilities within their assigned branch; Staff have the permissions granted for their duties.",
+        "Users must not attempt to access another business or unauthorized branch, elevate privileges, alter authorization controls, or perform actions reserved for other roles. Access may be adjusted or revoked by authorized representatives when responsibilities or account status change. Subscription entitlements remain a separate restriction from role-based authorization."),
+    section("Acceptable Use of the Platform",
+        "StockNBook must be used for lawful and legitimate business purposes. Users must not knowingly compromise service availability, record integrity, or the confidentiality of information belonging to others.",
+        "Prohibited conduct includes:", bullets("Submitting fraudulent transactions, false subscription receipts, or misleading account information.", "Extracting, copying, transferring, or disclosing records without authorization.", "Introducing malicious software, interfering with infrastructure, or deliberately exploiting vulnerabilities.", "Circumventing verification, account restrictions, tenant isolation, or other security controls."),
+        "Suspected security weaknesses should be reported through an authorized support channel rather than exploited against live records."),
+    section("Accuracy and Integrity of Business Records",
+        "Users must exercise reasonable care when creating and updating bookings, inventory quantities, sales, payment information, customer records, and other authorized operational information. Records should reflect actual business activities and applicable approval or settlement procedures.",
+        "Errors, shortages, damaged or missing equipment, payment discrepancies, and suspected unauthorized modifications should be reported to the responsible supervisor or Owner. Historical records must not be improperly altered, fabricated, or deleted to conceal losses, mistakes, or misconduct."),
+    section("Confidentiality and Data Protection",
+        "Personal, customer, employee, financial, and other confidential business information may be used only for legitimate authorized purposes. Users must protect information against unnecessary access, disclosure, copying, or transfer and observe applicable privacy obligations, including Republic Act No. 10173, the Data Privacy Act of 2012.",
+        "The registered business remains responsible for determining its authority to collect and use information about its customers and workforce. StockNBook's processing practices are explained in the accompanying Privacy Policy; accepting these Terms does not waive the rights of individuals whose information is processed."),
+    section("Business Data and Intellectual Property",
+        "As between the platform and the registered business, the business retains its applicable rights over lawfully submitted records and content. The business authorizes processing necessary to provide, support, maintain, and secure the service, subject to applicable service arrangements and data protection requirements.",
+        "StockNBook software, branding, application design, and proprietary components remain subject to the intellectual property rights of their lawful owners. Authorized access does not transfer ownership of the software or permit unauthorized redistribution. This provision does not affect statutory rights over personal information."),
+    section("Platform Availability and Maintenance",
+        "Maintenance, security updates, technical improvements, infrastructure failures, and network interruptions may temporarily affect platform availability. Reasonable care should be exercised in maintaining the service, but uninterrupted operation and complete freedom from errors cannot be guaranteed.",
+        "Businesses should maintain appropriate operational procedures, verify important records, and report service problems promptly. Availability limitations do not remove mandatory legal obligations or rights."),
+    section("Analytics and Forecasting Limitations",
+        "Reports, analytics, and forecasts are decision-support tools derived from available records and calculation methods. Their usefulness depends on record accuracy, reporting periods, and the amount and quality of historical information. Forecasts are estimates rather than guarantees of future demand, revenue, profitability, or other business outcomes.",
+        "Users should consider actual business conditions and exercise independent professional judgment. StockNBook does not replace legal, tax, accounting, financial, or regulatory advice."),
+    section("Account Suspension and Termination",
+        "Account access may be restricted, suspended, or terminated where reasonably necessary to respond to security risks, misuse, loss of business authorization, or applicable legal requirements. Such decisions remain subject to applicable law and relevant business arrangements.",
+        "Users whose employment, assignment, or authorization ends must discontinue unauthorized access. Account deactivation does not automatically authorize deletion of historical transactions or personal information required for lawful business, security, or recordkeeping purposes."),
+    section("Liability and User Responsibilities",
+        "Registered businesses remain responsible for their commercial activities, fulfillment of reservations, delivery and rental arrangements, physical inventory, customer dealings, and the accuracy of information entered by authorized users. StockNBook provides management and recordkeeping functionality; it does not itself fulfill the business's bookings or supply goods to its customers.",
+        "Any allocation or limitation of liability is subject to applicable law. Nothing in these Terms excludes obligations, remedies, or protections that cannot lawfully be excluded."),
+    section("Policy Updates and Electronic Acceptance",
+        "These Terms may be revised to reflect changes in functionality, commercial practices, security requirements, or applicable laws. Material changes should be communicated through appropriate channels, and renewed agreement obtained where required.",
+        "Account creation or activation records the applicable document version and acknowledgment time. Confirmation of document review is a statement by the user; it does not prove that every provision was actually read or understood. The applicable version and effective date are identified with the document."),
+    section("Governing Law and Contact Information",
+        "These Terms are subject to applicable laws of the Republic of the Philippines, without prejudice to mandatory protections or available remedies. Questions about account use, service conditions, or suspected misuse may be directed to the support contact shown on the StockNBook landing page: support@stocknbook.com.",
+        "The operator's legal identity, service address, and effective date must be confirmed before these draft Terms are formally published. The listed support address must also be confirmed as an operational contact."),
+];
+
+const roleTerms: Record<PolicyRole, Section[]> = {
+    owner: [
+        section("Business Registration and Administration", "The Business Owner represents that they have authority to register and administer the business. The Owner is responsible for keeping the business identity, contact details, branch records, and authorized account assignments accurate and for ensuring that the platform is used in accordance with applicable commercial and data protection requirements.", "The Owner is responsible for establishing appropriate business procedures and for reviewing records and decisions affecting the business as a whole."),
+        section("Subscription Plans and Payments", "The Owner is responsible for reviewing the fees, available features, resource limits, and billing conditions of the selected plan before submitting payment. Newly registered businesses begin on Starter; Growth and Scale entitlements become effective only after the required verification and approval process.", "A pending or rejected payment does not activate paid entitlements. Without an effective renewal, Growth or Scale reverts to Starter after its paid period ends, under the existing date-based expiration policy. The paid plan remains usable through its expiration date. When a downgrade takes effect, the corresponding plan limitations may restrict further resource creation or paid features without automatically deleting existing business records.", "The Owner must submit genuine payment information and retain appropriate records. The final cancellation, refund, renewal, and any grace-period conditions must be disclosed before paid subscriptions are offered."),
+        section("Branch and Manager Administration", "The Owner appoints authorized Managers, maintains valid branch assignments, and oversees the administration of Manager accounts and invitations. Managers receive standard role capabilities within their assigned branch, subject to account status and subscription limitations.", "When an assignment changes or ends, the Owner should promptly update or deactivate access through the authorized account-management process. The Owner must not obtain or share another user's private credentials."),
+        section("Business and Financial Records", "The Owner oversees the accuracy and appropriate use of booking, inventory, sales, payment, and other operational records across the registered business. Reports must be independently reviewed before they are used for financial reporting, taxation, or formal accounting purposes.", "The Owner should establish processes for investigating errors and discrepancies, correcting records through authorized procedures, and retaining business records for applicable contractual or legal requirements."),
+        section("Customer and Employee Information", "The Owner must ensure that personal information supplied by the business is collected and processed lawfully, with appropriate notice, authorized access, and appropriate safeguards. Where the business determines the purposes and methods of processing, it is responsible for the obligations applicable to a personal information controller.", "The Owner should authorize access only as necessary for legitimate operational responsibilities and arrange appropriate handling of requests from customers and employees."),
+        section("Workforce Access and Accountability", "The Owner must exercise reasonable oversight of Manager and Staff access, establish appropriate security awareness and confidentiality procedures, and address suspicious transactions or access promptly. Account restrictions and investigations must respect applicable law and must not be used to conceal business discrepancies.")
+    ],
+    manager: [
+        section("Authorized Branch Assignment", "The Manager is authorized to perform functions for the business and branch identified in the verified invitation and current account assignment. Standard Manager capabilities apply only within that scope and remain subject to account status and the business's subscription entitlements.", "The Manager must not access or administer unauthorized branches or claim privileges reserved for Owners or Platform Administrators. A change in assignment does not authorize continued access to the previous branch."),
+        section("Branch Operations and Management", "The Manager oversees authorized booking, inventory, rental, packages, sales, and other operational functions within the assigned branch. Reasonable care must be exercised when approving or preparing reservations, reviewing availability, recording transactions, and carrying out business procedures.", "The Manager should coordinate operational decisions with the Owner where required and report unresolved conflicts or discrepancies promptly."),
+        section("Staff Account Administration", "The Manager may invite and administer Staff within the assigned branch according to established business rules. Staff permissions must reflect their legitimate duties rather than convenience or blanket access.", "The Manager must keep assignments current, deactivate access when authorization ends, avoid requesting Staff passwords, and never grant permissions beyond the capabilities available to Staff."),
+        section("Transaction Accuracy and Operational Accountability", "The Manager must oversee the accurate recording of authorized transactions and review operational discrepancies within the assigned branch. Booking conflicts, stock shortages, damaged or missing items, and suspicious payment or transaction activity should be reported to the appropriate Owner.", "Records must not be deliberately manipulated to conceal losses, discrepancies, unauthorized transactions, or misconduct."),
+        section("Confidentiality and Information Handling", "The Manager may access customer, employee, sales, and inventory information only where necessary for authorized branch responsibilities. Such information must not be disclosed, exported, or transferred to unauthorized individuals or used for unrelated personal purposes.", "The Manager must respect the registered business's applicable privacy arrangements and promptly report suspected disclosure or security incidents."),
+        section("Termination of Assignment", "Manager access remains subject to business authorization, branch assignment, account status, subscription limitations, and reasonable platform security measures. When assignment ends or changes, the Manager must stop using information and operations no longer authorized.", "The Manager should cooperate with legitimate audits and security investigations, subject to confidentiality and applicable legal protections.")
+    ],
+    staff: [
+        section("Assigned Duties and Authorized Access", "Staff members may use StockNBook only for legitimate activities associated with their assigned business, branch, and individual module permissions. Authorization is established by the appropriate business representative and does not confer management or platform-level authority.", "Staff must not perform unauthorized operations, access restricted records, bypass permission checks, or modify their own role or access privileges."),
+        section("Booking, Inventory and Sales Responsibilities", "Staff must accurately record authorized booking preparation, release and return activities, inventory movements, point-of-sale transactions, and other assigned duties according to available system functions and established procedures.", "Items sold, restocked, released, returned, replaced, damaged, or missing must be recorded appropriately where the Staff member is authorized to do so. Staff must not fabricate transactions or conceal discrepancies."),
+        section("Account and Credential Protection", "Staff must use their own authorized account and keep passwords, verification codes, and invitations confidential. Shared accounts and use of another employee's credentials are prohibited.", "If unauthorized account activity is suspected, Staff must promptly notify the appropriate Manager or Owner and follow the authorized recovery or reporting process."),
+        section("Customer Information and Confidentiality", "Staff may encounter customer contact details, reservation information, and transaction records while performing their duties. Access to such information is limited to the legitimate purpose for which it was provided.", "Staff must not copy, disclose, distribute, or use information for personal purposes or provide it to unauthorized individuals. Any suspected disclosure must be reported."),
+        section("Operational Accuracy and Accountability", "Staff must exercise reasonable care when recording transaction details and maintaining business information. Errors, booking concerns, shortages, payment discrepancies, and irregularities should be reported to the authorized supervisor.", "Actions performed by Staff may be recorded for operational accountability, authorized review, and security. Such records must be handled consistently with the applicable Privacy Policy."),
+        section("End of Authorization", "Staff access may be restricted or deactivated when employment, branch assignment, duties, or business authorization changes or ends. Staff must discontinue unauthorized access and protect information obtained during their assignment.", "Deactivation does not automatically erase historical transactions or activity records required for legitimate business or legal purposes.")
+    ]
+};
+
+const generalPrivacy = [
+    section("Introduction and Scope", "This Privacy Policy explains how personal information is collected, processed, stored, disclosed, and retained in connection with StockNBook's business management services. It applies to account holders and relevant processing of information submitted through the platform.", "The policy is informed by the Data Privacy Act of 2012 (Republic Act No. 10173) and its implementing rules. Processing must observe transparency, legitimate purpose, and proportionality. Customers who use a public booking portal should also receive a notice appropriate to that interaction."),
+    section("Personal Information Controller and Processor", "The StockNBook operator determines certain platform-level processing, such as account administration, subscription verification, and security, and may act as a personal information controller for those activities. Registered businesses may act as controllers for customer, workforce, and operational information which they collect and administer; StockNBook may process that information on their behalf.", "These responsibilities depend on who actually determines the purposes and methods of processing. The operator's legal name, address, and designated privacy representative must be confirmed before publication, together with applicable processing arrangements."),
+    section("Categories of Personal Information Collected", "The information processed depends on the account role and functions used. Necessary information may be supplied during registration, invitations, recovery, subscription administration, or business operations. Categories include:",
+        bullets("Account identity and contact details: full name, email address, telephone number, user identifiers, and account status.", "Business and workforce association: business details, employee identifiers, branch assignments, roles, and permissions.", "Authentication and security information: protected password representations, verification and recovery records, authentication restrictions, and security events.", "Operational information: customer contact and booking details, inventory and sales records containing personal information, and authorized activity records.", "Subscription information: plan selections, payment references, amounts, submitted receipts, and approval records where applicable.", "Agreement information: document versions and acceptance or acknowledgment timestamps."),
+        "Users should not submit unrelated personal information or include unnecessary sensitive data in transaction records or uploaded receipts."),
+    section("Sources and Methods of Data Collection", "Information may be provided directly through account registration, invitation acceptance, password recovery, profile administration, or use of business functions. An authorized Owner or Manager may submit information needed to create or administer a workforce account. Customers may provide information through appropriate booking functions.", "Operational records and relevant security events may also be generated as users interact with the service. A person submitting information about another individual must have appropriate authority and a lawful basis to do so."),
+    section("Purposes of Personal Information Processing", "Personal information is processed to the extent necessary to deliver authorized services, administer accounts, protect business records, and meet applicable contractual and legal obligations. The precise purpose depends on the role, business association, and particular activity.",
+        heading("5.1. Account registration and administration"), "Account and invitation details establish account identity and eligibility, manage business and branch association, verify contact information, and administer account access.",
+        heading("5.2. Authentication and security"), "Verification, authentication-event information, and account restrictions support secure access, account recovery, and investigation of suspected unauthorized activity.",
+        heading("5.3. Authorized business operations"), "Business-controlled information may support the following operations:", bullets("Customer bookings, reservations, rental activities, and related settlements.", "Consumable and rental inventory management and point-of-sale transactions.", "Authorized reporting, analytics, demand forecasting, and operational review.", "Workforce administration, branch assignment, and module permissions."),
+        heading("5.4. Billing and service administration"), "Subscription information supports payment verification, access to applicable plan features, renewal administration, and financial records. Information may also support inquiries, technical assistance, and legal obligations.",
+        heading("5.5. Further processing"), "Information must not be used for an incompatible purpose without an applicable lawful basis and required additional information or consent."),
+    section("Lawful Basis for Processing", "Each controller must identify an appropriate lawful basis for its own processing. Depending on the activity, this may include necessity for a contract, compliance with a legal obligation, legitimate interests assessed against individuals' rights, or valid consent where required. Different conditions apply to sensitive personal information under Philippine law.", "Acknowledging this Policy confirms receipt of information about processing. It is not blanket consent to every activity. Where specific consent is the applicable basis, it must be obtained separately in an appropriate manner, and withdrawal must be handled in accordance with applicable requirements."),
+    section("Authorized Access and Information Disclosure", "Access is limited according to account role, business association, branch assignment, operational permissions, account status, and applicable entitlements. Owners may access authorized business-wide records; Managers may access authorized branch records; Staff access is limited to assigned duties.", "Authorized platform personnel may access information as necessary to carry out legitimate support, security, subscription verification, administration, or legal responsibilities. Disclosure must be limited to the purpose for which it is authorized. Information may be disclosed to competent authorities where required or otherwise lawfully permitted."),
+    section("Third-Party Providers and Data Transfers", "The service uses technical infrastructure and email delivery to support operation and verification messages. The development system uses Gmail SMTP; Azure hosting is planned but the deployed providers, geographical regions, and processing arrangements must be confirmed before publication.", "Providers should receive only information appropriate for their service and must be subject to applicable contractual, organizational, and technical safeguards. Cross-border processing and disclosure must be assessed against applicable privacy obligations. A final notice must identify actual recipients or recipient categories and relevant storage locations."),
+    section("Data Security and Authentication Protection", "StockNBook is designed to apply appropriate technical and organizational measures to reduce unauthorized access, loss, alteration, or disclosure. Implemented application controls include protected password storage, one-time verification codes, unsuccessful authentication restrictions, account recovery, role-based authorization, and business and branch restrictions.", "Access to credentials and security information must be restricted. Production transport security, hosting access controls, protected backups, and incident-response procedures must be verified before deployment. No information system guarantees absolute security. Suspected personal data incidents should be reported promptly and handled in accordance with applicable breach assessment and notification requirements."),
+    section("Authentication Sessions and Browser Storage", "The application uses authentication tokens and browser session storage for authenticated account state and authorized functions. Certain browser storage may retain interface or service information as part of normal operation. Users should log out of shared devices and prevent unauthorized access to authenticated sessions.", "The production inventory of cookies, tokens, and other storage technologies must be confirmed and disclosed as applicable. Nonessential tracking, if introduced, must be assessed and disclosed separately rather than assumed to be covered by this notice."),
+    section("Security Monitoring and Automated Controls", "Unsuccessful login and verification attempts, temporary account restrictions, and relevant security events may be recorded in support of account protection and investigation. Automated controls may restrict authentication or verification when defined security thresholds are reached.", "A restricted user may use available account-recovery procedures or contact the authorized representative. Where automated processing significantly affects an individual, applicable transparency and data subject rights must be observed. Forecasting provides estimates for business decisions rather than a guarantee of individual outcomes."),
+    section("Data Retention and Secure Disposal", "Personal information should be retained only for the period necessary for the disclosed purpose, applicable contractual or legal obligations, legitimate recordkeeping, or resolution of disputes. Account deactivation and subscription expiration do not necessarily require immediate deletion of historical records.", "Verification codes have limited validity, which is distinct from the period for retaining related security records. Account, operational, subscription payment, security-log, verification, and backup records must have an approved retention schedule. The actual periods and disposal arrangements are not yet confirmed and must be specified before publication.", "Information that is no longer necessary and not required to be retained should be securely disposed of or appropriately anonymized in accordance with applicable requirements."),
+    section("Rights of Data Subjects", "Subject to applicable conditions and limitations, individuals have rights regarding their personal information under Philippine law. These include:", bullets("Being informed about processing and obtaining access to personal information.", "Requesting correction of inaccurate information and objecting to applicable processing.", "Requesting erasure or blocking, and data portability, where legally applicable.", "Seeking compensation or other lawful remedies and lodging a complaint with the National Privacy Commission."),
+        "Requests may require proportionate identity verification to prevent unauthorized disclosure. Where the registered business is the relevant controller, the request may need to be directed to its authorized privacy representative. The acknowledgment of this Policy does not waive these rights."),
+    section("Privacy Inquiries, Requests and Complaints", "Privacy requests, questions, complaints, and suspected incidents should be submitted to the applicable controller or designated privacy representative. The landing page lists support@stocknbook.com as the StockNBook support contact; its operation and suitability as a privacy-request channel must be verified.", "Before publication, identify the operator's legal name, mailing address, designated privacy representative or Data Protection Officer where required, and official privacy contact. Individuals may also seek assistance from the National Privacy Commission of the Philippines at https://privacy.gov.ph."),
+    section("Changes to the Privacy Policy", "The Privacy Policy may change to reflect changes in actual processing, service functionality, providers, security measures, or applicable requirements. Material changes should be communicated through appropriate channels, with renewed notice, acknowledgment, or consent as required by the relevant processing activity.", "Each published version and its effective date should be preserved so that an account's acknowledgment can be linked to the text presented at the time.")
+];
+
+const rolePrivacy: Record<PolicyRole, Section[]> = {
+    owner: [
+        section("Business Owner Information", "In addition to general account information, the Owner may provide registered business details, contact information, address, branch information, and account administration records. These are processed to establish the business account, verify identity, administer branches and workforce access, and deliver applicable services."),
+        section("Subscription and Payment Information", "Subscription selections, payment amounts, references, submitted receipts, approval records, renewal details, and subscription status may be processed for legitimate payment verification, entitlement administration, and financial recordkeeping. Receipt files can contain personal or financial information; access should be restricted to authorized personnel and unnecessary details should not be submitted.", "Records should be retained according to applicable financial, contractual, and legal requirements rather than deleted automatically when a subscription changes."),
+        section("Business Administration Activity", "Authorized administration activities may be recorded to support security, investigation of irregularities, accountability, and service operation. These can relate to business or branch administration, Manager assignments, or subscription activity. Relevant records should be accessible only for legitimate purposes."),
+        section("Customer and Workforce Information", "The Owner may supply or authorize processing of customer, Manager, and Staff information. Where the business determines processing purposes, the business must maintain appropriate notices, lawful bases, access controls, and procedures for assisting individuals with privacy requests.", "When processing on behalf of the business, StockNBook should follow the applicable service and data processing arrangements and not use business-controlled information for unrelated purposes."),
+        section("Information Access and Retention", "Owner account information and related financial or administration records may be retained for legitimate service, financial, operational, and legal purposes. A downgrade does not by itself remove historic records. Owners may submit privacy requests through the relevant controller's designated channel, subject to appropriate identity checks and legal obligations.")
+    ],
+    manager: [
+        section("Manager Account and Assignment Information", "The Manager's name, contact details, employee identifier, account status, associated business, and assigned branch may be supplied by the Manager or an authorized Owner during invitation, activation, account updates, and assignment administration. These data establish identity and the scope of operational authorization."),
+        section("Manager Authentication and Security Information", "Protected authentication information, verification and recovery records, unsuccessful login attempts, and account restriction events may be processed to safeguard the Manager account. Such information should be available only for authorized administration, security, support, and legitimate investigations, not to disclose private credentials."),
+        section("Branch Management Activity", "Authorized branch activity may be recorded for operational review, transaction accuracy, security, and accountability. This may include booking, inventory, sales, Staff invitations, account administration, and permission assignments. The authorized Owner may review relevant records for legitimate business purposes and subject to privacy obligations."),
+        section("Access to Customer and Staff Information", "Managers may access information required for authorized branch duties. This does not authorize unrelated collection, use, disclosure, or transfer of customer and employee data. The relevant business remains responsible for applicable privacy obligations concerning its workforce and customers."),
+        section("Changes to Assignment and Account Status", "Changes to role authorization, assigned branch, and account status may result in updates to account information and access privileges. Historical activity and security records may be retained where necessary for lawful accountability, operational, contractual, or legal purposes.", "Managers may submit privacy requests to the appropriate business representative or platform privacy contact depending on who controls the relevant processing.")
+    ],
+    staff: [
+        section("Staff Account and Employment-Related Information", "A Staff account may contain name, contact information, employee identifier, business and branch assignment, associated Manager, account status, and authorized module permissions. This information may be supplied by the employee or an authorized representative to establish identity, administer access, and support legitimate workforce operations."),
+        section("Staff Permissions and Account Administration", "Permission and assignment information is used to restrict operations to the Staff member's legitimate duties and to administer activation and deactivation. Authorized Managers and Owners may access relevant account information as necessary for legitimate workforce and security purposes. Access does not authorize unrelated processing."),
+        section("Operational and Transaction Activity", "Authorized booking, sale, inventory, and other operational actions may identify the Staff account responsible for the recorded transaction. These records support transaction verification, security, accountability, and investigation of operational discrepancies. Managers and Owners may review relevant information according to their authorized responsibilities and applicable privacy requirements."),
+        section("Authentication and Account Protection", "Protected credential information, verification and recovery records, unsuccessful authentication attempts, and account restrictions may be processed to protect Staff accounts and maintain record integrity. These data must not be disclosed to unauthorized individuals or used to obtain a Staff member's private credentials."),
+        section("Account Deactivation and Information Rights", "When employment, assignment, or business authorization ends, access may be deactivated. Historical transactions and account-related information may be retained where needed for legitimate recordkeeping, contractual or legal obligations, security, and accountability.", "Staff members retain applicable rights under the Data Privacy Act of 2012. Requests may be submitted to the relevant business privacy representative or StockNBook privacy contact depending on the controller of the information.")
+    ]
+};
+
+function PolicySections({ sections, start }: { sections: Section[]; start: number }) {
+    return <>{sections.map((item, index) => <section key={item.title} className="snb-policy-section">
+        <h3>{start + index}. {item.title}</h3>
+        {item.blocks.map((block, i) => typeof block === "string" ? <p key={i}>{block}</p> : "heading" in block
+            ? <h4 key={i}>{block.heading}</h4> : <ul key={i}>{block.bullets.map((text, j) => <li key={j}>{text}</li>)}</ul>)}
+    </section>)}</>;
+}
+
+export function PolicyDialog({ document, role, branchName, onClose, onReviewed }: {
+    document: PolicyKind; role?: PolicyRole; branchName?: string; onClose: () => void; onReviewed?: () => void;
+}) {
+    const ref = useRef<HTMLDialogElement>(null);
+    const contentRef = useRef<HTMLDivElement>(null);
+    const [hasReachedEnd, setHasReachedEnd] = useState(false);
+    const titleId = useId();
+    const requiresReview = typeof onReviewed === "function";
+    const checkScrollEnd = useCallback(() => {
+        const content = contentRef.current;
+        if (content && content.clientHeight > 0 &&
+            content.scrollHeight - content.clientHeight - content.scrollTop <= 2) {
+            setHasReachedEnd(true);
+        }
+    }, []);
+    const isTerms = document === "terms";
+    useEffect(() => {
+        const dialog = ref.current;
+        if (!dialog) return;
+        const previousFocus = globalThis.document.activeElement;
+        dialog.showModal();
+        contentRef.current?.focus({ preventScroll: true });
+        return () => {
+            if (dialog.open) dialog.close();
+            if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus();
+        };
+    }, []);
+    useEffect(() => {
+        const content = contentRef.current;
+        if (!content) return;
+        setHasReachedEnd(false);
+        content.scrollTop = 0;
+        const frame = requestAnimationFrame(checkScrollEnd);
+        const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(checkScrollEnd) : null;
+        observer?.observe(content);
+        return () => {
+            cancelAnimationFrame(frame);
+            observer?.disconnect();
+        };
+    }, [document, role, branchName, checkScrollEnd]);
+    return <dialog ref={ref} aria-labelledby={titleId} onCancel={event => { event.preventDefault(); onClose(); }}
+                   onKeyDown={event => { if (event.key === "Escape") event.stopPropagation(); }}
+                   onClick={event => { if (event.target === event.currentTarget) onClose(); }}
+                   className="snb-policy-dialog fixed inset-0 m-auto w-[calc(100%_-_1.5rem)] max-w-[880px] max-h-[85dvh] overflow-hidden rounded-3xl border border-[#EBE4F0] bg-white p-0 text-[#1A1220] shadow-2xl">
+        <div className="flex max-h-[85dvh] min-h-0 flex-col">
+            <header className="flex shrink-0 items-start justify-between gap-4 border-b border-[#EBE4F0] px-6 py-5">
+                <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#C9951A]">StockNBook</p>
+                    <h2 id={titleId} className="mt-2 text-2xl font-semibold tracking-[-0.025em] text-[#1A1220] sm:text-[28px]">{isTerms ? "Terms of Service" : "Privacy Policy"}</h2>
+                    {role && <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2 text-sm font-medium text-[#72529B]">
+                        <span className="inline-flex items-center gap-1.5"><UserRound aria-hidden="true" className="h-4 w-4" />{roleLabels[role]}</span>
+                        {role !== "owner" && branchName && <span className="inline-flex items-center gap-1.5"><MapPin aria-hidden="true" className="h-4 w-4" />{branchName}</span>}
+                    </div>}
+                </div>
+            </header>
+            <div ref={contentRef} tabIndex={0} onScroll={checkScrollEnd} aria-label="Policy document contents" className="snb-policy-document min-h-0 flex-1 overflow-y-auto px-6 py-5 sm:px-8">
+                <h2>Part I — {isTerms ? "General Terms and Conditions" : "General Privacy Provisions"}</h2>
+                <PolicySections sections={isTerms ? generalTerms : generalPrivacy} start={1} />
+                {(role ? [role] : (["owner", "manager", "staff"] as const)).map(r => <div key={r}>
+                    <h2>Part II — {roleLabels[r]} {isTerms ? "Terms and Responsibilities" : "Privacy Notice"}</h2>
+                    <PolicySections sections={isTerms ? roleTerms[r] : rolePrivacy[r]} start={isTerms ? 15 : 16} />
+                </div>)}
+            </div>
+            <footer className="flex shrink-0 flex-col gap-3 border-t border-[#EBE4F0] px-6 py-4 sm:flex-row sm:items-center sm:justify-end">
+                <button type="button" disabled={requiresReview && !hasReachedEnd}
+                        onClick={() => { if (!requiresReview || hasReachedEnd) (onReviewed ?? onClose)(); }}
+                        className="min-h-11 rounded-xl bg-[#2D1B4E] px-5 py-2 text-sm font-semibold text-white enabled:hover:bg-[#3D2560] disabled:cursor-not-allowed disabled:opacity-50">Continue</button>
+            </footer>
+        </div>
+        <style>{`
+            .snb-policy-dialog::backdrop { background: rgba(22,12,39,.65); backdrop-filter: blur(4px); }
+            .snb-policy-document { color:#595260; font-size:14px; line-height:1.8; overflow-wrap:anywhere; }
+            .snb-policy-document h2 { font-size:18px; font-weight:700; line-height:1.45; color:#2D1B4E; margin:0 0 16px; text-align:left; }
+            .snb-policy-document h3 { font-size:16px; font-weight:600; line-height:1.5; color:#1A1220; margin:0 0 12px; text-align:left; }
+            .snb-policy-document h4 { font-size:14px; font-weight:600; color:#2D1B4E; margin:12px 0 8px; text-align:left; }
+            .snb-policy-document p { text-indent:2.5em; text-align:justify; margin:0 0 16px; }
+            .snb-policy-document ul { list-style:disc; padding-left:2.5em; margin:0 0 16px; }
+            .snb-policy-document li { text-indent:0; text-align:left; margin-bottom:8px; }
+            .snb-policy-document .snb-policy-section { margin-bottom:24px; }
+            @media (max-width:600px) { .snb-policy-document p { text-align:left; text-indent:2em; } }
+            @media (min-width:640px) { .snb-policy-document { font-size:15px; } }
+        `}</style>
+    </dialog>;
+}
+
+// Read-only policy access: it never changes registration review/acceptance state.
+export function PolicyAccessLinks({ role, branchName, light = false }: { role?: PolicyRole; branchName?: string; light?: boolean }) {
+    const [active, setActive] = useState<PolicyKind | null>(null);
+    return <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-xs sm:text-sm">
+        <button type="button" onClick={() => setActive("terms")} className={`${light ? "text-white/80 hover:text-[#F1C85C]" : "text-[#2D1B4E] hover:text-[#5B35A5]"} underline underline-offset-2`}>Terms of Service</button>
+        <span aria-hidden="true" className={light ? "text-white/50" : "text-[#82768F]"}>·</span>
+        <button type="button" onClick={() => setActive("privacy")} className={`${light ? "text-white/80 hover:text-[#F1C85C]" : "text-[#2D1B4E] hover:text-[#5B35A5]"} underline underline-offset-2`}>Privacy Policy</button>
+        {active && <PolicyDialog document={active} role={role} branchName={branchName} onClose={() => setActive(null)} />}
+    </div>;
 }

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import RoleSidebar from "@/components/sidebar/RoleSidebar";
+import { PolicyAccessLinks, isPolicyRole, type PolicyRole } from "@/components/landing/AuthModal";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import RequirePermission from "@/components/permissions/RequirePermission";
 import { QRCodeCanvas } from "qrcode.react";
@@ -50,6 +51,7 @@ function formatCurrentDateTime(value: Date) {
 
 export default function SettingsPage() {
     const [mounted, setMounted] = useState(false);
+    const [policyIdentity, setPolicyIdentity] = useState<{ role: PolicyRole; branchName?: string } | null>(null);
     const [storeName, setStoreName] = useState("Store Name");
     const [storeSlug, setStoreSlug] = useState("");
     const [role, setRole] = useState("");
@@ -77,6 +79,7 @@ export default function SettingsPage() {
 
         const savedRole = (sessionStorage.getItem("role") || "").toLowerCase();
         const token = sessionStorage.getItem("token");
+        setPolicyIdentity(null);
         if (token) {
             try {
                 const response = await fetch("/api/current-user?refresh=1", {
@@ -84,7 +87,8 @@ export default function SettingsPage() {
                     cache: "no-store",
                 });
                 if (response.ok) {
-                    const data = await response.json() as { store_name?: string; store_slug?: string };
+                    const data = await response.json() as { store_name?: string; store_slug?: string; role?: unknown; branch_name?: string };
+                    if (isPolicyRole(data.role)) setPolicyIdentity({ role: data.role, branchName: data.branch_name });
                     if (data.store_name) {
                         savedStoreName = data.store_name;
                         sessionStorage.setItem("store_name", savedStoreName);
@@ -332,6 +336,10 @@ export default function SettingsPage() {
                                 onDownloadQR={downloadQR}
                             />
                         )}
+                        <div className="rounded-2xl border border-[#E9E0EF] bg-white p-5">
+                            <h2 className="mb-3 text-sm font-semibold text-[#2D1B4E]">Terms and Privacy</h2>
+                            <PolicyAccessLinks role={policyIdentity?.role} branchName={policyIdentity?.branchName} />
+                        </div>
                     </section>
                 </main>
             </div>

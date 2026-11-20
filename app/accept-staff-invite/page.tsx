@@ -1,5 +1,7 @@
 "use client";
 
+import { PolicyDialog, policyAcceptance } from "@/components/landing/AuthModal";
+
 import Image from "next/image";
 import { Lora } from "next/font/google";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -298,6 +300,13 @@ function AcceptStaffInviteContent() {
     const [otpVerifiedAnimation, setOtpVerifiedAnimation] = useState(false);
 
     useEffect(() => {
+        setHasViewedTerms(false);
+        setHasViewedPrivacy(false);
+        setAcceptedTerms(false);
+        setLegalDocument(null);
+    }, [inviteToken]);
+
+    useEffect(() => {
         let active = true;
 
         const loadInvitation = async () => {
@@ -527,7 +536,7 @@ function AcceptStaffInviteContent() {
         }
 
         if (!acceptedTerms) {
-            setError("Please agree to the Terms of Service and Privacy Policy.");
+            setError("Please agree to the Terms of Service and acknowledge the Privacy Policy.");
             return;
         }
 
@@ -542,6 +551,8 @@ function AcceptStaffInviteContent() {
                     staff_name: staffName.trim(),
                     phone: normalizeMobileNumber(phone),
                     password,
+                    ...policyAcceptance("staff", hasViewedTerms, hasViewedPrivacy, acceptedTerms),
+                    policy_branch_id: details?.branch_id,
                 }
             );
 
@@ -866,7 +877,7 @@ function AcceptStaffInviteContent() {
                                         onChange={(event) =>
                                             setAcceptedTerms(event.target.checked)
                                         }
-                                        aria-label="Agree to the Terms of Service and Privacy Policy"
+                                        aria-label="Agree to the Terms of Service and acknowledge the Privacy Policy"
                                         className="mt-0.5 h-5 w-5 shrink-0 accent-[#2D1B4E] disabled:cursor-not-allowed"
                                     />
 
@@ -882,23 +893,23 @@ function AcceptStaffInviteContent() {
                                             type="button"
                                             onClick={() => setLegalDocument("terms")}
                                             className={[
-                                                "text-[#2D1B4E] underline underline-offset-2 transition hover:text-[#5B35A5]",
+                                                "underline underline-offset-2 transition hover:text-[#5B35A5] focus-visible:outline focus-visible:outline-2",
                                                 hasViewedTerms
-                                                    ? "font-normal"
-                                                    : "font-semibold",
+                                                    ? "text-[#8060AF] font-medium"
+                                                    : "text-[#2D1B4E] font-semibold",
                                             ].join(" ")}
                                         >
                                             Terms of Service
                                         </button>{" "}
-                                        and{" "}
+                                        and acknowledge the{" "}
                                         <button
                                             type="button"
                                             onClick={() => setLegalDocument("privacy")}
                                             className={[
-                                                "text-[#2D1B4E] underline underline-offset-2 transition hover:text-[#5B35A5]",
+                                                "underline underline-offset-2 transition hover:text-[#5B35A5] focus-visible:outline focus-visible:outline-2",
                                                 hasViewedPrivacy
-                                                    ? "font-normal"
-                                                    : "font-semibold",
+                                                    ? "text-[#8060AF] font-medium"
+                                                    : "text-[#2D1B4E] font-semibold",
                                             ].join(" ")}
                                         >
                                             Privacy Policy
@@ -944,7 +955,7 @@ function AcceptStaffInviteContent() {
 
                     {currentStep !== 2 && <button
                         type="button"
-                        disabled={submitting}
+                        disabled={submitting || (currentStep === 4 && (!hasViewedTerms || !hasViewedPrivacy || !acceptedTerms))}
                         onClick={() => {
                             if (currentStep === 1) void sendVerificationCode();
                             if (currentStep === 3) void saveStaffDetails();
@@ -1025,133 +1036,17 @@ function AcceptStaffInviteContent() {
             </div>
 
             {legalDocument && (
-                <div
-                    className="fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto bg-[#160C27]/65 px-3 py-3 backdrop-blur-sm sm:px-4"
-                    onMouseDown={() => setLegalDocument(null)}
-                >
-                    <div
-                        role="dialog"
-                        aria-modal="true"
-                        aria-labelledby="invitation-legal-document-title"
-                        className="w-full max-w-2xl overflow-hidden rounded-3xl border border-white/60 bg-white shadow-2xl"
-                        onMouseDown={(event) => event.stopPropagation()}
-                    >
-                        <div className="flex items-start justify-between gap-4 border-b border-[#EBE4F0] px-6 py-5">
-                            <div>
-                                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#C9951A]">
-                                    StockNBook
-                                </p>
-
-                                <h2
-                                    id="invitation-legal-document-title"
-                                    className="mt-2 text-2xl font-semibold tracking-[-0.025em] text-[#1A1220]"
-                                >
-                                    {legalDocument === "terms"
-                                        ? "Terms of Service"
-                                        : "Privacy Policy"}
-                                </h2>
-                            </div>
-
-                            <button
-                                type="button"
-                                onClick={() => setLegalDocument(null)}
-                                aria-label="Close legal document"
-                                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[#7A6E88] transition hover:bg-[#F3EFF8] hover:text-[#2D1B4E]"
-                            >
-                                <X className="h-5 w-5" />
-                            </button>
-                        </div>
-
-                        <div className="max-h-[55vh] overflow-y-auto px-6 py-5 text-sm leading-7 text-[#6F6577]">
-                            {legalDocument === "terms" ? (
-                                <div className="space-y-4">
-                                    <p>
-                                        By creating and using a StockNBook account,
-                                        you agree to provide accurate registration
-                                        and business information and to keep your
-                                        login credentials secure.
-                                    </p>
-
-                                    <p>
-                                        You are responsible for the bookings,
-                                        inventory, sales, scheduled orders, customer
-                                        details, staff permissions, and other
-                                        records entered through your account.
-                                    </p>
-
-                                    <p>
-                                        StockNBook is a business-management and
-                                        record-keeping platform. It does not replace
-                                        professional legal, tax, accounting, or
-                                        regulatory advice.
-                                    </p>
-
-                                    <p>
-                                        Access may be limited or suspended when the
-                                        platform is misused, security is threatened,
-                                        or applicable rules are violated.
-                                    </p>
-                                </div>
-                            ) : (
-                                <div className="space-y-4">
-                                    <p>
-                                        StockNBook processes account and business
-                                        information needed to provide login,
-                                        bookings, inventory, sales, scheduled
-                                        orders, staff access, reports, and
-                                        subscription services.
-                                    </p>
-
-                                    <p>
-                                        Information should only be accessed by
-                                        authorized account owners, managers, and
-                                        staff members according to their assigned
-                                        permissions.
-                                    </p>
-
-                                    <p>
-                                        Users are responsible for entering customer
-                                        and business information only when they have
-                                        an appropriate reason and permission to do
-                                        so.
-                                    </p>
-
-                                    <p>
-                                        Account and business information is used to
-                                        operate, secure, maintain, and improve the
-                                        StockNBook service.
-                                    </p>
-                                </div>
-                            )}
-                        </div>
-
-                        <div className="flex flex-col-reverse gap-3 border-t border-[#EBE4F0] px-6 py-5 sm:flex-row sm:justify-end">
-                            <button
-                                type="button"
-                                onClick={() => setLegalDocument(null)}
-                                className="h-11 rounded-xl border border-[#D4CBDD] bg-white px-5 text-sm font-semibold text-[#2D1B4E] transition hover:bg-[#F8F5FF]"
-                            >
-                                Close
-                            </button>
-
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    if (legalDocument === "terms") {
-                                        setHasViewedTerms(true);
-                                    } else {
-                                        setHasViewedPrivacy(true);
-                                    }
-
-                                    setLegalDocument(null);
-                                }}
-                                className="h-11 rounded-xl bg-[#2D1B4E] px-5 text-sm font-semibold text-white transition hover:bg-[#3D2560]"
-                            >
-                                I have read this document
-                            </button>
-                        </div>
-                    </div>
-                </div>
+                <PolicyDialog
+                    document={legalDocument}
+                    role="staff"
+                    branchName={details?.branch_name}
+                    onClose={() => setLegalDocument(null)}
+                    onReviewed={() => {
+                        if (legalDocument === "terms") setHasViewedTerms(true);
+                        else setHasViewedPrivacy(true);
+                        setLegalDocument(null);
+                    }}
+                />
             )}
         </main>
     );

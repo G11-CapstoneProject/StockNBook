@@ -47,6 +47,7 @@ import {
 
 
 import AuthModal from "./AuthModal";
+import { PolicyAccessLinks } from "@/components/landing/AuthModal";
 
 
 
@@ -3029,7 +3030,8 @@ export default function LandingPage({
                         </div>
                     </div>
 
-                    <div className="mt-10 border-t border-white/10 pt-6">
+                    <div className="mt-10 border-t border-white/10 pt-6 flex flex-wrap items-center justify-between gap-3">
+                        <PolicyAccessLinks light />
                         <p className="text-xs text-white/40">
                             © {new Date().getFullYear()} StockNBook. All rights reserved.
                         </p>

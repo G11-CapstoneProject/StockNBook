@@ -1,274 +1,359 @@
 "use client";
 
-// Manager "Rental Return & Final Settlement" dialog (restored from the earlier ManagerBookings).
-// Put this file next to _shared.tsx. It reads Staff return/inspection records and the booking's
-// financial statement, then saves ONE settlement transaction through the Bookings Lambda
-// (action: settle_booking_security_deposit). Money is moved only by the backend.
+// Manager "Settle Rental Return" popup. Opens from "Settle Deposit / Charges" on a Pending Settlement booking.
+// Put this file next to _shared.tsx. It reads Staff's return records and the booking's money, then saves
+// everything in ONE transaction through the Bookings Lambda (action: settle_booking_security_deposit).
+//
+// Three steps, in the order a Manager thinks about them:
+//   1. Check what came back (read-only, recorded by Staff)
+//   2. Decide the charge for damaged / missing items (only when Staff reported any)
+//   3. Settle the money: the deposit pays the charge first, then the customer gets the rest back
+//      or pays what is still owed.
 
-import { useEffect, useRef, useState } from "react";
-import { X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { AlertTriangle, CheckCircle2, X } from "lucide-react";
 import { Booking, peso } from "./_shared";
 
-type RentalReturnRecord = {
+type ReturnRecord = {
     allocationId: number; equipmentName: string; issuedQuantity: number; allocationStatus: string;
-    returnedReceivedUnits: number | string | null; inspectionStatus: string | null;
-    inspectedAt: string | null; inspectedBy: string | null;
-    receivedBy: string | null; notes: string | null;
+    returnedReceivedUnits: number | string | null; inspectionStatus: string | null; inspectedAt: string | null;
+    notes: string | null; damagedUnits?: number; missingUnits?: number;
 };
-type RentalReturnIncident = {
-    id: number; equipmentName: string; quantity: number | string; reason?: string;
-    status?: string; decisionStatus?: string | null;
-};
-type RentalReturnReview = {
-    returnReports: RentalReturnRecord[];
-    damage: RentalReturnIncident[];
-    missing: RentalReturnIncident[];
-    recoveryInspectionPending: boolean;
-};
-type ReturnSettlementLedger = {
-    depositRequired: number; depositCollected: number; depositHeld: number;
-    depositApplied: number; depositRefunded: number; claimBalance: number;
-    booking: { status: string; balance: number; agreedPrice: number | null; bookingPayments: number };
+type Incident = { id: number; equipmentName: string; quantity: number | string; reason?: string;
+    status?: string; decisionStatus?: string | null; unitValue?: number | null };
+type ClaimSources = { returnReports: ReturnRecord[]; damage: Incident[]; missing: Incident[]; recoveryInspectionPending: boolean };
+type Ledger = {
+    depositHeld: number; claimBalance: number;
+    booking: { status: string };
     rentalItems: Array<{ name: string; quantity: number }>;
-    claims: Array<{ id: number; equipmentName?: string; status: string; amount: number;
-        amountPaid: number; depositApplied: number; reason?: string }>;
+    claims: Array<{ status: string; amount: number }>;
 };
+type Method = "cash" | "gcash" | "bank_transfer";
+type ChargeMethod = "replace" | "repair" | "none";
+const incidentKey = (i: { kind: string; id: number }) => `${i.kind}-${i.id}`;
 
-export default function RentalReturnSettlementDialog({booking,onClose,onSaved}: {
+const METHODS: Array<[Method, string]> = [["cash", "Cash"], ["gcash", "GCash"], ["bank_transfer", "Bank transfer"]];
+const cents = (value: number) => Math.round(value * 100);
+const fromCents = (value: number) => value / 100;
+const validAmount = (raw: string) => raw.trim() !== "" && /^\d+(\.\d{1,2})?$/.test(raw.trim());
+
+function StepTitle({ number, title, hint }: { number: number; title: string; hint?: string }) {
+    return <div className="flex items-start gap-3">
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#2B174C] text-xs font-bold text-white">{number}</span>
+        <div><h3 className="text-[15px] font-bold text-[#1A1220]">{title}</h3>{hint && <p className="mt-0.5 text-xs text-[#806A8C]">{hint}</p>}</div>
+    </div>;
+}
+function MoneyRow({ label, value, sign, strong, tone }: { label: string; value: number; sign?: "-" | "+"; strong?: boolean; tone?: string }) {
+    return <div className={`flex items-center justify-between gap-3 ${strong ? "text-[15px] font-bold" : "text-sm"} ${tone || "text-[#2B174C]"}`}>
+        <span>{label}</span><span className="tabular-nums">{sign ? `${sign} ` : ""}{peso(value)}</span>
+    </div>;
+}
+function MethodSelect({ id, value, onChange, disabled }: { id: string; value: Method; onChange: (m: Method) => void; disabled: boolean }) {
+    return <select id={id} value={value} disabled={disabled} onChange={e => onChange(e.target.value as Method)}
+                   className="h-10 w-full rounded-lg border border-[#D8CBE7] bg-white px-3 text-sm text-[#2B174C] sm:w-44">
+        {METHODS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+    </select>;
+}
+
+export default function RentalReturnSettlementDialog({ booking, onClose, onSaved }: {
     booking: Booking; onClose: () => void; onSaved: (completed: boolean, message: string) => Promise<void>;
 }) {
-    const [loading,setLoading] = useState(true);
-    const [saving,setSaving] = useState(false);
-    const [error,setError] = useState("");
-    const [review,setReview] = useState<RentalReturnReview | null>(null);
-    const [ledger,setLedger] = useState<ReturnSettlementLedger | null>(null);
-    const [mode,setMode] = useState<"charge" | "refund">("refund");
-    const [charge,setCharge] = useState("0.00");
-    const [cashReceived,setCashReceived] = useState("0.00");
-    const [refund,setRefund] = useState("");
-    const [reason,setReason] = useState("");
-    const [reviewConfirmed,setReviewConfirmed] = useState(false);
-    const [permanentLossConfirmed,setPermanentLossConfirmed] = useState(false);
-    const [cashConfirmed,setCashConfirmed] = useState(false);
-    const [refundConfirmed,setRefundConfirmed] = useState(false);
-    // Keep the same key if an API response is lost, preventing duplicate payments.
+    const [loading, setLoading] = useState(true);
+    const [saving, setSaving] = useState(false);
+    const [error, setError] = useState("");
+    const [sources, setSources] = useState<ClaimSources | null>(null);
+    const [ledger, setLedger] = useState<Ledger | null>(null);
+    // Step 2
+    // How each damaged / missing item is charged: Replace (full replacement value), Repair (cost typed in), or No charge.
+    const [methods, setMethods] = useState<Record<string, ChargeMethod>>({});
+    const [repairText, setRepairText] = useState<Record<string, string>>({});
+    const [note, setNote] = useState("");
+    // Step 3
+    const [receivedText, setReceivedText] = useState("");
+    const [receivedTouched, setReceivedTouched] = useState(false);
+    const [receivedMethod, setReceivedMethod] = useState<Method>("cash");
+    const [receivedConfirmed, setReceivedConfirmed] = useState(false);
+    const [refundMethod, setRefundMethod] = useState<Method>("cash");
+    const [refundConfirmed, setRefundConfirmed] = useState(false);
+    // Same key if a response is lost, so a retry never records money twice.
     const requestKey = useRef<string | null>(null);
     const branchId = Number(booking.branchId ?? booking.branch_id ?? 0);
 
-    async function readReview() {
-        const token=sessionStorage.getItem("token");
-        if(!token)throw new Error("Please sign in before settling a booking.");
-        const request=async(action:string)=>{
-            const res=await fetch("/api/bookings",{
-                method:"POST",cache:"no-store",
-                headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},
-                body:JSON.stringify({action,bookingId:booking.id,branch_id:branchId||undefined})
-            });
-            const data=await res.json();
-            if(!res.ok||data.error||data.success===false)
-                throw new Error(data.error||`Unable to load ${action}.`);
-            return data;
+    useEffect(() => {
+        let cancelled = false;
+        const load = async () => {
+            const token = sessionStorage.getItem("token");
+            if (!token) throw new Error("Please sign in again.");
+            const call = async (action: string) => {
+                const res = await fetch("/api/bookings", { method: "POST", cache: "no-store",
+                    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                    body: JSON.stringify({ action, bookingId: booking.id, branch_id: branchId || undefined }) });
+                const data = await res.json();
+                if (!res.ok || data.error || data.success === false) throw new Error(data.error || "Unable to load this booking.");
+                return data;
+            };
+            const [finance, claimSources] = await Promise.all([call("get_booking_financial_statement"), call("get_booking_claim_sources")]);
+            if (!finance.statement || !Array.isArray(claimSources.returnReports)) throw new Error("Return records are incomplete. Update the Bookings Lambda.");
+            if (cancelled) return;
+            setLedger(finance.statement as Ledger);
+            setSources(claimSources as ClaimSources);
         };
-        const [finance,incidents]=await Promise.all([
-            request("get_booking_financial_statement"), request("get_booking_claim_sources")
-        ]);
-        if(!finance.statement || !Array.isArray(incidents.missing) || !Array.isArray(incidents.damage)
-            || !Array.isArray(incidents.returnReports))
-            throw new Error("Return inspection information is incomplete. Install the v2 booking backend update.");
-        const nextLedger=finance.statement as ReturnSettlementLedger;
-        if(!Number.isFinite(Number(nextLedger.depositHeld)) || !Number.isFinite(Number(nextLedger.claimBalance)))
-            throw new Error("Booking financial records are unavailable; settlement is blocked.");
-        setLedger(nextLedger);
-        setReview(incidents as RentalReturnReview);
-        const undecided=[...(incidents.damage as RentalReturnIncident[]),
-            ...(incidents.missing as RentalReturnIncident[]).filter(item=>
-                Number(item.quantity)>0 && ["pending","writeoff"].includes(String(item.status||"").toLowerCase()))]
-            .filter(item=>!item.decisionStatus);
-        setMode(undecided.length>0 || Number(nextLedger.claimBalance)>0.005 ? "charge" : "refund");
-        setRefund(Number(nextLedger.depositHeld).toFixed(2));
-    }
-    useEffect(()=>{
-        let cancelled=false;
         setLoading(true);
-        void readReview().catch(cause=>{if(!cancelled)setError(cause instanceof Error?cause.message:"Unable to review returned goods.");})
-            .finally(()=>{if(!cancelled)setLoading(false);});
-        return ()=>{cancelled=true;};
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    },[booking.id]); // Read once on opening; reopen to refresh current Staff records.
+        void load().catch(cause => { if (!cancelled) setError(cause instanceof Error ? cause.message : "Unable to load this booking."); })
+            .finally(() => { if (!cancelled) setLoading(false); });
+        return () => { cancelled = true; };
+    }, [booking.id, branchId]);
 
-    const allIncidents=review ? [
-        ...review.damage.map(item=>({...item,kind:"Damage"})),
-        ...review.missing.map(item=>({...item,kind:"Missing"}))
-    ] : [];
-    const undecided=allIncidents.filter(item=> !item.decisionStatus &&
-        (item.kind==="Damage" || (Number(item.quantity)>0 &&
-            ["pending","writeoff"].includes(String(item.status||"").toLowerCase()))));
-    const pendingLoss=undecided.some(item=>item.kind==="Missing" && String(item.status).toLowerCase()==="pending");
-    const inspectionsComplete=!!review && !review.recoveryInspectionPending &&
-        (review.returnReports.length===0 ? (ledger?.rentalItems.length===0) :
-            review.returnReports.every(item=>item.allocationStatus==="returned" &&
-                Boolean(item.inspectedAt) && !["pending","cleaning"].includes(String(item.inspectionStatus||"").toLowerCase())));
-    const due=Number(ledger?.claimBalance||0);
-    const held=Number(ledger?.depositHeld||0);
-    const amountValid=(value:string)=>value.trim()!=="" && Number.isFinite(Number(value)) &&
-        Number(value)>=0 && Math.abs(Number(value)*100-Math.round(Number(value)*100))<0.00001;
-    const proposedCharge=amountValid(charge)?Number(charge):0;
-    const depositToApply=Math.min(held,due+(undecided.length?proposedCharge:0));
-    const projectedDue=Math.max(0,due+(undecided.length?proposedCharge:0)-depositToApply-(amountValid(cashReceived)?Number(cashReceived):0));
-    const availableRefund=Math.max(0,held-depositToApply);
-    const canRefund=undecided.length===0 && due<0.005;
-    const disableSubmit=loading||saving||!ledger||!review||!inspectionsComplete||
-        String(ledger.booking.status).toLowerCase()!=="pending settlement";
+    // ── What Staff recorded ──
+    const incidents = useMemo(() => sources ? [
+        ...sources.damage.map(i => ({ ...i, kind: "Damaged" as const })),
+        ...sources.missing.map(i => ({ ...i, kind: "Missing" as const })),
+    ].filter(i => Number(i.quantity) > 0) : [], [sources]);
+    const needsDecision = incidents.some(i => !i.decisionStatus);
+    const staffDone = !!sources && !sources.recoveryInspectionPending && sources.returnReports.length > 0 &&
+        sources.returnReports.every(r => r.allocationStatus === "returned" && !!r.inspectedAt);
+    const damagedTotal = incidents.filter(i => i.kind === "Damaged").reduce((s, i) => s + Number(i.quantity), 0);
+    const missingTotal = incidents.filter(i => i.kind === "Missing").reduce((s, i) => s + Number(i.quantity), 0);
+    // Missing items are lost, so they start on "Replace" (when the replacement value is known). Damaged items need a choice.
+    useEffect(() => {
+        setMethods(current => {
+            const next = { ...current };
+            for (const i of incidents) if (i.kind === "Missing" && i.unitValue != null && !next[incidentKey(i)]) next[incidentKey(i)] = "replace";
+            return next;
+        });
+    }, [incidents]);
+    const replaceCents = (i: typeof incidents[number]) => i.unitValue != null ? cents(Number(i.quantity) * Number(i.unitValue)) : null;
+    // Charge for one item in centavos, or null while it still needs a choice / a valid repair cost.
+    const lineChargeC = (i: typeof incidents[number]): number | null => {
+        const method = methods[incidentKey(i)];
+        if (method === "none") return 0;
+        if (method === "replace") return replaceCents(i);
+        if (method === "repair") { const raw = repairText[incidentKey(i)] || ""; return validAmount(raw) ? cents(Number(raw)) : null; }
+        return null;
+    };
+    const unchosen = needsDecision ? incidents.find(i => !methods[incidentKey(i)]) : undefined;
+    const badRepair = needsDecision ? incidents.find(i => methods[incidentKey(i)] === "repair" && lineChargeC(i) === null) : undefined;
+    // The reason saved with the decision is written from the choices; the Manager can add a note.
+    const decisionReason = incidents.map(i => {
+        const method = methods[incidentKey(i)], charge = lineChargeC(i);
+        return `${i.equipmentName} ×${Number(i.quantity)} ${i.kind.toLowerCase()}: ${method === "none" ? "no charge" : `${method} (${peso(fromCents(charge || 0))})`}`;
+    }).join("; ") + (note.trim() ? `. Note: ${note.trim()}` : "");
+    const decidedCharge = ledger ? ledger.claims.filter(c => c.status !== "waived").reduce((s, c) => s + Math.max(0, Number(c.amount) || 0), 0) : 0;
+
+    // ── Money (all in centavos to avoid rounding errors) ──
+    const heldC = cents(Number(ledger?.depositHeld || 0));
+    const dueC = cents(Number(ledger?.claimBalance || 0));
+    const chargeValid = !needsDecision || (!unchosen && !badRepair);
+    const newChargeC = needsDecision && chargeValid ? incidents.reduce((sum, i) => sum + (lineChargeC(i) || 0), 0) : 0;
+    const chargeC = needsDecision ? newChargeC : dueC;          // the charge this settlement must cover
+    const depositUsedC = Math.min(heldC, chargeC);
+    const stillOwedC = chargeC - depositUsedC;
+    // Pre-fill "received now" with the full amount still owed, unless the Manager typed their own.
+    useEffect(() => { if (!receivedTouched) setReceivedText(stillOwedC > 0 ? fromCents(stillOwedC).toFixed(2) : "0"); }, [stillOwedC, receivedTouched]);
+    const receivedValid = stillOwedC === 0 || (validAmount(receivedText) && cents(Number(receivedText)) <= stillOwedC);
+    const receivedC = stillOwedC > 0 && receivedValid ? cents(Number(receivedText)) : 0;
+    const owedAfterC = stillOwedC - receivedC;
+    const giveBackC = heldC - depositUsedC;                      // only when nothing is owed (stillOwed > 0 means the deposit is used up)
+    const completes = owedAfterC === 0;
+
+    // The money step is step 3 when there is a charge to decide, otherwise step 2.
+    const moneyStep = incidents.length > 0 ? 3 : 2;
+    // ── What still blocks the Save button (shown next to it) ──
+    const isPendingSettlement = String(ledger?.booking.status || "").toLowerCase() === "pending settlement";
+    let blocker = "";
+    if (!ledger || !sources) blocker = loading ? "Loading..." : "This booking could not be loaded.";
+    else if (!isPendingSettlement) blocker = "This booking is no longer waiting for settlement.";
+    else if (!staffDone) blocker = "Waiting for Staff to finish checking the returned items.";
+    else if (unchosen) blocker = `Step 2: choose Replace, Repair or No charge for ${unchosen.equipmentName}.`;
+    else if (badRepair) blocker = `Step 2: enter the repair cost for ${badRepair.equipmentName}.`;
+    else if (!receivedValid) blocker = `Step ${moneyStep}: amount received can be ₱0 to ${peso(fromCents(stillOwedC))}.`;
+    else if (receivedC > 0 && !receivedConfirmed) blocker = `Step ${moneyStep}: tick the box to confirm you received the payment.`;
+    else if (giveBackC > 0 && !refundConfirmed) blocker = `Step ${moneyStep}: tick the box to confirm you gave the money back.`;
+    else if (!needsDecision && dueC > 0 && receivedC === 0) blocker = `Step ${moneyStep}: enter the amount the customer paid.`;
+    const canSave = !blocker && !saving;
 
     async function save() {
-        if(disableSubmit)return;
-        setError("");
-        if(!reviewConfirmed){setError("Confirm that you reviewed the Staff return and inspection records.");return;}
-        if(mode==="charge"){
-            if(!allIncidents.length){setError("Additional charges require a Staff-recorded damage or missing-item report.");return;}
-            if(!amountValid(charge)||!amountValid(cashReceived)){setError("Enter valid peso amounts with at most two decimals.");return;}
-            if(undecided.length>0 && reason.trim().length<10){setError("Describe the Manager's charge or waiver decision (at least 10 characters).");return;}
-            if(pendingLoss&&!permanentLossConfirmed){setError("Confirm the permanent loss of the Staff-reported missing goods.");return;}
-            const cash=Number(cashReceived);
-            if(cash>0&&!cashConfirmed){setError("Confirm additional payment was actually received before recording it.");return;}
-            if(cash>Math.max(0,due+(undecided.length?Number(charge):0)-depositToApply)+0.005){
-                setError("Recorded additional payment exceeds unpaid approved charges after deposit application.");return;
-            }
-            if(!undecided.length && due<=0.005){setError("There are no remaining reported incidents or approved charges to settle.");return;}
-        }else{
-            if(!canRefund){setError("Review all incidents and settle approved charges before returning the deposit.");return;}
-            if(!amountValid(refund)||Number(refund)>held+0.005){setError("Refund cannot exceed the deposit currently held.");return;}
-            if(held>0.005&&Number(refund)<=0){setError("Enter the refund amount actually returned to the customer.");return;}
-            if(Number(refund)>0&&!refundConfirmed){setError("Confirm the customer actually received the refund before recording it.");return;}
-        }
-        setSaving(true);
+        if (!canSave || !ledger) return;
+        setError(""); setSaving(true);
         try {
-            const token=sessionStorage.getItem("token");
-            if(!token)throw new Error("Your session expired. Please sign in again.");
-            const key=requestKey.current||`RETURN-${booking.id}-${crypto.randomUUID()}`;
-            requestKey.current=key;
-            const payload={
-                action:"settle_booking_security_deposit",bookingId:booking.id,branch_id:branchId,
-                requestKey:key,mode:mode==="charge"?"combined":"refund",
-                chargeAmount:mode==="charge"&&undecided.length?Number(charge):0,
-                additionalPaymentReceived:mode==="charge"?Number(cashReceived):0,
-                refundAmount:mode==="refund"?Number(refund):0,
-                reason:mode==="charge"?reason.trim():"",
-                confirmPermanentLoss:permanentLossConfirmed,
-                paymentVerified:mode==="charge"&&Number(cashReceived)>0&&cashConfirmed,
-                refundVerified:mode==="refund"&&Number(refund)>0&&refundConfirmed,
+            const token = sessionStorage.getItem("token");
+            if (!token) throw new Error("Your session expired. Please sign in again.");
+            requestKey.current = requestKey.current || `RETURN-${booking.id}-${crypto.randomUUID()}`;
+            const combined = needsDecision || dueC > 0;
+            const payload = {
+                action: "settle_booking_security_deposit", bookingId: booking.id, branch_id: branchId, requestKey: requestKey.current,
+                mode: combined ? "combined" : "refund",
+                chargeAmount: fromCents(newChargeC),
+                reason: needsDecision ? decisionReason.slice(0, 500) : "",
+                additionalPaymentReceived: fromCents(receivedC), paymentVerified: receivedC > 0 && receivedConfirmed, paymentMethod: receivedMethod,
+                refundAmount: fromCents(owedAfterC === 0 ? giveBackC : 0), refundVerified: giveBackC > 0 && refundConfirmed, refundMethod,
             };
-            const response=await fetch("/api/bookings",{
-                method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},
-                body:JSON.stringify(payload)
-            });
-            const result=await response.json();
-            if(!response.ok||result.error||result.success!==true)
-                throw new Error(result.error||"The settlement could not be saved.");
-            requestKey.current=null;
-            // The transaction is committed. Refresh failure must not be reported
-            // as a failed payment or issue a duplicate refund on retry.
-            await onSaved(Boolean(result.completed),result.alreadyRecorded?
-                "This settlement was already recorded. Financial records were not duplicated.":
-                `Recorded deposit application ${peso(Number(result.appliedDeposit||0))}, additional payment ${peso(Number(result.additionalPaymentRecorded||0))}, and refund ${peso(Number(result.amountRefunded||0))}.`);
-        }catch(cause){setError(cause instanceof Error?cause.message:"Unable to save settlement. Verify the ledger before retrying.");}
-        finally{setSaving(false);}
+            const response = await fetch("/api/bookings", { method: "POST",
+                headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify(payload) });
+            const result = await response.json();
+            if (!response.ok || result.error || result.success !== true) throw new Error(result.error || "The settlement could not be saved.");
+            requestKey.current = null;
+            const parts = [
+                Number(result.appliedDeposit) > 0 ? `${peso(Number(result.appliedDeposit))} of the deposit used for the charge` : "",
+                Number(result.additionalPaymentRecorded) > 0 ? `${peso(Number(result.additionalPaymentRecorded))} received` : "",
+                Number(result.amountRefunded) > 0 ? `${peso(Number(result.amountRefunded))} given back` : "",
+            ].filter(Boolean);
+            await onSaved(Boolean(result.completed), result.alreadyRecorded ? "This settlement was already saved. Nothing was recorded twice."
+                : `Settlement saved${parts.length ? `: ${parts.join(", ")}` : ""}.${result.completed ? " Booking completed." : ""}`);
+        } catch (cause) {
+            setError(cause instanceof Error ? cause.message : "Unable to save. Check the booking before trying again.");
+        } finally { setSaving(false); }
     }
-    const fmt=(raw:string|null)=>{
-        if(!raw)return "Not recorded";
-        const date=new Date(raw.replace(" ","T"));
-        return Number.isNaN(date.getTime())?String(raw):date.toLocaleString("en-PH",{dateStyle:"medium",timeStyle:"short"});
-    };
-    return <div className="fixed inset-0 z-[230] flex items-center justify-center bg-[#1A1220]/60 p-3 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label="Review rental returns and settle deposit">
-    <div className="flex max-h-[92vh] w-full max-w-[780px] flex-col overflow-hidden rounded-[20px] border border-[#E6DDF0] bg-white shadow-2xl">
-    <div className="flex shrink-0 items-start justify-between gap-4 border-b border-[#E6DDF0] p-5">
-    <div><h2 className="text-lg font-bold text-[#1A1220]">Rental Return &amp; Final Settlement</h2>
-    <p className="mt-1 text-xs text-[#806A8C]">{booking.name} · {booking.bookingReference||`#${booking.id}`}</p></div>
-    <button type="button" disabled={saving} onClick={onClose} aria-label="Close return settlement" className="rounded-lg border border-[#E6DDF0] p-2 text-[#2B174C] disabled:opacity-50"><X size={17}/></button>
-    </div>
-    <div className="min-h-0 space-y-4 overflow-y-auto p-5 text-sm text-[#2B174C]">
-        {loading?<p role="status">Loading Staff inspection records and booking ledger...</p>:null}
-    {ledger && <section className="grid grid-cols-2 gap-3 rounded-xl border border-[#E6DDF0] bg-[#FBF8FD] p-4 sm:grid-cols-4">
-        {([["Deposit held",held],["Deposit applied",Number(ledger.depositApplied)],["Refunds recorded",Number(ledger.depositRefunded)],["Unpaid claims",due]] as const).map(([label,value])=>
-            <div key={label}><p className="text-xs text-[#806A8C]">{label}</p><strong className="mt-1 block text-[16px]">{peso(value)}</strong></div>)}
-    </section>}
-        {review && <section className="rounded-xl border border-[#E6DDF0] p-4">
-        <h3 className="font-bold">Staff Return &amp; Inspection Records</h3>
-        <p className="mt-1 text-xs text-[#806A8C]">Read-only records from the rental inventory workflow. The Manager reviews these before deciding charges.</p>
-        <div className="mt-3 max-h-48 divide-y divide-[#EAE4F0] overflow-y-auto rounded-lg border border-[#E6DDF0]">
-            {review.returnReports.length?review.returnReports.map(row=>
-                    <div key={row.allocationId} className="px-3 py-3 text-xs">
-                <div className="flex flex-wrap justify-between gap-2"><strong>{row.equipmentName} · {row.issuedQuantity} unit(s)</strong><span>{row.allocationStatus} / {row.inspectionStatus||"Not inspected"}</span></div>
-        <p className="mt-1 text-[#806A8C]">Received: {row.returnedReceivedUnits??"Not recorded"} · Inspected: {fmt(row.inspectedAt)}{row.inspectedBy?` · By ${row.inspectedBy}`:""}</p>
-            {row.receivedBy&&<p className="mt-1 text-[#806A8C]">Received by: {row.receivedBy}</p>}
-                {row.notes&&<p className="mt-1 break-words text-[#5F4E75]">Staff notes: {row.notes}</p>}
-                </div>):<p className="p-3 text-xs text-[#806A8C]">{ledger?.rentalItems.length?"No Staff inspection records were found.":"No rental goods were assigned to this booking."}</p>}
+
+    const card = "space-y-3 rounded-xl border border-[#E6DDF0] bg-white p-4";
+    return <div className="fixed inset-0 z-[230] flex items-center justify-center bg-[#1A1220]/60 p-3 backdrop-blur-sm"
+                role="dialog" aria-modal="true" aria-labelledby="settle-return-title">
+        <div className="flex max-h-[92vh] w-full max-w-[720px] flex-col overflow-hidden rounded-[20px] border border-[#E6DDF0] bg-[#FBF8FD] shadow-2xl">
+            <header className="flex shrink-0 items-start justify-between gap-4 border-b border-[#E6DDF0] bg-white px-5 py-4">
+                <div>
+                    <h2 id="settle-return-title" className="text-lg font-bold text-[#1A1220]">Settle Rental Return</h2>
+                    <p className="mt-0.5 text-xs text-[#806A8C]">{booking.name} · {booking.bookingReference || `#${booking.id}`}</p>
                 </div>
-                {(!inspectionsComplete||review.recoveryInspectionPending)&&<p role="alert" className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">Staff must finish receiving, inspecting and cleaning all rentals, including recovered items, before the Manager can settle.</p>}
+                <button type="button" disabled={saving} onClick={onClose} aria-label="Close" className="rounded-lg border border-[#E6DDF0] p-2 text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-50"><X size={17}/></button>
+            </header>
+
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5 text-sm text-[#2B174C]">
+                {loading && <p role="status" className="text-[#806A8C]">Loading the return and payment records...</p>}
+
+                {/* Step 1: what came back */}
+                {sources && <section className={card} aria-label="Step 1: Check what came back">
+                    <StepTitle number={1} title="Check what came back" hint="Recorded by Staff when they received the items."/>
+                    <div className="overflow-hidden rounded-lg border border-[#E6DDF0]">
+                        <table className="w-full text-left text-xs">
+                            <thead className="bg-[#F7F2FC] text-[10px] font-bold uppercase tracking-wide text-[#6A5582]">
+                            <tr><th className="px-3 py-2">Equipment</th><th className="px-2 py-2 text-center">Rented</th>
+                                <th className="px-2 py-2 text-center">Returned</th><th className="px-2 py-2 text-center">Damaged</th><th className="px-2 py-2 text-center">Missing</th></tr>
+                            </thead>
+                            <tbody>{sources.returnReports.map(r => <tr key={r.allocationId} className="border-t border-[#EFE7F4]">
+                                <td className="px-3 py-2 font-semibold">{r.equipmentName}</td>
+                                <td className="px-2 py-2 text-center tabular-nums">{r.issuedQuantity}</td>
+                                <td className="px-2 py-2 text-center tabular-nums">{r.returnedReceivedUnits ?? "—"}</td>
+                                <td className={`px-2 py-2 text-center tabular-nums ${Number(r.damagedUnits) > 0 ? "font-bold text-[#B45309]" : "text-[#806A8C]"}`}>{Number(r.damagedUnits || 0)}</td>
+                                <td className={`px-2 py-2 text-center tabular-nums ${Number(r.missingUnits) > 0 ? "font-bold text-[#C32F2F]" : "text-[#806A8C]"}`}>{Number(r.missingUnits || 0)}</td>
+                            </tr>)}</tbody>
+                        </table>
+                    </div>
+                    {sources.returnReports.filter(r => r.notes).map(r =>
+                        <p key={`note-${r.allocationId}`} className="rounded-lg border-l-4 border-[#CEB9F3] bg-[#FBF8FF] px-3 py-2 text-xs text-[#4F3A5A]">
+                            <span className="font-semibold">Staff note ({r.equipmentName}):</span> {r.notes}</p>)}
+                    {staffDone
+                        ? <p className="flex items-center gap-2 text-xs font-medium text-[#218246]"><CheckCircle2 size={15}/> Staff has received and checked everything.</p>
+                        : <p role="alert" className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900"><AlertTriangle size={15} className="mt-0.5 shrink-0"/> Staff still needs to receive and check all returned items in the Rental queue. You can settle after that.</p>}
                 </section>}
-                    {review&&<section className="rounded-xl border border-[#E6DDF0] p-4">
-                    <h3 className="font-bold">Reported Damage / Missing Items</h3>
-                    <div className="mt-3 space-y-2">{allIncidents.length?allIncidents.map(item=>
-                            <div key={`${item.kind}-${item.id}`} className="rounded-lg border border-[#E6DDF0] bg-[#FFFDF8] p-3 text-xs">
-                    <div className="flex flex-wrap justify-between gap-2"><strong>{item.kind}: {item.equipmentName} · {item.quantity} unit(s)</strong><span>{item.decisionStatus?`Decision: ${item.decisionStatus}`:item.status||"Awaiting Manager decision"}</span></div>
-                        {item.reason&&<p className="mt-1 break-words text-[#806A8C]">Staff record: {item.reason}</p>}
-                        </div>):<p className="text-xs text-[#806A8C]">No damaged or missing rental items have been reported for this booking.</p>}</div>
-                        {ledger?.claims?.length? <p className="mt-2 text-xs text-[#806A8C]">{ledger.claims.length} previous Manager claim decision(s) recorded; unpaid approved balance: {peso(due)}.</p>:null}
-                        </section>}
-                            {review&&ledger&&<section className="space-y-3 rounded-xl border border-[#E6DDF0] bg-[#FBF8FD] p-4">
-                            <h3 className="font-bold">Manager&apos;s Final Financial Decision</h3>
-                            <div className="grid grid-cols-2 gap-2">
-                            <button type="button" onClick={()=>{setMode("charge");requestKey.current=null;}} disabled={saving||(!undecided.length&&due<=0.005)}
-                                className={`rounded-lg border px-2 py-2.5 text-xs font-semibold disabled:opacity-40 ${mode==="charge"?"border-[#2B174C] bg-[#2B174C] text-white":"border-[#D8CBE7] bg-white"}`}>Approve charges / waiver</button>
-                            <button type="button" onClick={()=>{setMode("refund");requestKey.current=null;}} disabled={saving||!canRefund}
-                                className={`rounded-lg border px-2 py-2.5 text-xs font-semibold disabled:opacity-40 ${mode==="refund"?"border-[#2B174C] bg-[#2B174C] text-white":"border-[#D8CBE7] bg-white"}`}>Refund deposit / close</button>
+
+                {/* Step 2: decide the charge */}
+                {sources && ledger && incidents.length > 0 && <section className={card} aria-label="Step 2: Decide the damage charge">
+                    <StepTitle number={2} title="Decide the damage charge"
+                               hint={`Staff reported ${[damagedTotal ? `${damagedTotal} damaged` : "", missingTotal ? `${missingTotal} missing` : ""].filter(Boolean).join(" and ")} unit(s).`}/>
+                    {needsDecision ? <>
+                        <p className="text-xs text-[#5F4E75]"><strong>Replace</strong> for severe damage or lost items (full replacement value). <strong>Repair</strong> for minor damage (enter the repair cost).</p>
+                        {incidents.map(i => {
+                            const key = incidentKey(i), method = methods[key], replace = replaceCents(i), charge = lineChargeC(i);
+                            const options: Array<[ChargeMethod, string, boolean]> = [
+                                ["replace", replace != null ? `Replace · ${peso(fromCents(replace))}` : "Replace (no value set)", replace == null],
+                                ["repair", "Repair", false], ["none", "No charge", false]];
+                            return <div key={key} className="space-y-2 rounded-lg border border-[#E6DDF0] p-3">
+                                <div className="flex flex-wrap items-start justify-between gap-2">
+                                    <div>
+                                        <p className="font-semibold text-[#1A1220]">{i.equipmentName}</p>
+                                        <p className="text-xs text-[#806A8C]">{Number(i.quantity)} {i.kind.toLowerCase()}{i.unitValue != null ? ` · Replacement value ${peso(Number(i.unitValue))} each` : ""}</p>
+                                    </div>
+                                    <strong className="tabular-nums text-[#2B174C]">{charge != null ? peso(fromCents(charge)) : "—"}</strong>
+                                </div>
+                                <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label={`How to charge for ${i.equipmentName}`}>
+                                    {options.map(([value, label, disabled]) =>
+                                        <label key={value} className={`flex cursor-pointer items-center justify-center gap-1.5 rounded-lg border px-2 py-2 text-center text-xs font-semibold ${disabled ? "cursor-not-allowed opacity-40" : ""} ${method === value ? "border-[#2B174C] bg-[#F1EBFF] text-[#2B174C]" : "border-[#D8CBE7] bg-white text-[#5F4E75]"}`}>
+                                            <input type="radio" name={`charge-${key}`} value={value} checked={method === value} disabled={saving || disabled} className="accent-[#2B174C]"
+                                                   onChange={() => { setMethods(m => ({ ...m, [key]: value })); requestKey.current = null; }}/>{label}
+                                        </label>)}
+                                </div>
+                                {method === "repair" && <div className="flex flex-wrap items-center gap-2">
+                                    <label htmlFor={`repair-${key}`} className="text-xs font-semibold">Repair cost (₱)</label>
+                                    <input id={`repair-${key}`} inputMode="decimal" placeholder="0.00" value={repairText[key] || ""} disabled={saving}
+                                           onChange={e => { setRepairText(r => ({ ...r, [key]: e.target.value })); requestKey.current = null; }}
+                                           className="h-9 w-32 rounded-lg border border-[#D8CBE7] bg-white px-3 text-sm tabular-nums"/>
+                                    {(repairText[key] || "").trim() !== "" && !validAmount(repairText[key] || "") && <span className="text-xs text-red-700">Enter an amount like 250 or 250.50.</span>}
+                                    {replace != null && charge != null && charge > replace && <span className="text-xs text-amber-800">This is more than replacing it ({peso(fromCents(replace))}).</span>}
+                                </div>}
+                            </div>;
+                        })}
+                        <MoneyRow label="Total damage charge" value={fromCents(newChargeC)} strong/>
+                        <div className="space-y-1">
+                            <label htmlFor="settle-note" className="block text-xs font-semibold">Note (optional)</label>
+                            <input id="settle-note" maxLength={200} value={note} disabled={saving} placeholder="e.g. Cracked leg, can't be fixed"
+                                   onChange={e => { setNote(e.target.value); requestKey.current = null; }}
+                                   className="h-10 w-full rounded-lg border border-[#D8CBE7] bg-white px-3 text-sm"/>
+                        </div>
+                    </> : <MoneyRow label={decidedCharge > 0 ? "Charge already decided" : "Already decided: no charge"} value={decidedCharge}/>}
+                </section>}
+
+                {/* Step 3: settle the money */}
+                {sources && ledger && <section className={card} aria-label="Settle the money">
+                    <StepTitle number={moneyStep} title="Settle the money"
+                               hint={incidents.length > 0 ? "The security deposit pays for the charge first. The rest goes back to the customer."
+                                   : "Nothing was damaged or missing, so the whole deposit goes back to the customer."}/>
+                    <div className="space-y-2 rounded-lg bg-[#FBF8FF] p-3">
+                        <MoneyRow label="Security deposit held" value={fromCents(heldC)}/>
+                        {chargeC > 0 && <MoneyRow label={needsDecision ? "Damage charge" : "Unpaid damage charge"} value={fromCents(chargeC)} sign="-"/>}
+                        <div className="border-t border-dashed border-[#D8CBE7] pt-2">
+                            {stillOwedC > 0
+                                ? <MoneyRow label="Customer still owes" value={fromCents(stillOwedC)} strong tone="text-[#B45309]"/>
+                                : <MoneyRow label="Give back to customer" value={fromCents(giveBackC)} strong tone="text-[#218246]"/>}
+                        </div>
+                    </div>
+
+                    {stillOwedC > 0 && <div className="space-y-2">
+                        <div className="flex flex-wrap items-end gap-3">
+                            <div className="space-y-1">
+                                <label htmlFor="settle-received" className="block text-xs font-semibold">Amount received now (₱)</label>
+                                <input id="settle-received" inputMode="decimal" value={receivedText} disabled={saving}
+                                       onChange={e => { setReceivedText(e.target.value); setReceivedTouched(true); requestKey.current = null; }}
+                                       className="h-10 w-40 rounded-lg border border-[#D8CBE7] bg-white px-3 text-sm tabular-nums"/>
                             </div>
-                                {mode==="charge"?<>
-                                    <label className="block text-xs font-semibold">Final total charge for newly reported incidents (₱)
-                                <input type="number" min="0" step="0.01" value={charge} disabled={saving||!undecided.length}
-                                    onChange={e=>{setCharge(e.target.value);requestKey.current=null;}}
-                                    className="mt-1 h-11 w-full rounded-lg border border-[#D8CBE7] bg-white px-3 text-sm"/>
-                                        </label>
-                                    {!undecided.length&&<p className="text-xs text-[#806A8C]">Existing charges are locked. Only verified additional payments can be recorded.</p>}
-                                        {undecided.length>0&&<label className="block text-xs font-semibold">Manager&apos;s reason for charge or waiver
-                                        <textarea rows={2} maxLength={500} value={reason} disabled={saving} onChange={e=>{setReason(e.target.value);requestKey.current=null;}}
-                                            placeholder="Explain the staff report, responsibility, and final decision..." className="mt-1 w-full rounded-lg border border-[#D8CBE7] bg-white p-3 text-sm"/>
-                                            </label>}
-                                            {pendingLoss&&<label className="flex items-start gap-2 text-xs"><input type="checkbox" checked={permanentLossConfirmed} disabled={saving} onChange={e=>setPermanentLossConfirmed(e.target.checked)} className="mt-0.5"/>
-                                                <span>I reviewed the missing-item report and confirm those units are permanently lost.</span></label>}
-                                            <div className="rounded-lg border border-[#E6DDF0] bg-white p-3 text-xs">
-                                                <p>Deposit applied automatically to approved charges: <strong>{peso(depositToApply)}</strong></p>
-                                        <p className="mt-1">Customer balance after proposed payment: <strong>{peso(projectedDue)}</strong></p>
-                                        <p className="mt-1">Deposit remaining to return later: <strong>{peso(availableRefund)}</strong></p>
-                                        </div>
-                                        <label className="block text-xs font-semibold">Additional charge payment actually received (₱)
-                                        <input type="number" min="0" step="0.01" value={cashReceived} disabled={saving} onChange={e=>{setCashReceived(e.target.value);requestKey.current=null;}}
-                                            className="mt-1 h-11 w-full rounded-lg border border-[#D8CBE7] bg-white px-3 text-sm"/>
-                                                </label>
-                                            {Number(cashReceived)>0&&<label className="flex items-start gap-2 text-xs"><input type="checkbox" checked={cashConfirmed} disabled={saving} onChange={e=>setCashConfirmed(e.target.checked)} className="mt-0.5"/>
-                                                <span>I confirm that this additional payment was actually received and verified.</span></label>}
-                                            </>:<>
-                                            <label className="block text-xs font-semibold">Security deposit actually refunded to the customer (₱)
-                                        <input type="number" min="0" step="0.01" max={held} value={refund} disabled={saving}
-                                            onChange={e=>{setRefund(e.target.value);requestKey.current=null;}}
-                                            className="mt-1 h-11 w-full rounded-lg border border-[#D8CBE7] bg-white px-3 text-sm"/>
-                                                </label>
-                                            {Number(refund)>0&&<label className="flex items-start gap-2 text-xs"><input type="checkbox" checked={refundConfirmed} disabled={saving} onChange={e=>setRefundConfirmed(e.target.checked)} className="mt-0.5"/>
-                                                <span>I confirm that the customer has actually received this refund.</span></label>}
-                                            </>}
-                                            <label className="flex items-start gap-2 text-xs"><input type="checkbox" checked={reviewConfirmed} disabled={saving} onChange={e=>setReviewConfirmed(e.target.checked)} className="mt-0.5"/>
-                                            <span>I reviewed the Staff inspection records and the booking&apos;s existing financial transactions.</span></label>
-                                        <p className="text-xs leading-5 text-[#806A8C]">The booking price does not change. Verified charges and refundable deposits are recorded in separate ledgers; the booking completes only after all returns, claims and money are reconciled.</p>
-                                        </section>}
-                                            {error&&<p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">{error}</p>}
-                                                </div>
-                                                <div className="flex shrink-0 justify-end gap-2 border-t border-[#E6DDF0] bg-white p-4">
-                                            <button type="button" disabled={saving} onClick={onClose} className="rounded-lg border border-[#D8CBE7] px-5 py-2.5 text-sm font-semibold disabled:opacity-50">Cancel</button>
-                                                <button type="button" disabled={disableSubmit} onClick={()=>void save()}
-                                                className="rounded-lg bg-[#2B174C] px-5 py-2.5 text-sm font-semibold text-white hover:bg-[#1B0D31] disabled:opacity-50">
-                                                    {saving?"Saving...":mode==="charge"?"Save final charge / waiver":"Record refund / finish settlement"}
-                                                    </button>
-                                                    </div>
-                                                    </div>
-                                                    </div>;
-                                            }
+                            <div className="space-y-1">
+                                <label htmlFor="settle-received-method" className="block text-xs font-semibold">Paid by</label>
+                                <MethodSelect id="settle-received-method" value={receivedMethod} onChange={setReceivedMethod} disabled={saving}/>
+                            </div>
+                        </div>
+                        <p className="text-[11px] text-[#806A8C]">If the customer will pay later, enter 0. The booking stays in Pending Settlement until it is paid.</p>
+                        {receivedC > 0 && <label className="flex items-start gap-2 text-xs">
+                            <input type="checkbox" checked={receivedConfirmed} disabled={saving} onChange={e => setReceivedConfirmed(e.target.checked)} className="mt-0.5 accent-[#2B174C]"/>
+                            <span>I received <strong>{peso(fromCents(receivedC))}</strong> from the customer.</span></label>}
+                    </div>}
+
+                    {stillOwedC === 0 && giveBackC > 0 && <div className="space-y-2">
+                        <div className="space-y-1">
+                            <label htmlFor="settle-refund-method" className="block text-xs font-semibold">Give back by</label>
+                            <MethodSelect id="settle-refund-method" value={refundMethod} onChange={setRefundMethod} disabled={saving}/>
+                        </div>
+                        <label className="flex items-start gap-2 text-xs">
+                            <input type="checkbox" checked={refundConfirmed} disabled={saving} onChange={e => setRefundConfirmed(e.target.checked)} className="mt-0.5 accent-[#2B174C]"/>
+                            <span>I gave <strong>{peso(fromCents(giveBackC))}</strong> back to the customer.</span></label>
+                    </div>}
+                    {stillOwedC === 0 && giveBackC === 0 && <p className="text-xs text-[#806A8C]">Nothing to collect or give back.</p>}
+                </section>}
+
+                {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">{error}</p>}
+            </div>
+
+            <footer className="shrink-0 space-y-2 border-t border-[#E6DDF0] bg-white px-5 py-4">
+                {ledger && sources && !blocker && <p className="text-xs text-[#4F3A5A]">
+                    {completes ? <>After saving, the booking moves to <strong>Completed</strong>.</>
+                        : <>After saving, the booking stays in <strong>Pending Settlement</strong> until the customer pays {peso(fromCents(owedAfterC))}.</>}
+                </p>}
+                {blocker && <p className="text-xs text-[#926400]">{blocker}</p>}
+                <div className="flex justify-end gap-2">
+                    <button type="button" disabled={saving} onClick={onClose} className="rounded-lg border border-[#D8CBE7] px-5 py-2.5 text-sm font-semibold text-[#2B174C] disabled:opacity-50">Cancel</button>
+                    <button type="button" disabled={!canSave} onClick={() => void save()}
+                            className="rounded-lg bg-[#2B174C] px-5 py-2.5 text-sm font-semibold text-white hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-50">
+                        {saving ? "Saving..." : completes ? "Settle & Complete Booking" : "Save Settlement"}</button>
+                </div>
+            </footer>
+        </div>
+    </div>;
+}

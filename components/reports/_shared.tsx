@@ -12,8 +12,6 @@ import {
 } from "react";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import {
-    ArrowLeft,
-    ArrowRight,
     CalendarDays,
     ChevronDown,
     ChevronUp,
@@ -21,7 +19,6 @@ import {
     Download,
     FileSpreadsheet,
     FileText,
-    MapPin,
     Package,
     RefreshCw,
     RotateCcw,
@@ -2275,14 +2272,13 @@ function SearchableFilterSelect<T extends string>({
                                                   }: SearchableFilterSelectProps<T>) {
     const selectedLabel =
         options.find((option) => option.value === value)?.label || "";
-    const [query, setQuery] = useState(selectedLabel);
-    const [isOpen, setIsOpen] = useState(false);
+    // null means the dropdown is closed; show the current selected label directly.
+    const [searchQuery, setSearchQuery] = useState<string | null>(null);
+    const isOpen = searchQuery !== null;
+    const query = searchQuery ?? selectedLabel;
 
-    useEffect(() => {
-        if (!isOpen) {
-            setQuery(selectedLabel);
-        }
-    }, [isOpen, selectedLabel]);
+    const openDropdown = () => setSearchQuery((current) => current ?? selectedLabel);
+    const closeDropdown = () => setSearchQuery(null);
 
     const filteredOptions = useMemo(() => {
         const normalizedQuery = query.trim().toLowerCase();
@@ -2298,8 +2294,7 @@ function SearchableFilterSelect<T extends string>({
 
     const selectOption = (option: SearchableSelectOption<T>) => {
         onChange(option.value);
-        setQuery(option.label);
-        setIsOpen(false);
+        closeDropdown();
     };
 
     return (
@@ -2307,8 +2302,7 @@ function SearchableFilterSelect<T extends string>({
             className={`relative ${className}`}
             onBlur={(event) => {
                 if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-                    setIsOpen(false);
-                    setQuery(selectedLabel);
+                    closeDropdown();
                 }
             }}
         >
@@ -2325,13 +2319,12 @@ function SearchableFilterSelect<T extends string>({
                 aria-autocomplete="list"
                 value={query}
                 onFocus={(event) => {
-                    setIsOpen(true);
+                    openDropdown();
                     event.currentTarget.select();
                 }}
-                onClick={() => setIsOpen(true)}
+                onClick={openDropdown}
                 onChange={(event) => {
-                    setQuery(event.target.value);
-                    setIsOpen(true);
+                    setSearchQuery(event.target.value);
                 }}
                 onKeyDown={(event) => {
                     if (event.key === "Enter" && filteredOptions.length > 0) {
@@ -2340,8 +2333,8 @@ function SearchableFilterSelect<T extends string>({
                     }
 
                     if (event.key === "Escape") {
-                        setIsOpen(false);
-                        setQuery(selectedLabel);
+                        event.preventDefault();
+                        closeDropdown();
                     }
                 }}
                 className="h-11 w-full rounded-xl border border-[#E3D9E9] bg-white pl-9 pr-8 text-[12px] font-semibold text-[#2D2035] shadow-sm outline-none transition focus:border-[#8D63C8] focus:ring-2 focus:ring-[#8D63C8]/10"
@@ -2352,7 +2345,7 @@ function SearchableFilterSelect<T extends string>({
                 tabIndex={-1}
                 aria-label={`Open ${ariaLabel}`}
                 onMouseDown={(event) => event.preventDefault()}
-                onClick={() => setIsOpen((current) => !current)}
+                onClick={() => setSearchQuery((current) => current === null ? selectedLabel : null)}
                 className="absolute right-0 top-0 flex h-11 w-9 items-center justify-center text-[#6F5C7C]"
             >
                 <ChevronDown
@@ -6477,6 +6470,584 @@ type AuditLogRow = {
     branch: string;
 };
 
+// Presentation only: the API and database retain the complete audit record.
+function formatAuditActionDetails(log: Pick<AuditLogRow, "action" | "details" | "reference">): string {
+    const action = (log.action || "").trim().toLowerCase();
+    const clean = (value: unknown) => typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+    const sentence = (value: string) => value && !/[.!?]$/.test(value) ? `${value}.` : value;
+    const money = (value: unknown) => {
+        if (value === null || value === undefined || value === "" || (typeof value !== "number" && typeof value !== "string")) return "";
+        const amount = Number(value);
+        return Number.isFinite(amount) ? `₱${amount.toLocaleString("en-PH", { maximumFractionDigits: 2 })}` : "";
+    };
+    const field = (label: string, value: unknown) => {
+        const amount = money(value);
+        return amount ? `${label}: ${amount}` : "";
+    };
+    const join = (values: string[]) => values.filter(Boolean).join(" · ");
+    const asRecord = (value: unknown): Record<string, unknown> | null =>
+        value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+
+    let decoded: unknown = log.details;
+    // Older rows can contain a JSON-encoded string; newer rows may be objects.
+    for (let i = 0; i < 2 && typeof decoded === "string"; i++) {
+        const raw = decoded.trim();
+        if (!raw || !/^[{\["]/.test(raw)) break;
+        try { decoded = JSON.parse(raw); } catch { break; }
+    }
+    const data = asRecord(decoded);
+    if (data) {
+        const permissions = asRecord(data.permissions);
+        if (permissions && (action === "updated staff permissions" || action === "invited staff with permissions")) {
+            const modules = [
+                ["POS", "pos_access", "pos"],
+                ["Bookings", "bookings_access", "bookings"],
+                ["Inventory", "inventory_access", "inventory"],
+                ["Packages", "package_access", "packages"],
+            ];
+            const groups: Record<string, string[]> = { "Full access": [], "View only": [], "Enabled": [], "No access": [] };
+            for (const [name, accessKey, legacyKey] of modules) {
+                const value = permissions[accessKey] ?? permissions[legacyKey];
+                const level = String(value ?? "").toLowerCase();
+                const label = level === "full" ? "Full access" : ["view", "view_only", "viewonly"].includes(level) ? "View only" : ["true", "1"].includes(level) ? "Enabled" : ["false", "0", "none"].includes(level) ? "No access" : "";
+                if (label) groups[label].push(name);
+            }
+            return Object.entries(groups).filter(([, names]) => names.length).map(([label, names]) => `${names.join(", ")}: ${label.toLowerCase()}.`).join(" ") || "Staff access settings saved.";
+        }
+        if (action === "settled security deposit / charges") {
+            return join([field("Charge", data.charge), field("Deposit applied", data.depositApplied), field("Cash", data.cash), field("Refund", data.refund), clean(data.reason) && `Reason: ${clean(data.reason)}`]);
+        }
+        if (action.startsWith("financial event:") || action === "booking financial event" || action.includes("damage/missing charge")) {
+            const eventType = clean(data.type || data.eventType || action.replace(/^financial event:\s*/i, "")).toLowerCase();
+            const labels: Record<string, string> = {
+                deposit_received: "Deposit received", deposit_refunded: "Deposit refunded",
+                deposit_applied: "Deposit applied", claim_paid: "Claim paid",
+            };
+            return join([field(labels[eventType] || "Amount", data.amount), clean(data.reason) && `Reason: ${clean(data.reason)}`]);
+        }
+        if (data.message) {
+            const message = clean(data.message);
+            const transition = /:\s*([^:]+\s*→\s*.+)$/.exec(message)?.[1];
+            return join([transition || message, clean(data.reason) && `Reason: ${clean(data.reason)}`, clean(data.noDpReason) && `Reason: ${clean(data.noDpReason)}`]);
+        }
+        if ("eventType" in data || "followUpOn" in data) {
+            return join([clean(data.notes), clean(data.channel) && `Via ${clean(data.channel)}`, clean(data.followUpOn) && `Follow-up: ${clean(data.followUpOn)}`]);
+        }
+        // Unknown structured records must not spill a JSON payload into the UI.
+        // Prefer human-readable fields without inventing the meaning of other data.
+        return join([clean(data.description), clean(data.message), clean(data.notes), clean(data.reason), field("Amount", data.amount)]) || "Additional details recorded.";
+    }
+    let text = clean(decoded);
+    if (!text) return Array.isArray(decoded) ? "Additional details recorded." : "";
+    if (/^[{\[]/.test(text)) return "Additional details recorded.";
+    let match: RegExpExecArray | null;
+    if ((match = /^(Archived|Deleted) variant (.+?) \([^)]*\) of (.+?); sibling variants were not changed\.?$/i.exec(text))) {
+        return `${match[3]} – ${match[2]}`;
+    }
+    if ((match = /^Added (.+?) with (\d+) variant\(s\) to inventory$/i.exec(text))) {
+        return `${match[1]} · ${match[2]} ${match[2] === "1" ? "variant" : "variants"}`;
+    }
+    if ((match = /^Added (.+?) to (?:inventory|packages|categories)$/i.exec(text))) return match[1];
+    if ((match = /^Removed (.+?) from (?:packages|categories)$/i.exec(text))) return match[1];
+    if ((match = /^Received (\d+) unit\(s\) of (.+?) \(Receipt #([^)]+)\)(.*)$/i.exec(text))) {
+        return join([`${match[2]} · +${match[1]} ${match[1] === "1" ? "unit" : "units"}`, /catalog discrepancies/i.test(match[4]) ? "Stock discrepancy noted" : ""]);
+    }
+    if (action === "completed pos transaction" && (match = /^(.*?)\s+—\s+Grand Total\s+(.+?)\s+—\s+([^—]+?)(?:\s+—|$)/i.exec(text))) {
+        const method = match[3].trim();
+        const payment = ({ CASH: "Cash", GCASH: "GCash", BANK: "Bank", BANK_TRANSFER: "Bank transfer" } as Record<string, string>)[method.toUpperCase()] || method;
+        return join([match[1].replace(/\s+x(\d+)\b/gi, " ×$1"), match[2], payment]);
+    }
+    if ((match = /^Deleted (.+?) from (?:the active catalog|active rental inventory)(?: because a related record prevented physical deletion)?; (\d+) unit\(s\) recorded as Stock Out;.*$/i.exec(text))) {
+        const reason = /\bReason:\s*(.+)$/i.exec(text)?.[1];
+        return join([match[1], `${match[2]} ${match[2] === "1" ? "unit" : "units"} removed`, reason ? `Reason: ${reason}` : ""]);
+    }
+    if ((match = /^Permanently deleted unused product (.+)$/i.exec(text))) return `${match[1]} · Permanently deleted`;
+    if ((match = /^Booking payment (₱[\d,.]+); refundable security deposit (₱[\d,.]+)\.?/i.exec(text))) return join([`Payment: ${match[1].replace(/\.$/, "")}`, `Deposit: ${match[2].replace(/\.$/, "")}`]);
+    if (action === "automatically confirmed after verified down payment") return "Down payment verified · Inventory reserved";
+    if ((match = /^Physically handed over (\d+) (?:Sales|Consumable) product lines?; (stock deducted from branch inventory|inventory was already reserved)\.?$/i.exec(text))) {
+        return join([`${match[1]} product ${match[1] === "1" ? "line" : "lines"}`, /^stock deducted/i.test(match[2]) ? "Stock deducted" : "Stock already reserved"]);
+    }
+    if (/^prepared (?:consumable product|sales booking inclusion)$/i.test(action) && (match = /^Prepared (\d+)\s*[×x]\s*(.+)$/i.exec(text))) {
+        return `${match[2]} ×${match[1]}`;
+    }
+    if (action === "updated booking payment terms") {
+        // Keep both old and new amounts. Never split thousands separators.
+        const terms = (log.reference && text.startsWith(`${log.reference} (`))
+            ? text.replace(/^[^(]+\([^)]*\):\s*/, "") : text;
+        const amounts = /^(?:price)\s+(₱[\d,.]+)\s*(?:→|->)\s*(₱[\d,.]+?)\s*,\s*down payment\s+(₱[\d,.]+)\s*(?:→|->)\s*(₱[\d,.]+?)(?:\s*,\s*refundable deposit\s+(₱[\d,.]+?))?(?:\s*,\s*Custom consumables quote:\s*(.*))?\.?$/i.exec(terms);
+        if (amounts) return join([`Price: ${amounts[1]} → ${amounts[2]}`, `Down payment: ${amounts[3]} → ${amounts[4]}`, amounts[5] ? `Deposit: ${amounts[5]}` : "", amounts[6] ? `Quote: ${amounts[6]}` : ""]);
+        return sentence(terms);
+    }
+    if (action === "updated product") {
+        const product = /^(?:Updated details for|Updated product details for) (.+?)(?:; stock edited:\s*(.+))?$/i.exec(text);
+        if (product) {
+            const changes = product[2]?.replace(/\s*->\s*/g, " → ")
+                .replace(/(^|,\s*)stock\s+(?=\d)/gi, "$1Stock: ")
+                .replace(/(^|,\s*)variant (\S+)\s+(?=\d)/gi, "$1Variant $2: ")
+                .replace(/(^|,\s*)new variant (\S+) opening stock /gi, "$1New variant $2: ");
+            return join([product[1], changes || ""]);
+        }
+    }
+    if (action === "updated package") {
+        const rename = /^Renamed (.+?) to (.+)$/i.exec(text);
+        if (rename) return `${rename[1]} → ${rename[2]}`;
+        text = text.replace(/^(?:Updated details for|Updated package details for) /i, "");
+        return text;
+    }
+    return sentence(text);
+}
+
+
+function formatAuditPdfTitle(title: string) {
+    const cleaned = normalizePdfText(title)
+        .replace(/[_-]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    if (!cleaned) return "Dashboard Report";
+
+    return cleaned
+        .split(" ")
+        .map((word) => {
+            if (!word) return word;
+            return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+        })
+        .join(" ");
+}
+
+/** Independent Audit Logs PDF layout; dashboard exports are not affected. */
+type AuditPdfOptions = {
+    centerColumns?: boolean;
+    totalRow?: string[];
+    currencyNote?: boolean;
+    // Opt-in two-level, left-aligned cell (title, then newline-separated details).
+    stackedTextColumn?: string;
+};
+
+function createAuditTablePdf({
+                                 title,
+                                 storeName,
+                                 branch,
+                                 dateRange,
+                                 headers,
+                                 rows,
+                                 options,
+                             }: {
+    title: string;
+    storeName: string;
+    branch: string;
+    dateRange: string;
+    headers: string[];
+    rows: string[][];
+    options?: AuditPdfOptions;
+}) {
+    const pageWidth = 595.28;
+    const pageHeight = 841.89;
+    const outerMargin = 25;
+    const pageInset = 24;
+    const marginX = 42;
+    const marginBottom = 54;
+    const contentWidth = pageWidth - marginX * 2;
+    const regularFont = "F1";
+    const boldFont = "F2";
+    const titleText = formatAuditPdfTitle(title);
+    const fontSize = headers.length >= 6 ? 7 : headers.length >= 5 ? 7.6 : 8.2;
+    const headerFontSize = Math.max(7, fontSize - 0.1);
+    const metaFontSize = 10.2;
+    const lineHeight = fontSize + 2.8;
+    const cellPaddingX = 5;
+    const cellPaddingY = 5;
+
+    const cream: [number, number, number] = [0.992, 0.98, 0.956];
+    const white: [number, number, number] = [1, 1, 1];
+    const purple: [number, number, number] = [0.169, 0.09, 0.298];
+    const purpleText: [number, number, number] = [0.169, 0.09, 0.298];
+    const ink: [number, number, number] = [0.102, 0.071, 0.125];
+    const muted: [number, number, number] = [0.373, 0.306, 0.459];
+    const border: [number, number, number] = [0.902, 0.866, 0.941];
+    const tint: [number, number, number] = [0.976, 0.965, 0.992];
+    const divider: [number, number, number] = [0.9, 0.86, 0.94];
+    const altRow: [number, number, number] = [0.989, 0.984, 0.995];
+
+    const centered = options?.centerColumns === true;
+    const weights = headers.map(header => centered && header === options?.stackedTextColumn ? 2.65 : centered && header === "Weeks" ? 2.1 : centered && header === "Rank" ? 0.65 : getPdfColumnWeight(header));
+    const totalWeight = weights.reduce((total, weight) => total + weight, 0);
+
+    let runningX = marginX;
+    const columns = headers.map((header, index) => {
+        const width = (contentWidth * weights[index]) / totalWeight;
+        const column = {
+            header,
+            x: runningX,
+            width,
+            numeric: isPdfNumericColumn(header),
+        };
+
+        runningX += width;
+        return column;
+    });
+
+    const point = (value: number) => Number(value.toFixed(2));
+    const pages: string[] = [];
+    let commands: string[] = [];
+    let cursorY = 0;
+
+    // Helvetica ASCII glyph widths, for exact centered alignment and wrapping.
+    const regularWidths = [278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,278,278,584,584,584,556,1015,667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,611,722,667,944,667,667,611,278,278,278,469,556,333,556,556,500,556,556,278,556,556,222,222,500,222,833,556,556,556,556,333,500,278,556,500,722,500,500,500,334,260,334,584];
+    const boldWidths = [278,333,474,556,556,889,722,238,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,333,333,584,584,584,611,975,722,722,722,722,667,611,778,722,278,556,722,611,833,722,778,667,778,722,667,611,722,667,944,667,667,611,333,278,333,584,556,333,556,611,556,611,556,333,611,611,278,278,556,278,889,611,611,611,611,389,556,333,611,556,778,556,556,500,389,280,389,584];
+    function measure(value: string, size: number, font: string) {
+        const text = normalizePdfText(value);
+        if (!centered) return text.length * size * 0.52;
+        const widths = font === boldFont ? boldWidths : regularWidths;
+        return Array.from(text).reduce((n,c)=>n+(widths[c.charCodeAt(0)-32] ?? 600),0)*size/1000;
+    }
+    function wrapCentered(value: string, width: number, size: number, font: string) {
+        const text = normalizePdfText(value);
+        if (!text) return [""];
+        const lines: string[] = [];
+        let line = "";
+        for(const word of text.split(" ")) {
+            if(line && measure(`${line} ${word}`,size,font)>width) {lines.push(line);line="";}
+            if(measure(word,size,font)>width) {
+                for(const char of word) {
+                    if(line && measure(line+char,size,font)>width) {lines.push(line);line="";}
+                    line+=char;
+                }
+            } else line=line ? `${line} ${word}` : word;
+        }
+        if(line) lines.push(line);
+        return lines.length?lines:[""];
+    }
+
+    function addText(
+        value: string,
+        x: number,
+        y: number,
+        size: number,
+        font: string,
+        color: [number, number, number],
+        align: "left" | "center" | "right" = "left"
+    ) {
+        const normalized = normalizePdfText(value);
+        if (centered && !normalized) return;
+        const text = normalized || "-";
+        const textWidth = measure(text, size, font);
+        const adjustedX =
+            align === "center" ? x - textWidth / 2 : align === "right" ? x - textWidth : x;
+
+        commands.push(
+            `q ${color.join(" ")} rg BT /${font} ${point(size)} Tf 1 0 0 1 ${point(
+                adjustedX
+            )} ${point(y)} Tm (${escapePdf(text)}) Tj ET Q`
+        );
+    }
+
+    function fillRect(
+        x: number,
+        y: number,
+        width: number,
+        height: number,
+        color: [number, number, number]
+    ) {
+        commands.push(
+            `q ${color.join(" ")} rg ${point(x)} ${point(y)} ${point(width)} ${point(
+                height
+            )} re f Q`
+        );
+    }
+
+    function strokeRect(
+        x: number,
+        y: number,
+        width: number,
+        height: number,
+        color: [number, number, number],
+        lineWidth = 0.7
+    ) {
+        commands.push(
+            `q ${color.join(" ")} RG ${point(lineWidth)} w ${point(x)} ${point(y)} ${point(
+                width
+            )} ${point(height)} re S Q`
+        );
+    }
+
+    function drawDivider(y: number, color: [number, number, number] = divider, lineWidth = 0.7) {
+        commands.push(
+            `q ${color.join(" ")} RG ${point(lineWidth)} w ${point(marginX)} ${point(y)} m ${point(
+                pageWidth - marginX
+            )} ${point(y)} l S Q`
+        );
+    }
+
+    function wrapCellText(value: string, columnWidth: number, linesLimit = 4) {
+        const headerTightness = headers.length >= 6 ? 0.94 : 1;
+        const maxCharacters = Math.max(
+            4,
+            Math.floor(((columnWidth - cellPaddingX * 2) / (fontSize * 0.52)) * headerTightness)
+        );
+        return wrapPdfText(value, maxCharacters, linesLimit);
+    }
+
+    function drawTableHeader() {
+        const headerLines = headers.map((header, index) => {
+            const limit = Math.max(
+                4,
+                Math.floor((columns[index].width - cellPaddingX * 2) / (headerFontSize * 0.52))
+            );
+            return centered ? wrapCentered(header, columns[index].width - cellPaddingX * 2, headerFontSize, boldFont) : wrapPdfText(header, limit, 3);
+        });
+        const headerLineCount = Math.max(...headerLines.map((lines) => lines.length));
+        const headerHeight = Math.max(26, headerLineCount * (headerFontSize + 2) + cellPaddingY * 2);
+        const bottomY = cursorY - headerHeight;
+
+        fillRect(marginX, bottomY, contentWidth, headerHeight, tint);
+        strokeRect(marginX, bottomY, contentWidth, headerHeight, border, 0.75);
+
+        columns.forEach((column, index) => {
+            if (index > 0) {
+                commands.push(
+                    `q ${border.join(" ")} RG 0.45 w ${point(column.x)} ${point(bottomY)} m ${point(
+                        column.x
+                    )} ${point(cursorY)} l S Q`
+                );
+            }
+
+            const lines = headerLines[index];
+            lines.forEach((line, lineIndex) => {
+                const textWidth = line.length * headerFontSize * 0.52;
+                const textX = centered ? column.x + column.width / 2 : column.numeric
+                    ? column.x + column.width - cellPaddingX - textWidth
+                    : column.x + cellPaddingX;
+                const baseline = centered ? cursorY - (headerHeight - lines.length*(headerFontSize+2))/2 - headerFontSize : cursorY - cellPaddingY - headerFontSize;
+                addText(line, textX, baseline - lineIndex*(headerFontSize+2), headerFontSize, boldFont, purpleText, centered ? "center" : "left");
+            });
+        });
+
+        cursorY = bottomY;
+    }
+
+    function drawPageTitle(continued: boolean) {
+        const cardX = outerMargin;
+        const cardY = pageInset;
+        const cardWidth = pageWidth - outerMargin * 2;
+        const cardHeight = pageHeight - pageInset * 2;
+
+        fillRect(0, 0, pageWidth, pageHeight, cream);
+        fillRect(cardX, cardY, cardWidth, cardHeight, white);
+        fillRect(cardX, pageHeight - pageInset - 6, cardWidth, 6, purple);
+
+        let topY = pageHeight - 58;
+        addText(storeName || "Store", pageWidth / 2, topY, 21, boldFont, purpleText, "center");
+        topY -= 17;
+
+        if (branch) {
+            addText(`Branch: ${branch}`, pageWidth / 2, topY, 11.5, boldFont, purpleText, "center");
+            topY -= 16;
+        }
+
+        addText(`Date range: ${dateRange}`, pageWidth / 2, topY, metaFontSize, regularFont, muted, "center");
+        topY -= 12;
+        drawDivider(topY, border, 0.7);
+
+        topY -= continued ? 24 : 28;
+        addText(
+            continued ? `${titleText} (continued)` : titleText,
+            pageWidth / 2,
+            topY,
+            continued ? 16 : 18,
+            boldFont,
+            purpleText,
+            "center"
+        );
+
+        topY -= 16;
+        addText(
+            rows.length
+                ? `${rows.length.toLocaleString("en-PH")} row(s) exported${options?.currencyNote ? " | Amounts in Philippine pesos" : ""}`
+                : "No records available for the selected period",
+            pageWidth / 2,
+            topY,
+            9,
+            regularFont,
+            muted,
+            "center"
+        );
+
+        cursorY = topY - 18;
+        drawTableHeader();
+    }
+
+    function finishPage() {
+        if (commands.length > 0) {
+            pages.push(commands.join("\n"));
+            commands = [];
+        }
+    }
+
+    function startPage(continued: boolean) {
+        if (commands.length > 0) finishPage();
+        drawPageTitle(continued);
+    }
+
+    function drawTableRow(row: string[], rowIndex: number, isTotal = false) {
+        const rowFont = isTotal ? boldFont : regularFont;
+        const isStacked = (index: number) => centered && !isTotal && headers[index] === options?.stackedTextColumn;
+        const detailFontSize = Math.max(6.5, fontSize - 0.3);
+        const cellLines = columns.map((column, index) => {
+            const width = column.width - cellPaddingX * 2;
+            if (isStacked(index)) {
+                const [heading, ...details] = (row[index] ?? "-").split("\n");
+                const titleLines = wrapCentered(heading, width, fontSize, boldFont);
+                const detailLines = details.filter(value => value.trim()).flatMap(value => wrapCentered(value, width, detailFontSize, regularFont));
+                return [...titleLines.map(text => ({ text, heading: true })), ...detailLines.map(text => ({ text, heading: false }))];
+            }
+            const lines = centered
+                ? wrapCentered(row[index] ?? "-", width, fontSize, rowFont)
+                : wrapCellText(row[index] ?? "-", column.width, headers.length >= 6 ? 5 : 4);
+            return lines.map(text => ({ text, heading: false }));
+        });
+        const maxLines = Math.max(...cellLines.map((lines) => lines.length));
+        const rowHeight = Math.max(24, maxLines * lineHeight + cellPaddingY * 2);
+
+        if (cursorY - rowHeight < marginBottom + 30) {
+            startPage(true);
+        }
+
+        const rowBottom = cursorY - rowHeight;
+        fillRect(marginX, rowBottom, contentWidth, rowHeight, isTotal ? tint : rowIndex % 2 === 0 ? white : altRow);
+        strokeRect(marginX, rowBottom, contentWidth, rowHeight, border, 0.45);
+
+        columns.forEach((column, index) => {
+            if (index > 0) {
+                commands.push(
+                    `q ${border.join(" ")} RG 0.3 w ${point(column.x)} ${point(rowBottom)} m ${point(
+                        column.x
+                    )} ${point(cursorY)} l S Q`
+                );
+            }
+
+            cellLines[index].forEach(({ text: line, heading }, lineIndex) => {
+                if (isStacked(index)) {
+                    const baseline = cursorY - (rowHeight - cellLines[index].length * lineHeight) / 2 - fontSize;
+                    addText(line, column.x + cellPaddingX, baseline - lineIndex * lineHeight,
+                        heading ? fontSize : detailFontSize, heading ? boldFont : regularFont,
+                        heading ? purpleText : muted, "left");
+                    return;
+                }
+                const textWidth = line.length * fontSize * 0.52;
+                const textX = centered ? column.x + column.width / 2 : column.numeric
+                    ? column.x + column.width - cellPaddingX - textWidth
+                    : column.x + cellPaddingX;
+                const baseline = centered ? cursorY - (rowHeight - cellLines[index].length*lineHeight)/2 - fontSize : cursorY - cellPaddingY - fontSize;
+                addText(line, textX, baseline - lineIndex*lineHeight, fontSize, rowFont, isTotal ? purpleText : ink, centered ? "center" : "left");
+            });
+        });
+
+        cursorY = rowBottom;
+    }
+
+    startPage(false);
+
+    if (rows.length === 0) {
+        addText(
+            "No records found for the selected report period.",
+            pageWidth / 2,
+            cursorY - 26,
+            10,
+            regularFont,
+            muted,
+            "center"
+        );
+    } else {
+        rows.forEach((row, index) => drawTableRow(row, index));
+        if (options?.totalRow) drawTableRow(options.totalRow, rows.length, true);
+    }
+
+    finishPage();
+
+    const pageStreams = pages.map((stream, index) => {
+        const footerText = `Powered by StockNBook | Page ${index + 1} of ${pages.length}`;
+        return `${stream}
+q ${divider.join(" ")} RG 0.6 w ${point(marginX)} 42 m ${point(
+            pageWidth - marginX
+        )} 42 l S Q
+q ${muted.join(" ")} rg BT /F1 8 Tf 1 0 0 1 ${point(
+            pageWidth / 2 - footerText.length * 2.05
+        )} 26 Tm (${escapePdf(footerText)}) Tj ET Q`;
+    });
+
+    const pageObjectIds = pageStreams.map((_, index) => 5 + index * 2);
+    const contentObjectIds = pageStreams.map((_, index) => 6 + index * 2);
+
+    const objects: Record<number, string> = {
+        1: "<< /Type /Catalog /Pages 2 0 R >>",
+        2: `<< /Type /Pages /Kids [${pageObjectIds
+            .map((id) => `${id} 0 R`)
+            .join(" ")}] /Count ${pageObjectIds.length} >>`,
+        3: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        4: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
+    };
+
+    pageStreams.forEach((stream, index) => {
+        const pageId = pageObjectIds[index];
+        const contentId = contentObjectIds[index];
+
+        objects[pageId] =
+            `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] ` +
+            `/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${contentId} 0 R >>`;
+
+        objects[contentId] = `<< /Length ${stream.length} >>
+stream
+${stream}
+endstream`;
+    });
+
+    const maxObjectId = Math.max(...Object.keys(objects).map(Number));
+    let pdf = "%PDF-1.4\n";
+    const offsets: number[] = [0];
+
+    for (let id = 1; id <= maxObjectId; id += 1) {
+        offsets[id] = pdf.length;
+        pdf += `${id} 0 obj\n${objects[id]}\nendobj\n`;
+    }
+
+    const xrefOffset = pdf.length;
+    pdf += `xref\n0 ${maxObjectId + 1}\n`;
+    pdf += "0000000000 65535 f \n";
+
+    for (let id = 1; id <= maxObjectId; id += 1) {
+        pdf += `${String(offsets[id]).padStart(10, "0")} 00000 n \n`;
+    }
+
+    pdf += `trailer\n<< /Size ${maxObjectId + 1} /Root 1 0 R >>\n`;
+    pdf += `startxref\n${xrefOffset}\n%%EOF`;
+
+    return pdf;
+}
+
+// Audit PDF only: compact legacy booking descriptions while keeping screen text unchanged.
+function formatAuditPdfAction(log: AuditLogRow): string {
+    let title = (log.action || "-").trim();
+    let details = formatAuditActionDetails(log);
+    if (log.module.toLowerCase().trim() === "bookings") {
+        if (/^prepared (?:sales booking inclusion|consumable product)$/i.test(title)) {
+            title = "Prepared consumable product";
+            const prepared = /^Prepared\s+(\d+)\s*[×x✕*]\s*(.+?)\.?$/i.exec(details);
+            if (prepared) details = `${prepared[2]} ×${prepared[1]}`;
+        } else if (/^released (?:complete sales booking inclusions|consumable products)$/i.test(title)) {
+            title = "Released consumable products";
+            const released = /^Physically handed over\s+(\d+)\s+(?:Sales|Consumables?)\s+product\s+lines?\s*[;,.–—-]\s*(stock deducted(?: from branch inventory)?|(?:inventory|stock) was already reserved)\s*\.?$/i.exec(details);
+            if (released) {
+                details = `${released[1]} product ${released[1] === "1" ? "line" : "lines"} · ${/^stock deducted/i.test(released[2]) ? "Stock deducted" : "Stock already reserved"}`;
+            }
+            details = details.replace(/\bSales product(s| lines?)?\b/gi, "consumable product$1");
+        }
+    }
+    return [title, details].filter(Boolean).join("\n")
+        .replace(/·/g, "|").replace(/×/g, "x").replace(/→/g, "->");
+}
+
+
 type AuditLogResponse = {
     success?: boolean;
     error?: string;
@@ -6491,6 +7062,25 @@ type AuditLogResponse = {
     };
 };
 
+type AuditDatePeriod = "today" | "month" | "year" | "custom";
+
+function getAuditPresetRange(period: Exclude<AuditDatePeriod, "custom">, today: string) {
+    return {
+        startDate: period === "today" ? today : period === "month" ? getMonthStart(today) : `${today.slice(0, 4)}-01-01`,
+        endDate: today,
+    };
+}
+
+function getAuditDateRangeError(start: string, end: string, today: string): string {
+    if (!start || !end) return "Select both dates.";
+    if (start > end) return "Start date must be on or before the end date.";
+    if (end > today) return "End date cannot be in the future.";
+    const days = (Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86_400_000 + 1;
+    if (!Number.isFinite(days) || days < 1) return "Select valid dates.";
+    if (days > 366) return "Select a date range of up to 366 days.";
+    return "";
+}
+
 export function AuditLogsWorkspace({
                                        initialRole,
                                        assignedBranch,
@@ -6500,8 +7090,12 @@ export function AuditLogsWorkspace({
     const owner = initialRole === "owner";
     const manager = initialRole === "manager";
     const [search, setSearch] = useState("");
-    const [startDate, setStartDate] = useState(() => getMonthStart(getToday()));
-    const [endDate, setEndDate] = useState(getToday);
+    const [period, setPeriod] = useState<AuditDatePeriod>("today");
+    const [range, setRange] = useState(() => getAuditPresetRange("today", getToday()));
+    const { startDate, endDate } = range;
+    const [draftRange, setDraftRange] = useState(range);
+    const today = getToday();
+    const rangeError = getAuditDateRangeError(draftRange.startDate, draftRange.endDate, today);
     const [moduleName, setModuleName] = useState("");
     const [branchId, setBranchId] = useState("");
     const [branches, setBranches] = useState<Array<{ id: number; name: string }>>([]);
@@ -6511,6 +7105,7 @@ export function AuditLogsWorkspace({
     const [totalPages, setTotalPages] = useState(1);
     const [loading, setLoading] = useState(true);
     const scrollLoadPending = useRef(false);
+    const tableScrollRef = useRef<HTMLDivElement>(null);
     const [exporting, setExporting] = useState(false);
     const [error, setError] = useState("");
 
@@ -6609,21 +7204,22 @@ export function AuditLogsWorkspace({
             const scopeLabel = owner
                 ? (branchId ? branches.find((branch) => String(branch.id) === branchId)?.name || "Selected Branch" : "All Branches")
                 : assignedBranch || "Assigned Branch";
-            const pdf = createTablePdf({
+            // Use the independent audit renderer; do not depend on dashboard source.
+            const pdf = createAuditTablePdf({
                 title: "Audit Logs / Employee Actions",
                 storeName: storeName || "StockNBook",
                 branch: scopeLabel,
                 dateRange: `${startDate} to ${endDate}`,
-                // Preserve longer action descriptions without changing other report exports.
-                maxCellLines: 10,
+                // Keep dashboard styling; the audit action cell has a bold title and muted details.
+                options: { centerColumns: true, currencyNote: true, stackedTextColumn: "Action / Details" },
                 headers: viewConfig.showBranchColumn
-                    ? ["Date / Time", "Employee", "Action", "Module", "Reference", "Branch"]
-                    : ["Date / Time", "Employee", "Action", "Module", "Reference"],
+                    ? ["Date / Time", "Employee", "Action / Details", "Module", "Reference", "Branch"]
+                    : ["Date / Time", "Employee", "Action / Details", "Module", "Reference"],
                 rows: allLogs.map((log) => {
                     const cells = [
                         `${log.date || "-"} ${formatAuditClockTime(log.time)}`.trim(),
-                        `${log.employeeName || "Unknown"} (${log.employeeRole || "Staff"})`,
-                        log.details ? `${log.action || "-"} - ${log.details}` : log.action || "-",
+                        `${log.employeeName || "Unknown"} (${(log.employeeRole || "Staff").replace(/^./, (letter) => letter.toUpperCase())})`,
+                        formatAuditPdfAction(log),
                         log.module || "-",
                         log.reference || "-",
                     ];
@@ -6639,59 +7235,95 @@ export function AuditLogsWorkspace({
         }
     };
 
-    const inputStyle = "h-[42px] min-w-0 w-full rounded-xl border border-[#E3D8EA] bg-white px-3 text-sm text-[#1A1220] outline-none shadow-sm transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10";
+    function resetAuditPage() {
+        scrollLoadPending.current = false;
+        if (tableScrollRef.current) tableScrollRef.current.scrollTop = 0;
+        setPage(1);
+        setRows([]);
+        setTotal(0);
+        setTotalPages(1);
+        setLoading(true);
+    }
+
+    function changePeriod(next: AuditDatePeriod) {
+        setPeriod(next);
+        if (next === "custom") {
+            setDraftRange(range);
+            return;
+        }
+        const nextRange = getAuditPresetRange(next, getToday());
+        if (startDate !== nextRange.startDate || endDate !== nextRange.endDate) {
+            resetAuditPage();
+            setRange(nextRange);
+        }
+    }
+
+    function applyCustomRange() {
+        if (getAuditDateRangeError(draftRange.startDate, draftRange.endDate, getToday())) return;
+        if (startDate !== draftRange.startDate || endDate !== draftRange.endDate) {
+            resetAuditPage();
+            setRange(draftRange);
+        }
+    }
+
+    // Same filter and card styling as the Owner / Manager dashboards.
+    const inputStyle = "h-9 min-w-0 w-full rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] outline-none transition focus:border-[#BFA8E2] focus-visible:ring-2 focus-visible:ring-[#F1EBFF]";
+    const customRangePending = draftRange.startDate !== startDate || draftRange.endDate !== endDate;
 
     return (
-        <div className="min-h-screen bg-[#FFFDF8] font-sans text-[#1A1220]">
-            <header className="sticky top-0 z-20 flex min-h-[72px] flex-wrap items-center justify-between gap-3 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 px-6 py-3 backdrop-blur">
-                <div>
-                    <h1 className="text-[25px] font-bold text-[#1A1220]">Audit Logs</h1>
-                    <p className="mt-1 text-xs text-[#806A8C]">
-                        {owner ? "Manager and staff actions across your branches."
-                            : manager ? `Staff actions in ${assignedBranch || "your assigned branch"}.`
-                                : "Your recorded employee actions."}
-                    </p>
+        <div className="min-h-screen bg-[#FDFAF4] font-sans text-[#1A1220]">
+            <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur">
+                <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-3">
+                    <div className="min-w-0">
+                        <h1 className="text-[25px] font-bold text-[#1A1220]">Audit Logs</h1>
+                        <p className="mt-0.5 text-xs text-[#766983]">
+                            {owner ? "Manager and staff actions across your branches."
+                                : manager ? `Staff actions in ${assignedBranch || "your assigned branch"}.`
+                                    : "Your recorded employee actions."}
+                        </p>
+                    </div>
                 </div>
             </header>
 
-            <section className="px-6 py-4">
-                <div className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
-                    <div className="flex flex-wrap items-center justify-between gap-3 px-5 pb-3 pt-5">
-                        <div>
-                            <h2 className="text-[16px] font-bold text-[#1A1220]">Employee Action History</h2>
-                            <p className="mt-1 text-xs text-[#806A8C]">Who performed the action, what changed, where it happened, and when.</p>
+            <section className="px-5 py-5 font-sans" aria-busy={loading}>
+                <div className="min-w-0 overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm">
+                    <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3.5">
+                        <div className="flex min-w-0 items-center gap-2.5">
+                            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]" aria-hidden="true"><FileText size={18} /></span>
+                            <div className="min-w-0">
+                                <h2 className="text-[15px] font-bold leading-5 text-[#1A1220]">Employee Action History</h2>
+                                <p className="mt-0.5 text-[11px] leading-4 text-[#86778F]">Who performed the action, what changed, where it happened, and when.</p>
+                            </div>
                         </div>
                         <button type="button" onClick={() => void downloadAuditLogs()}
-                                disabled={loading || exporting || total === 0}
+                                disabled={loading || exporting || total === 0 || (period === "custom" && customRangePending)}
                                 aria-label="Download filtered audit logs as PDF"
                                 title="Download filtered audit logs as PDF"
-                                className="inline-flex h-[42px] w-[42px] shrink-0 items-center justify-center rounded-xl border border-[#DFCFEF] bg-white text-[#5A35A5] shadow-sm transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-40">
-                            <Download size={18} className={exporting ? "animate-pulse" : ""} />
+                                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#D9CDF0] bg-white text-[#5A35A5] transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-40">
+                            <Download size={16} className={exporting ? "animate-pulse" : ""} />
                         </button>
                     </div>
 
-                    <div className={`grid gap-3 px-5 pb-4 sm:grid-cols-2 ${owner && viewConfig.showBranchFilter ? "xl:grid-cols-[minmax(220px,1fr)_175px_175px_185px_195px]" : "xl:grid-cols-[minmax(220px,1fr)_185px_185px_210px]"}`}>
+                    <div className={`grid gap-2 px-4 pb-3 sm:grid-cols-2 ${owner && viewConfig.showBranchFilter ? "xl:grid-cols-[minmax(180px,1fr)_150px_165px_165px]" : "xl:grid-cols-[minmax(180px,1fr)_150px_180px]"}`}>
                         <label className="relative block min-w-0">
                             <span className="sr-only">Search employee actions</span>
                             <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#9B8AAA]" />
-                            <input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }}
+                            <input value={search} onChange={(event) => { if (event.target.value !== search) { resetAuditPage(); setSearch(event.target.value); } }}
                                    placeholder="Search employee, action or reference..."
-                                   className={`${inputStyle} pl-10 placeholder:text-[#9B8AAA]`} />
+                                   className={`${inputStyle} pl-9 font-normal placeholder:text-[#9B8AAA]`} />
                         </label>
                         <label className="relative block min-w-0">
-                            <span className="sr-only">From date</span>
-                            <span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-[10px] font-semibold text-[#806A8C]">FROM</span>
-                            <input type="date" value={startDate} max={endDate} onChange={(event) => { setStartDate(event.target.value); setPage(1); }}
-                                   className={`${inputStyle} pl-14`} />
-                        </label>
-                        <label className="relative block min-w-0">
-                            <span className="sr-only">To date</span>
-                            <span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-[10px] font-semibold text-[#806A8C]">TO</span>
-                            <input type="date" value={endDate} min={startDate} onChange={(event) => { setEndDate(event.target.value); setPage(1); }}
-                                   className={`${inputStyle} pl-9`} />
+                            <span className="sr-only">Filter audit logs by period</span>
+                            <CalendarDays size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#806A8C]" />
+                            <select value={period} onChange={(event) => changePeriod(event.target.value as AuditDatePeriod)} className={`${inputStyle} pl-9`}>
+                                <option value="today">Today</option>
+                                <option value="month">This Month</option>
+                                <option value="year">This Year</option>
+                                <option value="custom">Date Range</option>
+                            </select>
                         </label>
                         <select aria-label="Filter audit logs by module" value={moduleName}
-                                onChange={(event) => { setModuleName(event.target.value); setPage(1); }} className={inputStyle}>
+                                onChange={(event) => { if (event.target.value !== moduleName) { resetAuditPage(); setModuleName(event.target.value); } }} className={inputStyle}>
                             <option value="">All Modules</option>
                             {["Bookings", "Inventory", "Sales / POS", "Packages"].map((name) => (
                                 <option key={name} value={name}>{name}</option>
@@ -6699,16 +7331,40 @@ export function AuditLogsWorkspace({
                         </select>
                         {owner && viewConfig.showBranchFilter && (
                             <select aria-label="Filter audit logs by branch" value={branchId}
-                                    onChange={(event) => { setBranchId(event.target.value); setPage(1); }} className={inputStyle}>
+                                    onChange={(event) => { if (event.target.value !== branchId) { resetAuditPage(); setBranchId(event.target.value); } }} className={inputStyle}>
                                 <option value="">All Branches</option>
                                 {branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
                             </select>
                         )}
                     </div>
 
+                    {period === "custom" && (
+                        <div className="mx-4 mb-3 rounded-xl border border-[#E7DFEC] bg-[#FFFCF7] p-3">
+                            <div className="flex flex-wrap items-end gap-2">
+                                <label className="min-w-0 flex-1 sm:max-w-[180px]">
+                                    <span className="mb-1 block text-[11px] font-semibold text-[#806A8C]">Start date</span>
+                                    <input type="date" value={draftRange.startDate} max={draftRange.endDate || today}
+                                           onChange={(event) => setDraftRange(previous => ({ ...previous, startDate: event.target.value }))}
+                                           className={inputStyle} />
+                                </label>
+                                <label className="min-w-0 flex-1 sm:max-w-[180px]">
+                                    <span className="mb-1 block text-[11px] font-semibold text-[#806A8C]">End date</span>
+                                    <input type="date" value={draftRange.endDate} min={draftRange.startDate} max={today}
+                                           onChange={(event) => setDraftRange(previous => ({ ...previous, endDate: event.target.value }))}
+                                           className={inputStyle} />
+                                </label>
+                                <button type="button" onClick={applyCustomRange} disabled={Boolean(rangeError) || !customRangePending}
+                                        className="inline-flex h-9 items-center rounded-xl bg-[#2B174C] px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-50">Apply</button>
+                            </div>
+                            {rangeError && <p role="alert" className="mt-2 text-[11px] text-red-700">{rangeError}</p>}
+                            <p className="mt-2 text-[11px] text-[#86778F]">Showing: {formatDateRange(startDate, endDate)}{customRangePending ? " · Apply to update the results." : ""}</p>
+                        </div>
+                    )}
+
                     {error && <div role="alert" className="mx-5 mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
                     <div
-                        className="max-h-[580px] overflow-x-auto overflow-y-auto border-t border-[#EAE1EF]"
+                        ref={tableScrollRef}
+                        className="max-h-[580px] overflow-x-auto overflow-y-auto border-t border-[#E9E1EE]"
                         onScroll={(event) => {
                             const element = event.currentTarget;
                             const nearBottom = element.scrollTop + element.clientHeight >= element.scrollHeight - 120;
@@ -6718,43 +7374,46 @@ export function AuditLogsWorkspace({
                             }
                         }}
                     >
-                        <table className={`w-full border-collapse text-left text-[12px] ${viewConfig.showBranchColumn ? "min-w-[880px]" : "min-w-[740px]"}`}>
-                            <thead className="sticky top-0 z-10 bg-[#F8F4FC] text-[11px] font-medium uppercase tracking-wide text-[#705B81]">
-                            <tr className="border-b border-[#E6DDF0]">
-                                <th className="px-4 py-3">Date / Time</th>
-                                <th className="px-4 py-3">Employee</th>
-                                <th className="px-4 py-3">Action</th>
-                                <th className="px-4 py-3">Module</th>
-                                <th className="px-4 py-3">Reference</th>
-                                {viewConfig.showBranchColumn && <th className="px-4 py-3">Branch</th>}
+                        <table className={`w-full border-collapse text-left text-[11px] ${viewConfig.showBranchColumn ? "min-w-[880px]" : "min-w-[740px]"}`}>
+                            <thead className="sticky top-0 z-10 bg-[#FFFCF7] text-[10px] font-semibold uppercase tracking-normal text-[#806A8C]">
+                            <tr className="border-b border-[#E9E1EE]">
+                                <th className="px-3 py-2 font-semibold">Date / Time</th>
+                                <th className="px-3 py-2 font-semibold">Employee</th>
+                                <th className="px-3 py-2 font-semibold">Action</th>
+                                <th className="px-3 py-2 font-semibold">Module</th>
+                                <th className="px-3 py-2 font-semibold">Reference</th>
+                                {viewConfig.showBranchColumn && <th className="px-3 py-2 font-semibold">Branch</th>}
                             </tr>
                             </thead>
-                            <tbody className="divide-y divide-[#EEE7F3]">
+                            <tbody className="divide-y divide-[#F1ECF4]">
                             {loading && rows.length === 0 ? (
                                 <tr><td colSpan={viewConfig.showBranchColumn ? 6 : 5} className="px-4 py-12 text-center text-sm text-[#806A8C]">Loading employee actions...</td></tr>
                             ) : rows.length === 0 ? (
                                 <tr><td colSpan={viewConfig.showBranchColumn ? 6 : 5} className="px-4 py-12 text-center text-sm text-[#806A8C]">No employee actions match the selected filters.</td></tr>
-                            ) : rows.map((log) => (
-                                <tr key={log.id} className="align-top transition-colors hover:bg-[#FCFAFF]">
-                                    <td className="whitespace-nowrap px-4 py-4">
-                                        <p className="font-semibold text-[#2B174C]">{formatDate(log.date)}</p>
-                                        <p className="mt-1 text-[11px] text-[#806A8C]">{formatAuditClockTime(log.time)}</p>
-                                    </td>
-                                    <td className="px-4 py-4">
-                                        <p className="font-semibold text-[#1A1220]">{log.employeeName}</p>
-                                        <p className="mt-1 text-[11px] text-[#806A8C]">{log.employeeRole}</p>
-                                    </td>
-                                    <td className="max-w-[410px] px-4 py-4">
-                                        <p className="font-semibold text-[#1A1220]">{log.action}</p>
-                                        {log.details && <p className="mt-1 break-words text-[11px] leading-5 text-[#806A8C]">{log.details}</p>}
-                                    </td>
-                                    <td className="px-4 py-4">
-                                        <span className={`inline-block rounded-full px-2.5 py-1 text-[11px] font-semibold ${auditModuleBadgeClass(log.module)}`}>{log.module}</span>
-                                    </td>
-                                    <td className="max-w-[155px] break-all px-4 py-4 font-medium text-[#594767]">{log.reference || "—"}</td>
-                                    {viewConfig.showBranchColumn && <td className="px-4 py-4 text-[#594767]">{log.branch}</td>}
-                                </tr>
-                            ))}
+                            ) : rows.map((log) => {
+                                const description = formatAuditActionDetails(log);
+                                return (
+                                    <tr key={log.id} className="align-top transition-colors hover:bg-[#FBF8FE]">
+                                        <td className="whitespace-nowrap px-3 py-2.5">
+                                            <p className="font-semibold text-[#2B174C]">{formatDate(log.date)}</p>
+                                            <p className="mt-0.5 text-[10px] leading-4 text-[#86778F]">{formatAuditClockTime(log.time)}</p>
+                                        </td>
+                                        <td className="px-3 py-2.5">
+                                            <p className="font-semibold text-[#1A1220]">{log.employeeName}</p>
+                                            <p className="mt-0.5 text-[10px] leading-4 text-[#86778F]">{log.employeeRole}</p>
+                                        </td>
+                                        <td className="max-w-[410px] px-3 py-2.5">
+                                            <p className="font-semibold text-[#1A1220]">{log.action}</p>
+                                            {description && <p title={log.details} className="mt-0.5 break-words text-[11px] leading-4 text-[#86778F]">{description}</p>}
+                                        </td>
+                                        <td className="px-3 py-2.5">
+                                            <span className={`inline-block rounded-full px-2 py-1 text-[10px] font-semibold ${auditModuleBadgeClass(log.module)}`}>{log.module}</span>
+                                        </td>
+                                        <td className="max-w-[155px] break-all px-3 py-2.5 font-medium text-[#4F3A5A]">{log.reference || "—"}</td>
+                                        {viewConfig.showBranchColumn && <td className="px-3 py-2.5 text-[#4F3A5A]">{log.branch}</td>}
+                                    </tr>
+                                );
+                            })}
                             </tbody>
                         </table>
                     </div>

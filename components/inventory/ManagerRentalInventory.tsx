@@ -19,12 +19,10 @@ import {
 import { SuccessToast } from "./_shared";
 
 // Use the shared StockNBook report format for the manager's read-only panels.
-async function exportRentalPanelPdf(title: string, headers: string[], rows: string[][], range: string) {
-    const { exportTableAsPdf } = await import("@/components/dashboard/_shared");
-    exportTableAsPdf({title, headers, rows}, {
+async function exportRentalPanelPdf(title: string, headers: string[], rows: string[][], range: string, filters: string[] = []) {
+    downloadInventoryPdf({title, headers, rows}, {
         storeName: sessionStorage.getItem("store_name") || "StockNBook",
-        branch: sessionStorage.getItem("branch_name") || "Assigned branch",
-        dateRange: range,
+        branch: sessionStorage.getItem("branch_name") || "Assigned branch", dateRange: range, filters,
     }, `stocknbook_${title.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`);
 }
 
@@ -116,7 +114,6 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
     const [conditionEndDate,setConditionEndDate] = React.useState("");
     const [conditionDetail,setConditionDetail] = React.useState<ManagerConditionIssue|RentalMaintenanceHistory|null>(null);
     const [categoriesOpen, setCategoriesOpen] = React.useState(false);
-    const [exportOpen, setExportOpen] = React.useState(false);
     const [dateFiltersOpen, setDateFiltersOpen] = React.useState(false);
     // Date Availability opens on today (Asia/Manila) and loads automatically (see below).
     const [fromDate, setFromDate] = React.useState(rentalToday);
@@ -130,7 +127,6 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
     const categories = rental.categories;
     // The equipment list search also narrows the activity and condition panels and their exports.
     const searchQuery = search.trim().toLowerCase();
-    const searchLabel = searchQuery ? ` · Search: “${search.trim()}”` : "";
     // Filter the branch-scoped recent activity that is actually returned by the API.
     // The backend limits this feed, so "All loaded" never implies lifetime history.
     const filteredRentalActivity = React.useMemo(() => {
@@ -154,12 +150,14 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
             return activityDirection === "all" || direction === activityDirection;
         });
     }, [rental.recentActivity, activityDateFilter, activityStartDate, activityEndDate, activityDirection, searchQuery]);
-    const activityRange = `${activityDateFilter === "all" ? "All loaded dates" : activityDateFilter === "today" ? "Today" : inventoryDateRangeLabel(activityStartDate, activityEndDate)} · ${activityDirection === "all" ? "All activity" : activityDirection === "in" ? "Stock In" : "Stock Out"}${searchLabel}`;
-    const downloadPanel = (title: string, headers: string[], rows: string[][], range = "All loaded records") => {
-        void exportRentalPanelPdf(title, headers, rows, range)
+    const activityRange = activityDateFilter === "all" ? "All loaded dates" : activityDateFilter === "today" ? inventoryTodayLabel() : inventoryDateRangeLabel(activityStartDate, activityEndDate);
+    const activityFilters = [`Activity: ${activityDirection === "all" ? "All Activity" : activityDirection === "in" ? "Stock In" : "Stock Out"}`];
+    const downloadPanel = (title: string, headers: string[], rows: string[][], range: string, filters: string[]) => {
+        void exportRentalPanelPdf(title, headers, rows, range, filters)
             .then(() => { setExportError(""); setNotice(`${title} PDF downloaded. Check your browser downloads.`); })
             .catch(() => setExportError(`Unable to download ${title.toLowerCase()}.`));
     };
+
     const filtered = React.useMemo(() => rental.equipment.filter(item => {
         // Retired equipment stays in history but not the default active catalog.
         if(!item.active && status!=="Archived")return false;
@@ -192,7 +190,8 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
             return conditionRangeValid&&key>=conditionStartDate&&key<=conditionEndDate;
         });
     },[conditionRows,conditionStatusFilter,conditionDateFilter,conditionStartDate,conditionEndDate,conditionRangeValid,searchQuery]);
-    const conditionRange=`${conditionDateFilter==="all"?"All loaded records":conditionDateFilter==="today"?"Today":inventoryDateRangeLabel(conditionStartDate,conditionEndDate)} · ${conditionStatusFilter==="all"?"All status":conditionStatusFilter}${searchLabel}`;
+    const conditionRange = conditionDateFilter === "all" ? "All loaded dates" : conditionDateFilter === "today" ? inventoryTodayLabel() : inventoryDateRangeLabel(conditionStartDate, conditionEndDate);
+    const conditionFilters = [`Status: ${conditionStatusFilter === "all" ? "All Status" : conditionStatusFilter}`];
 
     const resetDates = () => {
         setAppliedDates(null); setDatesAvailability(null); setDatesReserved(null);
@@ -294,18 +293,16 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                             ? `Rental units received and recorded${reference ? ` · ${reference}` : ""}. Availability and today’s stock activity have been updated.`
                             : `Rental inventory saved${reference ? ` · ${reference}` : ""}.`);
     };
-    const downloadExport = (format:"xlsx"|"pdf") => {
-        setExportOpen(false);
-        const details = {category,status,appliedDates,reserved:datesReserved};
-        try {
-            if (format === "xlsx") exportRentalExcel(filtered, details, datesAvailability);
-            else exportRentalPdf(filtered, details, datesAvailability);
-            setExportError("");
-            setNotice(`${format === "xlsx" ? "Excel" : "PDF"} rental inventory export started. Check your browser downloads.`);
-        } catch (error) {
-            setNotice("");
-            setExportError(error instanceof Error ? error.message : "Unable to export rental inventory.");
-        }
+    const unconfirmedDateRange = appliedDates ? fromDate !== appliedDates.from || toDate !== appliedDates.to
+        : fromDate !== rentalToday() || toDate !== rentalToday();
+    const inventoryExportDisabled = rental.loading || !rental.connected || datesLoading || !!datesError || unconfirmedDateRange || !!(appliedDates && (!datesAvailability || !datesReserved));
+    const downloadExport = () => {
+        if (inventoryExportDisabled) return;
+        const dateRange = appliedDates && (appliedDates.from !== rentalToday() || appliedDates.to !== rentalToday())
+            ? `${appliedDates.from} to ${appliedDates.to}` : inventoryTodayLabel();
+        const {headings, rows} = rentalReportRows(filtered, {appliedDates, reserved: datesReserved}, datesAvailability);
+        downloadPanel("Branch Rental Equipment List", headings, rows, dateRange,
+            [`Category: ${category} | Status: ${status}`]);
     };
 
     return (
@@ -339,7 +336,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
 
             <div className="grid items-stretch gap-4 xl:grid-cols-[1.15fr_1fr]">
                 {/* Read-only oversight: Staff owns routine repairs/recoveries. */}
-                <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm" aria-label="Equipment condition and monitoring">
+                <section className="flex h-[320px] min-h-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm" aria-label="Equipment condition and monitoring">
                     <div className="flex min-w-0 shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[#E9E1EE] px-4 py-3.5">
                         <div className="flex min-w-0 flex-1 items-center gap-3">
                             <span className="shrink-0 rounded-xl bg-[#F1EBFF] p-2 text-[#5A35A5]"><Wrench size={18}/></span>
@@ -359,9 +356,9 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                 {MANAGER_CONDITION_STATUSES.map(status => <option key={status} value={status}>{status}</option>)}
                             </RentalInventoryFilterSelect>
                             <button type="button" title="Download displayed equipment condition report (PDF)" aria-label="Download equipment condition report"
-                                    disabled={conditionDateFilter === "range" && !conditionRangeValid}
-                                    onClick={() => downloadPanel("Equipment Condition & Monitoring", ["Equipment", "Units", "Issue", "Status", "Recorded By"],
-                                        visibleConditionRows.map(row => [row.equipmentName, String(row.units), row.issue, row.status, row.recordedBy || "Not recorded"]), conditionRange)}
+                                    disabled={rental.loading || !rental.connected || !rental.monitoringDataReady || (conditionDateFilter === "range" && !conditionRangeValid)}
+                                    onClick={() => downloadPanel("Equipment Condition & Monitoring", ["Equipment", "Units", "Issue", "Status", "Date", "Recorded By"],
+                                        visibleConditionRows.map(row => [row.equipmentName, String(row.units), row.issue, row.status, managerConditionDateKey(row.date) || "—", row.recordedBy || "Not recorded"]), conditionRange, conditionFilters)}
                                     className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#E3D8EA] bg-white text-[#5A35A5] hover:bg-[#F7F1FF] disabled:opacity-40"><Download size={16}/></button>
                         </div>
                     </div>
@@ -380,7 +377,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                 <ManagerConditionTable rows={visibleConditionRows} onView={setConditionDetail}/>}
                 </section>
 
-                <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm">
+                <section className="flex h-[320px] min-h-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm">
                     <PanelHeading icon={<CalendarClock size={18}/>} title="Rental Stock Activity"
                                   subtitle="Restocks, replacements, returns, releases, and equipment deletions."
                                   actions={<div className="flex shrink-0 items-center gap-1.5">
@@ -390,7 +387,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                       <RentalInventoryFilterSelect containerClassName="w-[114px]" value={activityDirection} aria-label="Filter rental activity movement" onChange={e => setActivityDirection(e.target.value as "all" | "in" | "out")}>
                                           <option value="all">All Activity</option><option value="in">Stock In</option><option value="out">Stock Out</option>
                                       </RentalInventoryFilterSelect>
-                                      <button type="button" disabled={rental.loading || (activityDateFilter === "range" && !isValidInventoryDateRange(activityStartDate, activityEndDate))}
+                                      <button type="button" disabled={rental.loading || !rental.connected || (activityDateFilter === "range" && !isValidInventoryDateRange(activityStartDate, activityEndDate))}
                                               title="Download filtered rental activity PDF" aria-label="Download filtered rental stock activity"
                                               onClick={() => downloadPanel("Rental Stock Activity", ["Date", "Time", "Equipment", "Activity", "Qty", "Reference No."],
                                                   filteredRentalActivity.map(record => {
@@ -399,7 +396,7 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                                           occurred.toLocaleTimeString("en-PH", { timeZone: "Asia/Manila", hour: "numeric", minute: "2-digit" }),
                                                           record.equipmentName, rentalActivityDirection(record) === "in" ? "Stock In" : "Stock Out",
                                                           `${rentalActivityDirection(record) === "in" ? "+" : "−"}${record.quantity}`, record.referenceNumber || "—"];
-                                                  }), activityRange)}
+                                                  }), activityRange, activityFilters)}
                                               className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#E3D8EA] bg-white text-[#5A35A5] hover:bg-[#F7F1FF] disabled:opacity-40"><Download size={16}/></button>
                                   </div>}/>
                     {activityDateFilter === "range" && <InventoryDateRangeFields label="Rental activity" start={activityStartDate} end={activityEndDate}
@@ -451,17 +448,9 @@ export default function ManagerRentalInventory({ branchId }: { branchId?: number
                                 className="flex h-9 items-center gap-2 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC]">
                             <CalendarClock size={15}/> {appliedDates ? (appliedDates.from === rentalToday() && appliedDates.to === rentalToday() ? "Today" : "Dates Applied") : "Date Availability"} <ChevronDown size={14}/>
                         </button>
-                        <div className="relative">
-                            <button type="button" aria-expanded={exportOpen} onClick={()=>setExportOpen(v=>!v)}
-                                    aria-label="Download filtered rental inventory list" title="Download filtered rental inventory list"
-                                    className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#D9CDF0] bg-white text-[#2B174C] hover:bg-[#F8F3FC]">
-                                <Download size={17}/>
-                            </button>
-                            {exportOpen && <div className="absolute right-0 top-full z-20 mt-1 min-w-[155px] rounded-xl border border-[#E3D8EA] bg-white p-1 shadow-lg">
-                                <button type="button" onClick={()=>downloadExport("xlsx")} className="block w-full rounded-lg px-3 py-2 text-left text-xs text-[#2B174C] hover:bg-[#F5F0FF]">Export Excel (.xlsx)</button>
-                                <button type="button" onClick={()=>downloadExport("pdf")} className="block w-full rounded-lg px-3 py-2 text-left text-xs text-[#2B174C] hover:bg-[#F5F0FF]">Export PDF (.pdf)</button>
-                            </div>}
-                        </div>
+                        <button type="button" onClick={downloadExport} disabled={inventoryExportDisabled}
+                                aria-label="Download filtered rental inventory PDF" title={unconfirmedDateRange ? "Check selected dates before downloading" : "Download PDF"}
+                                className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#D9CDF0] bg-white text-[#2B174C] hover:bg-[#F8F3FC] disabled:opacity-40"><Download size={17}/></button>
                     </div>
                 </div>
                 {dateFiltersOpen && <div className="flex flex-wrap items-end gap-3 border-t border-[#E9E1EE] bg-[#FCFAFF] px-4 py-3 text-xs">
@@ -605,16 +594,6 @@ function equipmentDisplayStatus(item: RentalEquipment, checkingDates: boolean, o
     if (quantity === item.totalUnits && item.maintenanceUnits === 0 && item.missingUnits === 0 &&
         (checkingDates || item.rentedOutUnits === 0)) return "Fully Available";
     return "Available";
-}
-
-// Condition alerts should not conceal available units: e.g. 27 tables may
-// still be available even though 1 table is missing and needs review.
-function equipmentConditionLabels(item: RentalEquipment): string[] {
-    if (!item.active) return [];
-    const labels: string[] = [];
-    if (hasRentalStockDiscrepancy(item) || item.missingUnits > 0) labels.push("Needs Review");
-    if (item.maintenanceUnits > 0) labels.push("On Hold");
-    return labels;
 }
 
 // The Branch Rental Equipment List Status filter offers only Available and Unavailable.
@@ -846,7 +825,7 @@ function RetireEquipmentDialog({item,saving,close,onSave}:{
 }
 
 function PanelHeading({title,subtitle,icon,actions}:{title:string;subtitle:string;icon:React.ReactNode;actions?:React.ReactNode}) {
-    return <div className="flex min-w-0 flex-col gap-2 border-b border-[#E9E1EE] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
+    return <div className="flex min-w-0 shrink-0 flex-col gap-2 border-b border-[#E9E1EE] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 flex-1 items-start gap-3">
             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]">{icon}</span>
             <div className="min-w-0"><h2 className="text-[15px] font-bold text-[#21132E]">{title}</h2>
@@ -869,26 +848,26 @@ function RentalMetric({label,value,description,icon,tone,loading}: {
     icon:React.ReactNode; tone:"purple"|"green"|"blue"|"amber"; loading:boolean;
 }) {
     const iconClassName = {
-        purple:"bg-[#F1ECFF] text-[#5F35D8]",
-        green:"bg-[#E5F8EC] text-[#23834A]",
-        blue:"bg-[#E9F2FF] text-[#1E6FE8]",
-        amber:"bg-[#FFF3DE] text-[#E68A00]",
+        purple:"bg-[#F3EBFF] text-[#6C3AD6]",
+        green:"bg-[#EAF7F0] text-[#25865B]",
+        blue:"bg-[#E8F1FF] text-[#2169CF]",
+        amber:"bg-[#FFF7E9] text-[#B7832E]",
     }[tone];
     return (
-        <section aria-busy={loading} className="flex min-h-[146px] min-w-0 w-full items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm">
+        <section aria-busy={loading} className="flex min-h-[108px] min-w-0 w-full items-center gap-3 rounded-[16px] border border-[#E6DDF0] bg-white px-3.5 py-3 text-left shadow-sm">
             {loading ? <>
-                <span className="h-14 w-14 shrink-0 animate-pulse rounded-full bg-[#EEE8F3]" aria-hidden="true"/>
-                <span className="min-w-0 flex-1 space-y-2.5" role="status" aria-label={`Loading ${label}`}>
+                <span className="h-12 w-12 shrink-0 animate-pulse rounded-xl bg-[#EEE8F3]" aria-hidden="true"/>
+                <span className="min-w-0 flex-1 space-y-2" role="status" aria-label={`Loading ${label}`}>
                     <span className="block h-3.5 w-32 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
-                    <span className="block h-7 w-24 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
+                    <span className="block h-6 w-24 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
                     <span className="block h-2.5 w-40 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
                 </span>
             </> : <>
-                <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${iconClassName}`} aria-hidden="true">{icon}</span>
+                <span className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl ${iconClassName}`} aria-hidden="true">{icon}</span>
                 <span className="min-w-0 flex-1">
-                    <span className="block text-[14px] font-semibold leading-5 text-[#4B3E55]">{label}</span>
-                    <span className="mt-1 block break-words text-[28px] font-bold leading-tight tracking-[-0.03em] text-[#1A1220] tabular-nums">{value === null ? "—" : value.toLocaleString("en-PH")}</span>
-                    <span className="mt-2 block text-[11px] leading-4 text-[#8A7D92]">{description}</span>
+                    <span className="block text-[12px] font-semibold leading-4 text-[#25153D]">{label}</span>
+                    <span className="mt-1 block break-words text-[24px] font-bold leading-none text-[#25153D] tabular-nums">{value === null ? "—" : value.toLocaleString("en-PH")}</span>
+                    <span className="mt-1 block text-[11px] leading-4 text-[#806A8C]">{description}</span>
                 </span>
             </>}
         </section>
@@ -1335,147 +1314,17 @@ function peso(value:number|null|undefined) {
     return value == null ? "—" : `₱${value.toLocaleString("en-PH",{minimumFractionDigits:2,maximumFractionDigits:2})}`;
 }
 
-type RentalExportFilters = {
-    category:string;status:string;appliedDates:{from:string;to:string}|null;
-    reserved?:Map<number,number>|null;
-};
-function rentalReportRows(items:RentalEquipment[],filters:RentalExportFilters,availability:Map<number,number>|null) {
-    const headings = ["Product No.","Rental Product","Category","Avg. Unit Cost (PHP)",
-        "Rental Rate (PHP)","Total Units","Available Now",
-        ...(filters.appliedDates?["Available in Selected Dates","Reserved in Selected Dates"]:[]),
-        "Rented Out","Maintenance","Missing","Status","Condition / Alert"];
-    const rows = items.map(item => [item.equipmentNumber||"—",item.name,item.category,
-        item.averageUnitCost??"—",item.rentalRatePerDay??"—",item.totalUnits,availableNow(item),
-        ...(filters.appliedDates?[availability?.get(item.id)??"—",filters.reserved?.get(item.id)??"—"]:[]),
-        item.rentedOutUnits,item.maintenanceUnits,item.missingUnits,
-        // Same Status as the table column, so a Status-filtered export matches the screen.
-        equipmentDisplayStatus(item,true,filters.appliedDates?availability?.get(item.id):item.bookableToday),
-        equipmentConditionLabels(item).join(", ")||"—"]);
-    return {headings,rows};
-}
-function rentalFilename(ext:"xlsx"|"pdf") {
-    const d=new Date();
-    return `StockNBook_Rental_Inventory_${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}.${ext}`;
-}
-function exportRentalExcel(items:RentalEquipment[],filters:RentalExportFilters,availability:Map<number,number>|null) {
-    const {headings,rows}=rentalReportRows(items,filters,availability);
-    const meta:(string|number)[][] = [
-        ["StockNBook — Branch Rental Inventory"],
-        ["Category Filter",filters.category],
-        ["Status Filter",filters.status],
-        ["Availability Dates",filters.appliedDates?`${filters.appliedDates.from} to ${filters.appliedDates.to}`:"Not applied"],
-        ["Availability Scope",filters.appliedDates?"Selected booking dates":"Physical stock now"],
-        ["Exported On",new Date().toLocaleString("en-PH")],
-        ["Matching Equipment",items.length],[],headings,...rows,
-    ];
-    const sheet=XLSX.utils.aoa_to_sheet(meta);
-    sheet["!cols"]=headings.map((_,i)=>({wch:[21,34,24,23,24,16,18,22,16,16,15,23,24][i]||18}));
-    const book=XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(book,sheet,"Rental Inventory");
-    XLSX.writeFile(book,rentalFilename("xlsx"),{bookType:"xlsx"});
-}
-
-// Direct downloadable PDF, using the same built-in canvas/JPEG approach as Sales;
-// intentionally does not require another library or a browser print dialog.
-function exportRentalPdf(items:RentalEquipment[],filters:RentalExportFilters,availability:Map<number,number>|null) {
-    const {headings,rows}=rentalReportRows(items,filters,availability);
-    const pageWidth=1190.55,pageHeight=841.89,scale=1.5,pad=3,lineHeight=11;
-    const canvas=document.createElement("canvas");
-    canvas.width=Math.round(pageWidth*scale);canvas.height=Math.round(pageHeight*scale);
-    const context=canvas.getContext("2d");
-    if(!context) throw new Error("PDF export is unavailable in this browser.");
-    const ctx:CanvasRenderingContext2D=context;
-    ctx.setTransform(scale,0,0,scale,0,0);
-    const margin=25,tableWidth=pageWidth-2*margin;
-    const baseWidths=filters.appliedDates?[95,150,94,105,78,85,62,72,78,60,72,53,90,93]:
-        [105,160,105,115,85,90,67,77,66,74,59,90,93];
-    const totalBase=baseWidths.reduce((a,b)=>a+b,0);
-    const widths=baseWidths.map(w=>w/totalBase*tableWidth);
-    function wrapCell(v:unknown,w:number) {
-        const text=String(v??"—").replace(/\s+/g," ").trim()||"—";
-        const lines:string[]=[];let line="";
-        for(const word of text.split(" ")){
-            const candidate=line?`${line} ${word}`:word;
-            if(ctx.measureText(candidate).width<=w){line=candidate;continue;}
-            if(line){lines.push(line);line="";}
-            for(const c of word){if(line && ctx.measureText(line+c).width>w){lines.push(line);line="";}line+=c;}
-        }
-        if(line)lines.push(line);
-        return lines.length?lines:["—"];
-    }
-    ctx.font="9px Arial,sans-serif";
-    const cells=[headings,...rows].map((row,index)=>{
-        ctx.font=index===0?"bold 8px Arial,sans-serif":"9px Arial,sans-serif";
-        const wrapped=row.map((value,i)=>wrapCell(value,widths[i]-2*pad));
-        const height=Math.max(24,Math.max(...wrapped.map(lines=>lines.length))*lineHeight+8);
-        return {wrapped,height};
-    });
-    const top=125,limit=pageHeight-50;
-    const grouped:Array<typeof cells>=[];
-    const header=cells[0];
-    let segment:typeof cells=[header];let used=top+header.height;
-    for(const cell of cells.slice(1)){
-        if(used+cell.height>limit && segment.length>1){
-            grouped.push(segment);segment=[header];used=top+header.height;
-        }
-        segment.push(cell);used+=cell.height;
-    }
-    grouped.push(segment);
-    const images:Uint8Array[]=[];
-    grouped.forEach((page,pageIndex)=>{
-        ctx.fillStyle="#FFFFFF";ctx.fillRect(0,0,pageWidth,pageHeight);
-        ctx.fillStyle="#2B174C";ctx.font="bold 18px Arial,sans-serif";
-        ctx.fillText("StockNBook — Branch Rental Inventory",margin,34);
-        ctx.font="10px Arial,sans-serif";
-        ctx.fillText(`Category: ${filters.category}  |  Status: ${filters.status}  |  Equipment: ${items.length}`,margin,57);
-        ctx.fillText(`Availability: ${filters.appliedDates?`${filters.appliedDates.from} to ${filters.appliedDates.to} (confirmed bookings)`:"Physical stock now"}`,margin,75);
-        ctx.fillText(`Generated: ${new Date().toLocaleString("en-PH")}`,margin,92);
-        let y=top;
-        page.forEach((cell,index)=>{
-            const isHeading=index===0;
-            ctx.fillStyle=isHeading?"#F1EBFF":index%2?"#FAF8FD":"#FFFFFF";
-            ctx.fillRect(margin,y,tableWidth,cell.height);
-            let x=margin;
-            cell.wrapped.forEach((lines,i)=>{
-                ctx.strokeStyle="#E3D8EA";ctx.lineWidth=0.5;
-                ctx.strokeRect(x,y,widths[i],cell.height);
-                ctx.fillStyle=isHeading?"#4E2C66":"#21132E";
-                ctx.font=isHeading?"bold 8px Arial,sans-serif":"9px Arial,sans-serif";
-                lines.forEach((line,j)=>ctx.fillText(line,x+pad,y+12+j*lineHeight));
-                x+=widths[i];
-            });
-            y+=cell.height;
-        });
-        ctx.fillStyle="#806A8C";ctx.font="10px Arial,sans-serif";
-        ctx.fillText(`Page ${pageIndex+1} of ${grouped.length}`,margin,pageHeight-20);
-        const bin=atob(canvas.toDataURL("image/jpeg",0.87).split(",")[1]);
-        const bytes=new Uint8Array(bin.length);
-        for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
-        images.push(bytes);
-    });
-    const encoder=new TextEncoder(),chunks:BlobPart[]=[],offsets:number[]=[];
-    let written=0;
-    function write(part:string|Uint8Array){const data=typeof part==="string"?encoder.encode(part):part;
-        chunks.push(data as BlobPart);written+=data.byteLength;}
-    function object(id:number,writer:()=>void){offsets[id]=written;write(`${id} 0 obj\n`);writer();write("\nendobj\n");}
-    write("%PDF-1.4\n%StockNBook\n");
-    object(1,()=>write("<< /Type /Catalog /Pages 2 0 R >>"));
-    const refs=images.map((_,i)=>`${3+i*3} 0 R`).join(" ");
-    object(2,()=>write(`<< /Type /Pages /Kids [${refs}] /Count ${images.length} >>`));
-    images.forEach((jpeg,i)=>{
-        const id=3+i*3,imageId=id+1,streamId=id+2;
-        object(id,()=>write(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /XObject << /PageImage ${imageId} 0 R >> >> /Contents ${streamId} 0 R >>`));
-        object(imageId,()=>{write(`<< /Type /XObject /Subtype /Image /Width ${canvas.width} /Height ${canvas.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`);write(jpeg);write("\nendstream");});
-        const stream=`q\n${pageWidth} 0 0 ${pageHeight} 0 0 cm\n/PageImage Do\nQ\n`;
-        object(streamId,()=>write(`<< /Length ${encoder.encode(stream).length} >>\nstream\n${stream}endstream`));
-    });
-    const count=images.length*3+2,xref=written;
-    write(`xref\n0 ${count+1}\n0000000000 65535 f \n`);
-    for(let i=1;i<=count;i++)write(`${String(offsets[i]).padStart(10,"0")} 00000 n \n`);
-    write(`trailer\n<< /Size ${count+1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`);
-    const url=URL.createObjectURL(new Blob(chunks,{type:"application/pdf"}));
-    const link=document.createElement("a");link.href=url;link.download=rentalFilename("pdf");
-    document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+type RentalExportFilters = { appliedDates: {from:string;to:string}|null; reserved: Map<number,number>|null };
+function rentalReportRows(items: RentalEquipment[], filters: RentalExportFilters, availability: Map<number,number>|null) {
+    const headings = ["Equipment No.", "Rental Product", "Category", "Total Units", "Available (Dates)", "Reserved", "Rented Out", "On Hold", "Status / Alert", "Cost / Rate (PHP)"];
+    const rows = items.map(item => [item.equipmentNumber || "—", item.name, item.category, String(item.totalUnits),
+        ` ${filters.appliedDates ? availability?.get(item.id) ?? "—" : item.bookableToday} | Ready now: ${availableNow(item)}`.trim(),
+        String(filters.appliedDates ? filters.reserved?.get(item.id) ?? "—" : "—"), String(item.rentedOutUnits),
+        `${item.maintenanceUnits}${item.missingUnits > 0 ? ` | Missing: ${item.missingUnits}` : ""}`,
+        [equipmentDisplayStatus(item, true, filters.appliedDates ? availability?.get(item.id) : item.bookableToday),
+            ...(hasRentalStockDiscrepancy(item) || item.missingUnits > 0 ? ["Needs Review"] : []), ...(item.maintenanceUnits > 0 ? ["On Hold"] : [])].join(" | "),
+        `Avg cost: ${item.averageUnitCost ?? "—"} | Daily rate: ${item.rentalRatePerDay ?? "—"}`]);
+    return {headings, rows};
 }
 
 /* SAME SALES WORKFLOW: select XLSX → preview → confirm.
@@ -1773,4 +1622,575 @@ function RentalCategoriesDialog({categories,equipment,close,onSave,saving}:{
             </div>}
         </div>
     </div>;
+}
+
+// Inventory-only copy of the existing Dashboard PDF layout; dashboard source remains unchanged.
+function normalizePdfText(value: string) {
+    return String(value)
+        .replace(/₱/g, "PHP ")
+        .replace(/[–—−]/g, "-").replace(/×/g, "x").replace(/·/g, " | ")
+        .replace(/•/g, "-")
+        .replace(/↳/g, "-")
+        .replace(/[“”]/g, '"')
+        .replace(/[‘’]/g, "'")
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/[^\x20-\x7E]/g, "");
+}
+
+function escapePdf(value: string) {
+    return normalizePdfText(value)
+        .replace(/\\/g, "\\\\")
+        .replace(/\(/g, "\\(")
+        .replace(/\)/g, "\\)");
+}
+
+function downloadFile(filename: string, mimeType: string, content: string) {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+}
+
+function getPdfColumnWeight(header: string) {
+    const key = header.toLowerCase();
+
+    if (
+        key.includes("product") ||
+        key.includes("package") ||
+        key.includes("customer") ||
+        key.includes("details") ||
+        key.includes("inclusion")
+    ) {
+        return 1.7;
+    }
+
+    if (
+        key.includes("reference") ||
+        key.includes("branch") ||
+        key.includes("category") ||
+        key.includes("suggested")
+    ) {
+        return 1.35;
+    }
+
+    if (key.includes("equipment no.")) return 1.45;
+    if (key.includes("cost / rate")) return 1.3;
+    if (key.includes("date") || key.includes("schedule")) return 1.15;
+    if (key.includes("current") || key.includes("forecast")) return 1.1;
+    if (key.includes("status") || key.includes("risk")) return 0.95;
+
+    return 1;
+}
+
+function isPdfNumericColumn(header: string) {
+    const key = header.toLowerCase();
+
+    return [
+        "stock",
+        "level",
+        "quantity",
+        "sales",
+        "revenue",
+        "price",
+        "value",
+        "count",
+        "added",
+        "amount",
+        "bookings",
+        "downpayment",
+        "discount",
+    ].some((word) => key.includes(word));
+}
+
+function wrapPdfText(value: string, maxCharacters: number, maxLines = 3) {
+    const text = normalizePdfText(value) || "-";
+    const words = text.split(" ");
+    const lines: string[] = [];
+    let currentLine = "";
+
+    for (let word of words) {
+        while (word.length > maxCharacters) {
+            if (currentLine) {
+                lines.push(currentLine);
+                currentLine = "";
+            }
+
+            lines.push(word.slice(0, maxCharacters));
+            word = word.slice(maxCharacters);
+
+            if (lines.length >= maxLines) break;
+        }
+
+        if (lines.length >= maxLines) break;
+
+        const candidate = currentLine ? `${currentLine} ${word}` : word;
+
+        if (candidate.length <= maxCharacters) {
+            currentLine = candidate;
+        } else {
+            if (currentLine) lines.push(currentLine);
+            currentLine = word;
+        }
+
+        if (lines.length >= maxLines) break;
+    }
+
+    if (currentLine && lines.length < maxLines) {
+        lines.push(currentLine);
+    }
+
+    const result = lines.length ? lines.slice(0, maxLines) : ["-"];
+
+    if (
+        lines.length > maxLines ||
+        result.join(" ").length < text.length
+    ) {
+        const finalIndex = result.length - 1;
+        result[finalIndex] =
+            result[finalIndex].slice(0, Math.max(1, maxCharacters - 3)) + "...";
+    }
+
+    return result;
+}
+
+function formatDashboardPdfTitle(title: string) {
+    const cleaned = normalizePdfText(title)
+        .replace(/[_-]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    if (!cleaned) return "Dashboard Report";
+
+    return cleaned
+        .split(" ")
+        .map((word) => {
+            if (!word) return word;
+            return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+        })
+        .join(" ");
+}
+
+/** Opt-in report layout; default dashboard/report exports retain their existing styling. */
+type DashboardPdfOptions = {
+    filters?: string[];
+    summary?: string[];
+    centerColumns?: boolean;
+    totalRow?: string[];
+    currencyNote?: boolean;
+};
+
+function createTablePdf({
+                            title,
+                            storeName,
+                            branch,
+                            dateRange,
+                            headers,
+                            rows,
+                            options,
+                        }: {
+    title: string;
+    storeName: string;
+    branch: string;
+    dateRange: string;
+    headers: string[];
+    rows: string[][];
+    options?: DashboardPdfOptions;
+}) {
+    const pageWidth = 595.28;
+    const pageHeight = 841.89;
+    const outerMargin = 25;
+    const pageInset = 24;
+    const marginX = 42;
+    const marginBottom = 54;
+    const contentWidth = pageWidth - marginX * 2;
+    const regularFont = "F1";
+    const boldFont = "F2";
+    const titleText = formatDashboardPdfTitle(title);
+    const fontSize = headers.length >= 6 ? 7 : headers.length >= 5 ? 7.6 : 8.2;
+    const headerFontSize = Math.max(7, fontSize - 0.1);
+    const metaFontSize = 10.2;
+    const lineHeight = fontSize + 2.8;
+    const cellPaddingX = 5;
+    const cellPaddingY = 5;
+
+    const cream: [number, number, number] = [0.992, 0.98, 0.956];
+    const white: [number, number, number] = [1, 1, 1];
+    const purple: [number, number, number] = [0.169, 0.09, 0.298];
+    const purpleText: [number, number, number] = [0.169, 0.09, 0.298];
+    const ink: [number, number, number] = [0.102, 0.071, 0.125];
+    const muted: [number, number, number] = [0.373, 0.306, 0.459];
+    const border: [number, number, number] = [0.902, 0.866, 0.941];
+    const tint: [number, number, number] = [0.976, 0.965, 0.992];
+    const divider: [number, number, number] = [0.9, 0.86, 0.94];
+    const altRow: [number, number, number] = [0.989, 0.984, 0.995];
+
+    const centered = options?.centerColumns === true;
+    const weights = headers.map(header => centered && header === "Weeks" ? 2.1 : centered && header === "Rank" ? 0.65 : getPdfColumnWeight(header));
+    const totalWeight = weights.reduce((total, weight) => total + weight, 0);
+
+    let runningX = marginX;
+    const columns = headers.map((header, index) => {
+        const width = (contentWidth * weights[index]) / totalWeight;
+        const column = {
+            header,
+            x: runningX,
+            width,
+            numeric: isPdfNumericColumn(header),
+        };
+
+        runningX += width;
+        return column;
+    });
+
+    const point = (value: number) => Number(value.toFixed(2));
+    const pages: string[] = [];
+    let commands: string[] = [];
+    let cursorY = 0;
+
+    // Helvetica ASCII glyph widths, for exact centered alignment and wrapping.
+    const regularWidths = [278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,278,278,584,584,584,556,1015,667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,611,722,667,944,667,667,611,278,278,278,469,556,333,556,556,500,556,556,278,556,556,222,222,500,222,833,556,556,556,556,333,500,278,556,500,722,500,500,500,334,260,334,584];
+    const boldWidths = [278,333,474,556,556,889,722,238,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,333,333,584,584,584,611,975,722,722,722,722,667,611,778,722,278,556,722,611,833,722,778,667,778,722,667,611,722,667,944,667,667,611,333,278,333,584,556,333,556,611,556,611,556,333,611,611,278,278,556,278,889,611,611,611,611,389,556,333,611,556,778,556,556,500,389,280,389,584];
+    function measure(value: string, size: number, font: string) {
+        const text = normalizePdfText(value);
+        if (!centered) return text.length * size * 0.52;
+        const widths = font === boldFont ? boldWidths : regularWidths;
+        return Array.from(text).reduce((n,c)=>n+(widths[c.charCodeAt(0)-32] ?? 600),0)*size/1000;
+    }
+    function wrapCentered(value: string, width: number, size: number, font: string) {
+        const text = normalizePdfText(value);
+        if (!text) return [""];
+        const lines: string[] = [];
+        let line = "";
+        for(const word of text.split(" ")) {
+            if(line && measure(`${line} ${word}`,size,font)>width) {lines.push(line);line="";}
+            if(measure(word,size,font)>width) {
+                for(const char of word) {
+                    if(line && measure(line+char,size,font)>width) {lines.push(line);line="";}
+                    line+=char;
+                }
+            } else line=line ? `${line} ${word}` : word;
+        }
+        if(line) lines.push(line);
+        return lines.length?lines:[""];
+    }
+
+    function addText(
+        value: string,
+        x: number,
+        y: number,
+        size: number,
+        font: string,
+        color: [number, number, number],
+        align: "left" | "center" | "right" = "left"
+    ) {
+        const normalized = normalizePdfText(value);
+        if (centered && !normalized) return;
+        const text = normalized || "-";
+        const textWidth = measure(text, size, font);
+        const adjustedX =
+            align === "center" ? x - textWidth / 2 : align === "right" ? x - textWidth : x;
+
+        commands.push(
+            `q ${color.join(" ")} rg BT /${font} ${point(size)} Tf 1 0 0 1 ${point(
+                adjustedX
+            )} ${point(y)} Tm (${escapePdf(text)}) Tj ET Q`
+        );
+    }
+
+    function fillRect(
+        x: number,
+        y: number,
+        width: number,
+        height: number,
+        color: [number, number, number]
+    ) {
+        commands.push(
+            `q ${color.join(" ")} rg ${point(x)} ${point(y)} ${point(width)} ${point(
+                height
+            )} re f Q`
+        );
+    }
+
+    function strokeRect(
+        x: number,
+        y: number,
+        width: number,
+        height: number,
+        color: [number, number, number],
+        lineWidth = 0.7
+    ) {
+        commands.push(
+            `q ${color.join(" ")} RG ${point(lineWidth)} w ${point(x)} ${point(y)} ${point(
+                width
+            )} ${point(height)} re S Q`
+        );
+    }
+
+    function drawDivider(y: number, color: [number, number, number] = divider, lineWidth = 0.7) {
+        commands.push(
+            `q ${color.join(" ")} RG ${point(lineWidth)} w ${point(marginX)} ${point(y)} m ${point(
+                pageWidth - marginX
+            )} ${point(y)} l S Q`
+        );
+    }
+
+    function wrapCellText(value: string, columnWidth: number, linesLimit = 4) {
+        const headerTightness = headers.length >= 6 ? 0.94 : 1;
+        const maxCharacters = Math.max(
+            4,
+            Math.floor(((columnWidth - cellPaddingX * 2) / (fontSize * 0.52)) * headerTightness)
+        );
+        return wrapPdfText(value, maxCharacters, linesLimit);
+    }
+
+    function drawTableHeader() {
+        const headerLines = headers.map((header, index) => {
+            const limit = Math.max(
+                4,
+                Math.floor((columns[index].width - cellPaddingX * 2) / (headerFontSize * 0.52))
+            );
+            return centered ? wrapCentered(header, columns[index].width - cellPaddingX * 2, headerFontSize, boldFont) : wrapPdfText(header, limit, 3);
+        });
+        const headerLineCount = Math.max(...headerLines.map((lines) => lines.length));
+        const headerHeight = Math.max(26, headerLineCount * (headerFontSize + 2) + cellPaddingY * 2);
+        const bottomY = cursorY - headerHeight;
+
+        fillRect(marginX, bottomY, contentWidth, headerHeight, tint);
+        strokeRect(marginX, bottomY, contentWidth, headerHeight, border, 0.75);
+
+        columns.forEach((column, index) => {
+            if (index > 0) {
+                commands.push(
+                    `q ${border.join(" ")} RG 0.45 w ${point(column.x)} ${point(bottomY)} m ${point(
+                        column.x
+                    )} ${point(cursorY)} l S Q`
+                );
+            }
+
+            const lines = headerLines[index];
+            lines.forEach((line, lineIndex) => {
+                const textWidth = line.length * headerFontSize * 0.52;
+                const textX = centered ? column.x + column.width / 2 : column.numeric
+                    ? column.x + column.width - cellPaddingX - textWidth
+                    : column.x + cellPaddingX;
+                const baseline = centered ? cursorY - (headerHeight - lines.length*(headerFontSize+2))/2 - headerFontSize : cursorY - cellPaddingY - headerFontSize;
+                addText(line, textX, baseline - lineIndex*(headerFontSize+2), headerFontSize, boldFont, purpleText, centered ? "center" : "left");
+            });
+        });
+
+        cursorY = bottomY;
+    }
+
+    function drawPageTitle(continued: boolean) {
+        const cardX = outerMargin;
+        const cardY = pageInset;
+        const cardWidth = pageWidth - outerMargin * 2;
+        const cardHeight = pageHeight - pageInset * 2;
+
+        fillRect(0, 0, pageWidth, pageHeight, cream);
+        fillRect(cardX, cardY, cardWidth, cardHeight, white);
+        fillRect(cardX, pageHeight - pageInset - 6, cardWidth, 6, purple);
+
+        let topY = pageHeight - 58;
+        addText(storeName || "Store", pageWidth / 2, topY, 21, boldFont, purpleText, "center");
+        topY -= 17;
+
+        if (branch) {
+            addText(`Branch: ${branch}`, pageWidth / 2, topY, 11.5, boldFont, purpleText, "center");
+            topY -= 16;
+        }
+
+        for (const line of wrapCentered(`Date range: ${dateRange}`, contentWidth, metaFontSize, regularFont)) {
+            addText(line, pageWidth / 2, topY, metaFontSize, regularFont, muted, "center"); topY -= 12;
+        }
+        for (const filter of options?.filters || []) {
+            for (const line of wrapCentered(filter, contentWidth, 9, regularFont)) {
+                addText(line, pageWidth / 2, topY, 9, regularFont, muted, "center"); topY -= 11;
+            }
+        }
+        drawDivider(topY, border, 0.7);
+
+        topY -= continued ? 24 : 28;
+        addText(
+            continued ? `${titleText} (continued)` : titleText,
+            pageWidth / 2,
+            topY,
+            continued ? 16 : 18,
+            boldFont,
+            purpleText,
+            "center"
+        );
+
+        topY -= 16;
+        addText(
+            rows.length
+                ? `${rows.length.toLocaleString("en-PH")} row(s) exported${options?.currencyNote ? " | Amounts in Philippine pesos" : ""}`
+                : "No records available for the selected period",
+            pageWidth / 2,
+            topY,
+            9,
+            regularFont,
+            muted,
+            "center"
+        );
+
+        for (const summary of options?.summary || []) {
+            topY -= 12;
+            const lines = wrapCentered(summary, contentWidth, 8.5, regularFont);
+            for (const [index, line] of lines.entries()) {
+                addText(line, pageWidth / 2, topY, 8.5, regularFont, muted, "center");
+                if (index < lines.length - 1) topY -= 10;
+            }
+        }
+        cursorY = topY - 18;
+        drawTableHeader();
+    }
+
+    function finishPage() {
+        if (commands.length > 0) {
+            pages.push(commands.join("\n"));
+            commands = [];
+        }
+    }
+
+    function startPage(continued: boolean) {
+        if (commands.length > 0) finishPage();
+        drawPageTitle(continued);
+    }
+
+    function drawTableRow(row: string[], rowIndex: number, isTotal = false) {
+        const rowFont = isTotal ? boldFont : regularFont;
+        const cellLines = columns.map((column, index) => centered
+            ? wrapCentered(row[index] ?? "-", column.width - cellPaddingX * 2, fontSize, rowFont)
+            : wrapCellText(row[index] ?? "-", column.width, headers.length >= 6 ? 5 : 4)
+        );
+        const maxLines = Math.max(...cellLines.map((lines) => lines.length));
+        const rowHeight = Math.max(24, maxLines * lineHeight + cellPaddingY * 2);
+
+        if (cursorY - rowHeight < marginBottom + 30) {
+            startPage(true);
+        }
+
+        const rowBottom = cursorY - rowHeight;
+        fillRect(marginX, rowBottom, contentWidth, rowHeight, isTotal ? tint : rowIndex % 2 === 0 ? white : altRow);
+        strokeRect(marginX, rowBottom, contentWidth, rowHeight, border, 0.45);
+
+        columns.forEach((column, index) => {
+            if (index > 0) {
+                commands.push(
+                    `q ${border.join(" ")} RG 0.3 w ${point(column.x)} ${point(rowBottom)} m ${point(
+                        column.x
+                    )} ${point(cursorY)} l S Q`
+                );
+            }
+
+            cellLines[index].forEach((line, lineIndex) => {
+                const textWidth = line.length * fontSize * 0.52;
+                const textX = centered ? column.x + column.width / 2 : column.numeric
+                    ? column.x + column.width - cellPaddingX - textWidth
+                    : column.x + cellPaddingX;
+                const baseline = centered ? cursorY - (rowHeight - cellLines[index].length*lineHeight)/2 - fontSize : cursorY - cellPaddingY - fontSize;
+                addText(line, textX, baseline - lineIndex*lineHeight, fontSize, rowFont, isTotal ? purpleText : ink, centered ? "center" : "left");
+            });
+        });
+
+        cursorY = rowBottom;
+    }
+
+    startPage(false);
+
+    if (rows.length === 0) {
+        addText(
+            "No records found for the selected report period.",
+            pageWidth / 2,
+            cursorY - 26,
+            10,
+            regularFont,
+            muted,
+            "center"
+        );
+    } else {
+        rows.forEach((row, index) => drawTableRow(row, index));
+        if (options?.totalRow) drawTableRow(options.totalRow, rows.length, true);
+    }
+
+    finishPage();
+
+    const pageStreams = pages.map((stream, index) => {
+        const footerText = `Powered by StockNBook | Page ${index + 1} of ${pages.length}`;
+        return `${stream}
+q ${divider.join(" ")} RG 0.6 w ${point(marginX)} 42 m ${point(
+            pageWidth - marginX
+        )} 42 l S Q
+q ${muted.join(" ")} rg BT /F1 8 Tf 1 0 0 1 ${point(
+            pageWidth / 2 - footerText.length * 2.05
+        )} 26 Tm (${escapePdf(footerText)}) Tj ET Q`;
+    });
+
+    const pageObjectIds = pageStreams.map((_, index) => 5 + index * 2);
+    const contentObjectIds = pageStreams.map((_, index) => 6 + index * 2);
+
+    const objects: Record<number, string> = {
+        1: "<< /Type /Catalog /Pages 2 0 R >>",
+        2: `<< /Type /Pages /Kids [${pageObjectIds
+            .map((id) => `${id} 0 R`)
+            .join(" ")}] /Count ${pageObjectIds.length} >>`,
+        3: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        4: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
+    };
+
+    pageStreams.forEach((stream, index) => {
+        const pageId = pageObjectIds[index];
+        const contentId = contentObjectIds[index];
+
+        objects[pageId] =
+            `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] ` +
+            `/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${contentId} 0 R >>`;
+
+        objects[contentId] = `<< /Length ${stream.length} >>
+stream
+${stream}
+endstream`;
+    });
+
+    const maxObjectId = Math.max(...Object.keys(objects).map(Number));
+    let pdf = "%PDF-1.4\n";
+    const offsets: number[] = [0];
+
+    for (let id = 1; id <= maxObjectId; id += 1) {
+        offsets[id] = pdf.length;
+        pdf += `${id} 0 obj\n${objects[id]}\nendobj\n`;
+    }
+
+    const xrefOffset = pdf.length;
+    pdf += `xref\n0 ${maxObjectId + 1}\n`;
+    pdf += "0000000000 65535 f \n";
+
+    for (let id = 1; id <= maxObjectId; id += 1) {
+        pdf += `${String(offsets[id]).padStart(10, "0")} 00000 n \n`;
+    }
+
+    pdf += `trailer\n<< /Size ${maxObjectId + 1} /Root 1 0 R >>\n`;
+    pdf += `startxref\n${xrefOffset}\n%%EOF`;
+
+    return pdf;
+}
+
+
+function downloadInventoryPdf(table: { title: string; headers: string[]; rows: string[][] }, context: {
+    storeName: string; branch: string; dateRange: string; filters?: string[]; summary?: string[];
+}, filename: string) {
+    const pdf = createTablePdf({ ...table, storeName: context.storeName, branch: context.branch,
+        dateRange: context.dateRange, options: { centerColumns: true, filters: context.filters, summary: context.summary } });
+    downloadFile(`${filename.replace(/\.pdf$/i, "")}.pdf`, "application/pdf", pdf);
+}
+function inventoryTodayLabel() {
+    return `Today (${new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Manila" })})`;
 }

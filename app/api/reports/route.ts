@@ -901,6 +901,30 @@ function normalizeAuditModule(value: string) {
 
 const AUDIT_MODULE_OPTIONS = ["Bookings", "Inventory", "Sales / POS", "Packages"];
 
+// Staff permission changes are retained in employee_actions for security
+// auditing but are not displayed in this operational Audit Logs workspace.
+function isStaffManagementAudit(module: string) {
+    return asText(module).toLowerCase().replace(/[\s_-]+/g, " ") === "staff management";
+}
+
+// Only booking fulfillment terminology changes; POS / Sales remains unchanged.
+function auditDisplayAction(record: { module: string; action: string; details: string }) {
+    if (normalizeAuditModule(record.module) !== "Bookings") {
+        return { action: record.action, details: record.details };
+    }
+    const action = record.action.trim().toLowerCase();
+    if (action === "prepared sales booking inclusion") {
+        return { action: "Prepared consumable product", details: record.details };
+    }
+    if (action === "released complete sales booking inclusions") {
+        return {
+            action: "Released consumable products",
+            details: record.details.replace(/^(Physically handed over \d+ )Sales( product lines?;)/i, "$1Consumable$2"),
+        };
+    }
+    return { action: record.action, details: record.details };
+}
+
 async function loadAuditLogs(
     connection: Connection,
     storeId: number,
@@ -928,11 +952,14 @@ async function loadAuditLogs(
         if (role === "manager" && !isStaffAction) return false;
         if (role === "staff" && (!isStaffAction || record.employeeId !== staffId)) return false;
 
+        if (isStaffManagementAudit(record.module)) return false;
         const displayModule = normalizeAuditModule(record.module);
         if (hasModuleFilter && displayModule !== moduleFilter) return false;
         if (!search) return true;
+        const display = auditDisplayAction(record);
         return [
             record.employeeName, record.employeeRole, record.action,
+            display.action, display.details,
             record.details, record.module, displayModule, record.referenceNumber,
             record.referenceId, record.branch,
         ].some((value) => asText(value).toLowerCase().includes(search));
@@ -955,18 +982,21 @@ async function loadAuditLogs(
         }))
         : [];
 
-    const logs = pageRows.map((record) => ({
-        id: record.id,
-        employeeName: record.employeeName,
-        employeeRole: record.employeeRole,
-        action: record.action || "Recorded action",
-        details: record.details,
-        module: normalizeAuditModule(record.module),
-        reference: record.referenceNumber !== "-" ? record.referenceNumber : record.referenceId !== "-" ? record.referenceId : "",
-        branch: record.branch,
-        date: record.date,
-        time: record.time,
-    }));
+    const logs = pageRows.map((record) => {
+        const display = auditDisplayAction(record);
+        return {
+            id: record.id,
+            employeeName: record.employeeName,
+            employeeRole: record.employeeRole,
+            action: display.action || "Recorded action",
+            details: display.details,
+            module: normalizeAuditModule(record.module),
+            reference: record.referenceNumber !== "-" ? record.referenceNumber : record.referenceId !== "-" ? record.referenceId : "",
+            branch: record.branch,
+            date: record.date,
+            time: record.time,
+        };
+    });
 
     return { logs, total, page: safePage, pageSize, totalPages, modules: AUDIT_MODULE_OPTIONS, branches };
 }

@@ -142,30 +142,6 @@ const queueBookingStatusStyles: Record<string,string> = {
     "Completed": "text-[#138342]",
     "Cancelled": "text-[#C32F2F]",
 };
-// Match the existing local timestamp display when checking whether a movement happened today.
-function rentalActivityManilaDate(value: string): string {
-    const parsed = new Date(value.includes("T") ? value : value.replace(" ", "T") + "+08:00");
-    return Number.isNaN(parsed.getTime()) ? "" : manilaDate(parsed);
-}
-// Use the same two-line PH date/time display and movement labels as Manager rental activity.
-function dateTime(s?: string | null): {date: string; time: string} {
-    if (!s) return {date: "—", time: ""};
-    const parsed = new Date(s.includes("T") ? s : s.replace(" ", "T") + "+08:00");
-    if (Number.isNaN(parsed.getTime())) return {date: s, time: ""};
-    return {
-        date: parsed.toLocaleDateString("en-PH", {timeZone: "Asia/Manila", month: "short", day: "numeric", year: "numeric"}),
-        time: parsed.toLocaleTimeString("en-PH", {timeZone: "Asia/Manila", hour: "numeric", minute: "2-digit"}),
-    };
-}
-// Show only the five Manager-matched physical operations in today's rental stock table.
-// Do not trust an older API's generic in/out value: maintenance and count corrections
-// are documented elsewhere, not as Restock, Replacement, Return, Release or Delete.
-function staffRentalDirection(event:{type:string;direction?:"in"|"out";description?:string}):"in"|"out"|null {
-    if(["received","returned","missing_replaced"].includes(event.type))return "in";
-    if(event.type==="rented_out"||(event.type==="adjustment"&&
-        /^Equipment retired:/.test(event.description||"")))return "out";
-    return null;
-}
 // Same filter control as the Manager Rental Inventory (RentalInventoryFilterSelect).
 function StaffRentalFilterSelect({ containerClassName = "", className = "", children, ...props }:
                                      React.ComponentProps<"select"> & { containerClassName?: string }) {
@@ -239,7 +215,6 @@ export default function StaffRentalInventory({branchName,section="inventory",que
     const [careFilter,setCareFilter]=React.useState<"all"|"inspection"|"cleaning"|"routine"|"repairs"|"missing">("all");
     const [categoryFilter,setCategoryFilter]=React.useState("All Categories");
     const [statusFilter,setStatusFilter]=React.useState("All Status");
-    const [rentalActivityFilter,setRentalActivityFilter]=React.useState<"all"|"in"|"out">("all");
     // Date Availability: same Lambda check and behavior as the Manager Branch Rental Equipment List.
     const [dateFiltersOpen,setDateFiltersOpen]=React.useState(false);
     // Date Availability opens on today (Asia/Manila) and loads automatically (see below).
@@ -322,13 +297,6 @@ export default function StaffRentalInventory({branchName,section="inventory",que
     const [stockNotes,setStockNotes]=React.useState("");
     const [issueType,setIssueType]=React.useState<"routine"|"damage"|"missing">("damage");
     const today=manilaDate();
-    // Staff sees today's records only; the Activity filter and search narrow today's list.
-    const todayRentalActivity=rental.activity.filter(event=>rentalActivityManilaDate(event.occurredAt)===today&&
-        staffRentalDirection(event)!==null&&
-        // Never show an unlinked missing-item report as a booking replacement.
-        !(event.type==="missing_replaced"&&(!event.referenceNumber||/^MISS-\d+$/i.test(event.referenceNumber)))&&
-        (rentalActivityFilter==="all"||staffRentalDirection(event)===rentalActivityFilter)&&
-        (!search.trim()||[event.equipmentName,event.referenceNumber].join(" ").toLowerCase().includes(search.trim().toLowerCase())));
     const equipmentById=React.useMemo(()=>new Map(rental.equipment.map(e=>[e.id,e])),[rental.equipment]);
     const allTasks=React.useMemo(()=>rental.allocations.map(a=>({item:a,type:taskType(a)})).filter(x=>x.type!==null),[rental.allocations]);
     // Earlier returns awaiting their one-time condition check also hold stock.
@@ -680,43 +648,32 @@ export default function StaffRentalInventory({branchName,section="inventory",que
     };
     return <div className="space-y-4" aria-label={showInventory?"Staff Rental Inventory":"Rental Operations Queue"}>
         {!canOperate&&<p role="status" className="rounded-xl border border-[#E6DDF0] bg-[#F7F1FF] px-4 py-3 text-xs text-[#5330B6]">View-only Inventory access: equipment activity is visible, but receiving, rental handover, returns, and condition changes require Full access.</p>}
-        {/* Staff Rental: match the four-card Consumable inventory presentation. */}
-        {showInventory&&<div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{[
-            {title:"Available Today",num:rental.equipment.reduce((total,e)=>total+e.bookableToday,0),
-                caption:"Units available for rental bookings today",icon:<PackageCheck size={20}/>,tone:"green"},
+        {/* Staff Rental: match the three-card Consumable inventory presentation. */}
+        {showInventory&&<div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">{[
             {title:"Reserved Today",num:appliedDates?.from===today&&appliedDates?.to===today&&datesReserved
                     ? Array.from(datesReserved.values()).reduce((total,units)=>total+units,0)
                     : rental.allocations.filter(a=>a.status==="reserved"&&a.startDate<=today&&a.endDate>=today)
                         .reduce((total,a)=>total+a.quantity,0),
-                caption:"Confirmed bookings not yet released",icon:<CalendarClock size={20}/>,tone:"purple"},
+                caption:"Confirmed bookings not yet released",icon:<CalendarClock size={23}/>,tone:"purple"},
             {title:"Rented Out",num:rental.equipment.reduce((total,e)=>total+e.rentedOutUnits,0),
-                caption:"Units physically released to customers",icon:<Truck size={20}/>,tone:"blue"},
+                caption:"Units physically released to customers",icon:<Truck size={23}/>,tone:"blue"},
             {title:"On Hold",num:rental.equipment.reduce((total,e)=>total+e.maintenanceUnits,0),
-                caption:"Units held for equipment care or repair",icon:<ClipboardCheck size={20}/>,tone:"amber"},
+                caption:"Units held for equipment care or repair",icon:<ClipboardCheck size={23}/>,tone:"amber"},
         ].map(c=>{
             const iconTones: Record<string,string>={
-                green:"bg-[#E5F8EC] text-[#23834A]",
-                purple:"bg-[#F1ECFF] text-[#5F35D8]",
-                blue:"bg-[#E9F2FF] text-[#1E6FE8]",
-                amber:"bg-[#FFF3DE] text-[#E68A00]",
+                purple:"bg-[#F3EBFF] text-[#6C3AD6]",
+                blue:"bg-[#E8F1FF] text-[#2169CF]",
+                amber:"bg-[#FFF7E9] text-[#B7832E]",
             };
             const iconTone=iconTones[c.tone];
-            return <section key={c.title} aria-busy={rental.loading} className="flex min-h-[146px] min-w-0 w-full items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm">
-                {rental.loading ? <>
-                    <span className="h-14 w-14 shrink-0 animate-pulse rounded-full bg-[#EEE8F3]" aria-hidden="true"/>
-                    <span className="min-w-0 flex-1 space-y-2.5" role="status" aria-label={`Loading ${c.title}`}>
-                        <span className="block h-3.5 w-32 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
-                        <span className="block h-7 w-24 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
-                        <span className="block h-2.5 w-40 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
-                    </span>
-                </> : <>
-                    <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${iconTone}`} aria-hidden="true">{c.icon}</span>
-                    <span className="min-w-0 flex-1">
-                        <span className="block text-[14px] font-semibold leading-5 text-[#4B3E55]">{c.title}</span>
-                        <span className="mt-1 block break-words text-[28px] font-bold leading-tight tracking-[-0.03em] text-[#1A1220] tabular-nums">{rental.connected ? c.num.toLocaleString("en-PH") : "—"}</span>
-                        <span className="mt-2 block text-[11px] leading-4 text-[#8A7D92]">{rental.connected ? c.caption : "Rental data unavailable"}</span>
-                    </span>
-                </>}
+            return <section key={c.title} aria-busy={rental.loading} className="flex min-h-[108px] min-w-0 w-full items-center gap-3 rounded-[16px] border border-[#E6DDF0] bg-white px-3.5 py-3 text-left shadow-sm">
+                <span className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl ${rental.loading ? "animate-pulse bg-[#EEE8F3]" : iconTone}`} aria-hidden="true">{!rental.loading && c.icon}</span>
+                <span className="min-w-0 flex-1">
+                    <span className="block text-[12px] font-semibold leading-4 text-[#25153D]">{c.title}</span>
+                    {rental.loading ? <span className="mt-1 block h-6 w-12 animate-pulse rounded bg-[#EEE8F3]"/> :
+                        <span className="mt-1 block break-words text-[24px] font-bold leading-none tabular-nums text-[#25153D]">{rental.connected ? c.num.toLocaleString("en-PH") : "—"}</span>}
+                    <span className="mt-1 block text-[11px] leading-4 text-[#806A8C]">{rental.loading || rental.connected ? c.caption : "Rental data unavailable"}</span>
+                </span>
             </section>;
         })}</div>}
         {/* Rental Operations Queue: rendered only in Staff Bookings (section="queue"). */}
@@ -784,10 +741,10 @@ export default function StaffRentalInventory({branchName,section="inventory",que
         </section>}
         {rental.error&&<p role="alert" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">Rental operations unavailable: {rental.error} <button type="button" className="underline" onClick={()=>void rental.refresh(true)}>Retry</button></p>}
         {showInventory&&<>
-            <div className="grid items-stretch gap-4 xl:grid-cols-[1.15fr_1fr]">
+            <div className="grid min-w-0 grid-cols-1 gap-4">
                 {/* Reinstated using the original purple/white table design; operations reuse existing rental actions. */}
-                <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm" aria-label="Equipment Care and Maintenance">
-                    <div className="flex min-w-0 items-center justify-between gap-2 border-b border-[#E9E1EE] px-4 py-3.5">
+                <section className="flex min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm" aria-label="Equipment Care and Maintenance">
+                    <div className="flex min-w-0 shrink-0 flex-wrap items-start justify-between gap-2 border-b border-[#E9E1EE] px-4 py-3.5">
                         <div className="flex min-w-0 flex-1 items-center gap-3">
                             <span className="shrink-0 rounded-xl bg-[#F1EBFF] p-2 text-[#5A35A5]"><ClipboardCheck size={18}/></span>
                             <div className="min-w-0">
@@ -802,8 +759,8 @@ export default function StaffRentalInventory({branchName,section="inventory",que
                                 <option key={kind} value={kind}>{careStatusLabel[kind]}</option>)}
                         </StaffRentalFilterSelect>
                     </div>
-                    <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Equipment care and maintenance tasks" tabIndex={0}>
-                        <table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                    <div className="max-h-[220px] w-full overflow-auto overscroll-contain" role="region" aria-label="Equipment care and maintenance tasks" tabIndex={0}>
+                        <table className="w-full min-w-[430px] table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
                             <colgroup><col className="w-[28%]"/><col className="w-[10%]"/><col className="w-[19%]"/><col className="w-[20%]"/><col className="w-[23%]"/></colgroup>
                             <thead className="sticky top-0 z-10 bg-[#FFFDF8]"><tr>
                                 {['Equipment','Units','Issue','Status','Action'].map(h=><th key={h} className={th}>{h}</th>)}
@@ -837,147 +794,96 @@ export default function StaffRentalInventory({branchName,section="inventory",que
                             'No pending inspections, care, repair, or missing-equipment tasks.':'No matching equipment care tasks.'}</Empty>}
                     </div>
                 </section>
-                {/* Same container, header and Activity filter as the Manager Rental Stock Activity; today's records only. */}
-                <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm">
-                    <div className="flex min-w-0 flex-col gap-2 border-b border-[#E9E1EE] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
-                        <div className="flex min-w-0 flex-1 items-start gap-3">
-                            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]"><CalendarClock size={18}/></span>
-                            <div className="min-w-0"><h2 className="text-[15px] font-bold text-[#21132E]">Today's Rental Stock Activity</h2>
-                                <p className="mt-0.5 text-[11px] text-[#86778F]">Restocks, replacements, returns, releases, and deletions recorded today.</p></div>
+                {/* Same header, filter and search layout as the Manager Branch Rental Equipment List. */}
+                <section className={`flex min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm ${dateFiltersOpen ? "min-h-[470px]" : "h-[470px]"}`}>
+                    <div className="flex shrink-0 flex-wrap items-start justify-between gap-3 px-4 py-3.5">
+                        <div className="flex items-start gap-3">
+                            <span className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]"><PackageCheck size={18}/></span>
+                            <div>
+                                <h2 className="text-[15px] font-bold text-[#21132E]">Branch Rental Equipment List</h2>
+                                <p className="mt-0.5 text-[11px] text-[#86778F]">Daily rental availability · {branchName}</p>
+                            </div>
                         </div>
-                        <div className="flex shrink-0 items-center justify-end">
-                            <StaffRentalFilterSelect containerClassName="w-[114px]" aria-label="Filter today's rental activity" value={rentalActivityFilter}
-                                                     onChange={e=>setRentalActivityFilter(e.target.value as "all"|"in"|"out")}>
-                                <option value="all">All Activity</option><option value="in">Stock In</option><option value="out">Stock Out</option>
+                        <div className="flex flex-wrap items-center gap-2">
+                            <StaffRentalFilterSelect containerClassName="w-[154px]" value={categoryFilter} onChange={e=>setCategoryFilter(e.target.value)} aria-label="Filter rental category">
+                                <option>All Categories</option>{rentalCategories.map(name=><option key={name}>{name}</option>)}
                             </StaffRentalFilterSelect>
+                            <StaffRentalFilterSelect containerClassName="w-[148px]" value={statusFilter} onChange={e=>setStatusFilter(e.target.value)} aria-label="Filter rental equipment status">
+                                {["All Status","Available","Unavailable"].map(value=><option key={value}>{value}</option>)}
+                            </StaffRentalFilterSelect>
+                            <button type="button" aria-expanded={dateFiltersOpen} onClick={()=>setDateFiltersOpen(v=>!v)}
+                                    className="flex h-9 items-center gap-2 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC]">
+                                <CalendarClock size={15}/> {appliedDates ? (appliedDates.from === manilaDate() && appliedDates.to === manilaDate() ? "Today" : "Dates Applied") : "Date Availability"} <ChevronDown size={14}/>
+                            </button>
                         </div>
                     </div>
-                    <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="region" aria-label="Today's rental stock activity" tabIndex={0}>
-                        <table className="w-full min-w-0 table-fixed text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-                            <colgroup><col className="w-[16%]"/><col className="w-[30%]"/><col className="w-[18%]"/><col className="w-[9%]"/><col className="w-[27%]"/></colgroup>
-                            <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase text-[#806A8C]">
+                    {dateFiltersOpen && <div className="flex shrink-0 flex-wrap items-end gap-3 border-t border-[#E9E1EE] bg-[#FCFAFF] px-4 py-3 text-xs">
+                        <label className="space-y-1 font-semibold text-[#4E2C66]">From
+                            <input type="date" value={fromDate} onChange={e=>{setFromDate(e.target.value);resetDates();}} className="block h-10 rounded-xl border border-[#E3D8EA] bg-white px-3 text-[#2B174C]"/>
+                        </label>
+                        <label className="space-y-1 font-semibold text-[#4E2C66]">To (inclusive)
+                            <input type="date" min={fromDate||undefined} value={toDate} onChange={e=>{setToDate(e.target.value);resetDates();}} className="block h-10 rounded-xl border border-[#E3D8EA] bg-white px-3 text-[#2B174C]"/>
+                        </label>
+                        <button type="button" disabled={!fromDate||!toDate||toDate<fromDate||datesLoading} onClick={()=>void checkDates()}
+                                className="h-10 rounded-xl bg-[#2B174C] px-4 font-semibold text-white disabled:opacity-50">{datesLoading?"Checking...":"Check Dates"}</button>
+                        <button type="button" onClick={()=>{const today=manilaDate();setFromDate(today);setToDate(today);void checkDates(today,today);}}
+                                className="h-10 rounded-xl border border-[#E3D8EA] bg-white px-4 font-semibold text-[#2B174C]">Clear</button>
+                        {datesError && <p role="alert" className="w-full text-red-700">{datesError}</p>}
+                        <p className="w-full text-[#86778F]">Checking dates changes the Status and available quantity for that period. Fully Booked counts only confirmed reservations. Physical stock and equipment conditions are shown separately.</p>
+                    </div>}
+                    <div className="grid shrink-0 gap-3 px-4 pb-4">
+                        <label className="relative min-w-0"><span className="sr-only">Search rental equipment</span>
+                            <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"/>
+                            <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search equipment no., rental products, or categories..."
+                                   className="h-11 w-full rounded-xl border border-[#E3D8EA] bg-white pl-11 pr-3 text-sm text-[#2B174C] outline-none placeholder:text-[#9B8AAA] focus:border-[#5A35A5]"/>
+                        </label>
+                    </div>
+                    <div className={`w-full flex-1 overflow-auto overscroll-contain border-t border-[#E9E1EE] ${dateFiltersOpen ? "max-h-[360px] min-h-[180px]" : "min-h-0"}`} role="region" aria-label="Branch rental equipment list" tabIndex={0}>
+                        <table className="w-full min-w-[980px] table-auto text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                            <colgroup><col className="w-[13%]"/><col className="w-[15%]"/><col className="w-[9%]"/><col className="w-[7%]"/><col className="w-[8%]"/><col className="w-[7.5%]"/><col className="w-[7%]"/><col className="w-[7.5%]"/><col className="w-[9%]"/><col className="w-[17%]"/></colgroup>
+                            <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase tracking-wide text-[#806A8C]">
                             <tr className="border-b border-[#E9E1EE]">
-                                <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Date &amp; Time</th>
-                                <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Equipment</th>
-                                <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Activity</th>
-                                <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Qty</th>
-                                <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Reference No.</th>
+                                <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Equipment No.</th>
+                                <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Rental Product</th>
+                                <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Category</th>
+                                <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Total Units</th>
+                                <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Available</th>
+                                <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Reserved</th>
+                                <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Rented Out</th>
+                                <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">On Hold</th>
+                                <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Status</th>
+                                <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Action</th>
                             </tr>
                             </thead>
-                            <tbody>
-                            {todayRentalActivity.map(event => {
-                                const when = dateTime(event.occurredAt);
-                                // Same Stock In / Stock Out wording and colors as the Manager stock activity.
-                                const positive = staffRentalDirection(event) === "in";
-                                return <tr key={event.id} className="border-b border-[#EFE8F2] last:border-0">
-                                    <td className="whitespace-nowrap py-2 text-[#5F4E75] px-4 text-left">
-                                        {when.date}
-                                        {when.time && <div className="mt-0.5 text-[10px] text-[#8A7D90]">{when.time}</div>}
+                            <tbody>{visibleEquipment.map(e=>{
+                                const availability=staffEquipmentStatus(e,appliedDates?datesAvailability?.get(e.id):e.bookableToday);
+                                const availabilityColor=availability==='Fully Available'||availability==='Available'?'text-[#23834A]':availability==='Low Availability'?'text-[#A66A00]':availability==='Not Checked'?'text-[#6B6174]':'text-[#D92C3F]';
+                                return <tr key={e.id} className="h-12 border-b border-[#EFE8F2] text-[#2B174C] last:border-0 hover:bg-[#FFFCF8]">
+                                    <td className="whitespace-nowrap py-2 px-4 text-left font-semibold">{e.equipmentNumber||'—'}</td>
+                                    <td className="px-2 py-2 font-semibold">{e.name}</td>
+                                    <td className="px-2 py-2 text-[#5F4E75]">{e.category}</td>
+                                    <td className="px-2 py-2 text-center font-semibold">{e.totalUnits}</td>
+                                    <td className="px-2 py-2 text-center font-semibold" title={appliedDates?"Available units for the selected date range":"Available today after overlapping confirmed reservations, not just physically ready units"}>{appliedDates?(datesAvailability?.get(e.id)??"—"):e.bookableToday}</td>
+                                    <td className="px-2 py-2 text-center" title="Confirmed bookings not yet released, for the selected dates">{appliedDates?(datesReserved?.get(e.id)??"—"):"—"}</td>
+                                    <td className="px-2 py-2 text-center">{e.rentedOutUnits}</td>
+                                    <td className="px-2 py-2 text-center" title={`On Hold: ${holdBreakdown.get(e.id)?.inspection??0} inspection, ${holdBreakdown.get(e.id)?.cleaning??0} cleaning, ${holdBreakdown.get(e.id)?.routine??0} routine care, ${holdBreakdown.get(e.id)?.repairs??0} repair. Outstanding missing units: ${e.missingUnits}.`}>
+                                        <span>{e.maintenanceUnits}</span>
+                                        {e.missingUnits > 0 && <span className="mt-1 block whitespace-nowrap text-[10px] font-semibold text-[#B45309]">Missing: {e.missingUnits}</span>}
                                     </td>
-                                    <td className="px-2 py-2 font-semibold text-[#2B174C]">{event.equipmentName}</td>
-                                    <td title={event.type==="received"?"Restocked":event.type==="missing_replaced"?"Replaced":event.type==="returned"?"Returned items":event.type==="rented_out"?"Released":"Deleted"}
-                                        className={`px-2 py-2 text-center font-medium ${positive ? "text-[#23834A]" : "text-[#D92C3F]"}`}>{positive ? "Stock In" : "Stock Out"}</td>
-                                    <td className={`px-2 py-2 text-center font-semibold ${positive ? "text-[#23834A]" : "text-[#D92C3F]"}`}>
-                                        {positive ? "+" : "−"}{Math.abs(event.quantity)}
-                                    </td>
-                                    <td className="break-all px-2 py-2 text-[#5F4E75]">{event.referenceNumber || "—"}</td>
+                                    <td className="px-2 py-2 text-center"><span className={`inline-block text-[10px] font-semibold ${availabilityColor}`}>{availability}</span></td>
+                                    <td className="px-2 py-2 text-center"><div className="flex flex-nowrap items-center justify-center gap-1.5 whitespace-nowrap">
+                                        <button type="button" className={scheduleAction} onClick={()=>openSchedule(e.id)}><CalendarDays size={13}/> View Schedule</button>
+                                        <button type="button" className={restockAction} disabled={!canOperate} aria-label={`Restock ${e.name}`}
+                                                title={canOperate?undefined:"Full Inventory access is required to restock."}
+                                                onClick={()=>{setRestockItem(e);setRestockQuantity("");setRestockError("");}}><PackagePlus size={13}/> Restock</button>
+                                    </div></td>
                                 </tr>;
-                            })}
-                            </tbody>
+                            })}</tbody>
                         </table>
-                        {rental.connected && todayRentalActivity.length === 0 && <Empty>{rentalActivityFilter==="all"&&!search.trim()?"No rental stock movements recorded today.":"No rental stock movements today match the selected filters."}</Empty>}
+                        {rental.connected&&visibleEquipment.length===0&&<Empty>No rental equipment matches the selected filters.</Empty>}
                     </div>
                 </section>
             </div>
-            {/* Same header, filter and search layout as the Manager Branch Rental Equipment List. */}
-            <section className="overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm">
-                <div className="flex flex-wrap items-start justify-between gap-3 px-4 py-3.5">
-                    <div className="flex items-start gap-3">
-                        <span className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]"><PackageCheck size={18}/></span>
-                        <div>
-                            <h2 className="text-[15px] font-bold text-[#21132E]">Branch Rental Equipment List</h2>
-                            <p className="mt-0.5 text-[11px] text-[#86778F]">Daily rental availability · {branchName}</p>
-                        </div>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                        <StaffRentalFilterSelect containerClassName="w-[154px]" value={categoryFilter} onChange={e=>setCategoryFilter(e.target.value)} aria-label="Filter rental category">
-                            <option>All Categories</option>{rentalCategories.map(name=><option key={name}>{name}</option>)}
-                        </StaffRentalFilterSelect>
-                        <StaffRentalFilterSelect containerClassName="w-[148px]" value={statusFilter} onChange={e=>setStatusFilter(e.target.value)} aria-label="Filter rental equipment status">
-                            {["All Status","Available","Unavailable"].map(value=><option key={value}>{value}</option>)}
-                        </StaffRentalFilterSelect>
-                        <button type="button" aria-expanded={dateFiltersOpen} onClick={()=>setDateFiltersOpen(v=>!v)}
-                                className="flex h-9 items-center gap-2 rounded-xl border border-[#E3D8EA] bg-white px-3 text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC]">
-                            <CalendarClock size={15}/> {appliedDates ? (appliedDates.from === manilaDate() && appliedDates.to === manilaDate() ? "Today" : "Dates Applied") : "Date Availability"} <ChevronDown size={14}/>
-                        </button>
-                    </div>
-                </div>
-                {dateFiltersOpen && <div className="flex flex-wrap items-end gap-3 border-t border-[#E9E1EE] bg-[#FCFAFF] px-4 py-3 text-xs">
-                    <label className="space-y-1 font-semibold text-[#4E2C66]">From
-                        <input type="date" value={fromDate} onChange={e=>{setFromDate(e.target.value);resetDates();}} className="block h-10 rounded-xl border border-[#E3D8EA] bg-white px-3 text-[#2B174C]"/>
-                    </label>
-                    <label className="space-y-1 font-semibold text-[#4E2C66]">To (inclusive)
-                        <input type="date" min={fromDate||undefined} value={toDate} onChange={e=>{setToDate(e.target.value);resetDates();}} className="block h-10 rounded-xl border border-[#E3D8EA] bg-white px-3 text-[#2B174C]"/>
-                    </label>
-                    <button type="button" disabled={!fromDate||!toDate||toDate<fromDate||datesLoading} onClick={()=>void checkDates()}
-                            className="h-10 rounded-xl bg-[#2B174C] px-4 font-semibold text-white disabled:opacity-50">{datesLoading?"Checking...":"Check Dates"}</button>
-                    <button type="button" onClick={()=>{const today=manilaDate();setFromDate(today);setToDate(today);void checkDates(today,today);}}
-                            className="h-10 rounded-xl border border-[#E3D8EA] bg-white px-4 font-semibold text-[#2B174C]">Clear</button>
-                    {datesError && <p role="alert" className="w-full text-red-700">{datesError}</p>}
-                    <p className="w-full text-[#86778F]">Checking dates changes the Status and available quantity for that period. Fully Booked counts only confirmed reservations. Physical stock and equipment conditions are shown separately.</p>
-                </div>}
-                <div className="grid gap-3 px-4 pb-4">
-                    <label className="relative min-w-0"><span className="sr-only">Search rental equipment</span>
-                        <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"/>
-                        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search equipment no., rental products, or categories..."
-                               className="h-11 w-full rounded-xl border border-[#E3D8EA] bg-white pl-11 pr-3 text-sm text-[#2B174C] outline-none placeholder:text-[#9B8AAA] focus:border-[#5A35A5]"/>
-                    </label>
-                </div>
-                <div className="max-h-[360px] w-full overflow-y-auto overflow-x-auto overscroll-contain border-t border-[#E9E1EE]" role="region" aria-label="Branch rental equipment list" tabIndex={0}>
-                    <table className="w-full min-w-0 table-auto text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-                        <colgroup><col className="w-[13%]"/><col className="w-[15%]"/><col className="w-[9%]"/><col className="w-[7%]"/><col className="w-[8%]"/><col className="w-[7.5%]"/><col className="w-[7%]"/><col className="w-[7.5%]"/><col className="w-[9%]"/><col className="w-[17%]"/></colgroup>
-                        <thead className="sticky top-0 z-10 bg-[#FFFCF8] text-[10px] uppercase tracking-wide text-[#806A8C]">
-                        <tr className="border-b border-[#E9E1EE]">
-                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Equipment No.</th>
-                            <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Rental Product</th>
-                            <th className="truncate px-2 py-2 font-semibold text-center text-[10px] uppercase tracking-normal text-[#806A8C]">Category</th>
-                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Total Units</th>
-                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Available</th>
-                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Reserved</th>
-                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Rented Out</th>
-                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">On Hold</th>
-                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Status</th>
-                            <th className="truncate px-2 py-2 text-center font-semibold text-[10px] uppercase tracking-normal text-[#806A8C]">Action</th>
-                        </tr>
-                        </thead>
-                        <tbody>{visibleEquipment.map(e=>{
-                            const availability=staffEquipmentStatus(e,appliedDates?datesAvailability?.get(e.id):e.bookableToday);
-                            const availabilityColor=availability==='Fully Available'||availability==='Available'?'text-[#23834A]':availability==='Low Availability'?'text-[#A66A00]':availability==='Not Checked'?'text-[#6B6174]':'text-[#D92C3F]';
-                            return <tr key={e.id} className="h-12 border-b border-[#EFE8F2] text-[#2B174C] last:border-0 hover:bg-[#FFFCF8]">
-                                <td className="whitespace-nowrap py-2 px-4 text-left font-semibold">{e.equipmentNumber||'—'}</td>
-                                <td className="px-2 py-2 font-semibold">{e.name}</td>
-                                <td className="px-2 py-2 text-[#5F4E75]">{e.category}</td>
-                                <td className="px-2 py-2 text-center font-semibold">{e.totalUnits}</td>
-                                <td className="px-2 py-2 text-center font-semibold" title={appliedDates?"Available units for the selected date range":"Available today after overlapping confirmed reservations, not just physically ready units"}>{appliedDates?(datesAvailability?.get(e.id)??"—"):e.bookableToday}</td>
-                                <td className="px-2 py-2 text-center" title="Confirmed bookings not yet released, for the selected dates">{appliedDates?(datesReserved?.get(e.id)??"—"):"—"}</td>
-                                <td className="px-2 py-2 text-center">{e.rentedOutUnits}</td>
-                                <td className="px-2 py-2 text-center" title={`On Hold: ${holdBreakdown.get(e.id)?.inspection??0} inspection, ${holdBreakdown.get(e.id)?.cleaning??0} cleaning, ${holdBreakdown.get(e.id)?.routine??0} routine care, ${holdBreakdown.get(e.id)?.repairs??0} repair. Outstanding missing units: ${e.missingUnits}.`}>
-                                    <span>{e.maintenanceUnits}</span>
-                                    {e.missingUnits > 0 && <span className="mt-1 block whitespace-nowrap text-[10px] font-semibold text-[#B45309]">Missing: {e.missingUnits}</span>}
-                                </td>
-                                <td className="px-2 py-2 text-center"><span className={`inline-block text-[10px] font-semibold ${availabilityColor}`}>{availability}</span></td>
-                                <td className="px-2 py-2 text-center"><div className="flex flex-nowrap items-center justify-center gap-1.5 whitespace-nowrap">
-                                    <button type="button" className={scheduleAction} onClick={()=>openSchedule(e.id)}><CalendarDays size={13}/> View Schedule</button>
-                                    <button type="button" className={restockAction} disabled={!canOperate} aria-label={`Restock ${e.name}`}
-                                            title={canOperate?undefined:"Full Inventory access is required to restock."}
-                                            onClick={()=>{setRestockItem(e);setRestockQuantity("");setRestockError("");}}><PackagePlus size={13}/> Restock</button>
-                                </div></td>
-                            </tr>;
-                        })}</tbody>
-                    </table>
-                    {rental.connected&&visibleEquipment.length===0&&<Empty>No rental equipment matches the selected filters.</Empty>}
-                </div>
-            </section>
         </>}
         {/* Only the queue presentation changes: equipment actions still use their existing confirmation dialogs and API. */}
         {selectedQueueBooking && <div role="presentation" className="fixed inset-0 z-[80] flex items-center justify-center bg-[#21132E]/55 p-4"

@@ -619,7 +619,7 @@ const JWT_SECRET = requiredEnv("JWT_SECRET");
 
 
 
-const OTP_EXPIRY_SECONDS = 90;
+const OTP_EXPIRY_SECONDS = 300;
 // Explicit, local-only OTP delivery for test accounts (never enabled in production).
 // Start Next.js with STOCKNBOOK_DEV_OTP_CONSOLE=true and NODE_ENV=development.
 // Only OTP email delivery is replaced; OTP hashing, database expiry and verification stay intact.
@@ -651,7 +651,7 @@ const PAYMENT_OTP_RATE_WINDOW_MINUTES = 10;
 // Never enable this flag in production: it prints private OTP codes to logs.
 const PAYMENT_OTP_TERMINAL_DEBUG =
     String(process.env.PAYMENT_OTP_TERMINAL_DEBUG || "").toLowerCase() === "true" &&
-    String(process.env.NODE_ENV || "").toLowerCase() !== "production";
+    process.env.NODE_ENV === "development";
 
 // Local invitation testing / recovery.
 // Invitation links remain usable even when SMTP cannot deliver a demo email.
@@ -746,10 +746,252 @@ function generateOtp() {
 
 function hashOtp(otp) {
     return crypto
-        .createHash("sha256")
-        .update(String(otp))
+        .createHmac("sha256", JWT_SECRET)
+        .update("stocknbook:otp:" + String(otp))
         .digest("hex");
 }
+
+// Authentication controls use the existing account and OTP tables only.
+const AUTH_INVALID = "Invalid email or password.";
+const DUMMY_PASSWORD_HASH = "$2a$10$C6UzMDM.H6dfI/f/IKcEe.5A7Z2O1qsOPzs6swBN9Gh.LzZun5EMG";
+const OTP_MAX_ATTEMPTS = 5;
+const OTP_RESEND_SECONDS = 60;
+const OTP_MAX_SENDS = 3;
+function securityEvent(event, fields = {}) {
+    // Structured security events: no passwords, OTPs, JWTs, reset tokens or raw emails.
+    const entry = JSON.stringify({ category: "authentication_security", event, timestamp: new Date().toISOString(), ...fields });
+    if (fields.priority === "high" || fields.priority === "medium") console.warn(entry);
+    else console.info(entry);
+}
+function securityError(statusCode, message, code, retryAfter) {
+    const error = new Error(message);
+    error.statusCode = statusCode; error.code = code;
+    if (retryAfter) error.retry_after_seconds = retryAfter;
+    return error;
+}
+function passwordPolicy(password) {
+    return typeof password === "string" && Array.from(password).length >= 15 && Buffer.byteLength(password, "utf8") <= 72;
+}
+const PASSWORD_POLICY_MESSAGE = "Use at least 15 characters and at most 72 UTF-8 bytes.";
+// Named locks serialize related operations across all instances on the same MySQL primary.
+// The handler releases all acquired locks before returning its pooled connection.
+const heldAuthLocks = new WeakMap();
+async function authLock(connection, scope) {
+    // Use the same collation as the unique users.email index, including case/accent equivalents.
+    const [keys] = await connection.execute("SELECT SHA2(WEIGHT_STRING(CONVERT(? USING utf8mb4) COLLATE utf8mb4_unicode_ci), 256) AS lock_key", ["stocknbook:auth:" + scope]);
+    const key = keys[0].lock_key;
+    let held = heldAuthLocks.get(connection);
+    if (!held) { held = new Set(); heldAuthLocks.set(connection, held); }
+    if (held.has(key)) return;
+    const [rows] = await connection.execute("SELECT GET_LOCK(?, 10) AS acquired", [key]);
+    if (Number(rows[0]?.acquired) !== 1) throw securityError(503, "Authentication is busy. Please try again.", "AUTH_BUSY");
+    held.add(key);
+}
+async function releaseAuthLocks(connection) {
+    const held = heldAuthLocks.get(connection);
+    if (!held) return true;
+    heldAuthLocks.delete(connection);
+    try {
+        for (const key of held) {
+            const [rows] = await connection.execute("SELECT RELEASE_LOCK(?) AS released", [key]);
+            if (Number(rows[0]?.released) !== 1) return false;
+        }
+        return true;
+    } catch { return false; }
+}
+function otpScope(purpose, email, storeId = null, inviteHash = null) {
+    const normalized = String(email || "").trim().toLowerCase();
+    const where = ["purpose = ?"], params = [purpose];
+    if (storeId !== null) { where.push("store_id = ?"); params.push(storeId); }
+    else { where.push("email = ?"); params.push(normalized); }
+    if (inviteHash !== null) { where.push("invite_token_hash = ?"); params.push(inviteHash); }
+    // Count requests by email/purpose across replaced invitations, not only per token.
+    const rateParams = storeId !== null ? [purpose, storeId] : [purpose, normalized];
+    return { purpose, where: where.join(" AND "), params, rateWhere: where.slice(0, 2).join(" AND "), rateParams,
+        key: `${purpose}:${storeId !== null ? String(storeId) : normalized}` };
+}
+async function guardOtpSend(connection, scope) {
+    await authLock(connection, scope.key);
+    const [rows] = await connection.execute(
+        `SELECT COUNT(*) AS total, COALESCE(SUM(attempt_count),0) AS failures,
+                COALESCE(TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), DATE_ADD(MAX(created_at), INTERVAL 60 SECOND)),0) AS cooldown,
+                COALESCE(TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), DATE_ADD(MIN(created_at), INTERVAL 15 MINUTE)),0) AS window_wait
+         FROM otp_codes WHERE ${scope.rateWhere} AND created_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 15 MINUTE) AND created_at <= UTC_TIMESTAMP()`, scope.rateParams);
+    const state = rows[0];
+    const wait = Number(state.total) >= OTP_MAX_SENDS || Number(state.failures) >= 15 ? Number(state.window_wait) : Number(state.cooldown);
+    if (wait > 0) {
+        securityEvent("otp_request_throttled", { purpose: scope.purpose, scope_id: crypto.createHash("sha256").update(scope.key).digest("hex") });
+        throw securityError(429, `Please wait ${Math.max(1, wait)} seconds before requesting another code.`, "OTP_RESEND_LIMIT", Math.max(1, wait));
+    }
+}
+async function checkOtp(connection, scope, code, consume = true) {
+    await authLock(connection, scope.key);
+    if (!/^\d{6}$/.test(String(code))) throw securityError(400, "Enter the complete 6-digit verification code.", "OTP_FORMAT");
+    const [rows] = await connection.execute(
+        `SELECT id, otp_hash, attempt_count, user_id, challenge_id, invalidated_at FROM otp_codes
+         WHERE ${scope.where} AND used_at IS NULL AND expires_at > UTC_TIMESTAMP()
+         ORDER BY id DESC LIMIT 1`, scope.params);
+    const row = rows[0];
+    const [totals] = await connection.execute(`SELECT COALESCE(SUM(attempt_count),0) AS total FROM otp_codes WHERE ${scope.rateWhere} AND created_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 15 MINUTE) AND created_at <= UTC_TIMESTAMP()`, scope.rateParams);
+    if (Number(totals[0].total) >= 15 || (row && Number(row.attempt_count) >= OTP_MAX_ATTEMPTS)) {
+        securityEvent("otp_verification_blocked", { purpose: scope.purpose });
+        throw securityError(429, "Too many incorrect codes. Request a new code when available.", "OTP_ATTEMPTS_EXHAUSTED");
+    }
+    if (!row || row.invalidated_at) throw securityError(400, "Invalid or expired verification code. Request a new code.", "OTP_INVALID");
+    const expected = Buffer.from(String(row.otp_hash), "hex");
+    const actual = Buffer.from(hashOtp(code), "hex");
+    if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
+        const count = Number(row.attempt_count) + 1;
+        await connection.execute(`UPDATE otp_codes SET attempt_count = ?, invalidated_at = IF(? >= 5, UTC_TIMESTAMP(), invalidated_at) WHERE id = ?`, [count, count, row.id]);
+        securityEvent("otp_verification_failed", { purpose: scope.purpose, otp_record_id: String(row.id), attempt_count: count });
+        if (count >= OTP_MAX_ATTEMPTS) throw securityError(429, "Too many incorrect codes. Request a new code when available.", "OTP_ATTEMPTS_EXHAUSTED");
+        const remaining = OTP_MAX_ATTEMPTS - count;
+        throw securityError(400, `Invalid code. Try again. ${remaining} ${remaining === 1 ? "attempt" : "attempts"} left.`, "OTP_INCORRECT");
+    }
+    if (consume) await connection.execute("UPDATE otp_codes SET used_at = UTC_TIMESTAMP(), verified_at = UTC_TIMESTAMP() WHERE id = ?", [row.id]);
+    securityEvent("otp_verification_succeeded", { purpose: scope.purpose, otp_record_id: String(row.id) });
+    return row;
+}
+// Return the current lockout level for UI guidance, without imposing a mandatory reset.
+function accountLockedError(account, table, lockoutCount, retryAfter) {
+    const error = securityError(429, "Your account is temporarily locked.", "ACCOUNT_LOCKED", retryAfter);
+    error.lockout_count = Math.max(1, Number(lockoutCount) || 1);
+    // Only active, verified regular accounts have email-based recovery in recoveryAction.
+    error.password_recovery_available = table === "users" &&
+        String(account.status).trim().toLowerCase() === "active" &&
+        Boolean(account.email_verified_at && account.password_hash);
+    return error;
+}
+async function authenticateAccount(connection, table, email, password) {
+    if (!["users", "platform_admins"].includes(table)) throw new Error("Invalid account table");
+    const normalized = String(email || "").trim().toLowerCase();
+    await authLock(connection, `account:${normalized}`);
+    // A single connection-scoped lock protects counter updates, password reset, and token issue.
+    const [rows] = await connection.execute(`SELECT *,
+                                                    IF(locked_until > UTC_TIMESTAMP(), 1, 0) AS currently_locked,
+                                                    GREATEST(0, CEIL(TIMESTAMPDIFF(MICROSECOND, UTC_TIMESTAMP(), locked_until) / 1000000)) AS lock_retry_seconds,
+                                                    IF(first_failed_login_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 15 MINUTE), 1, 0) AS active_window,
+                                                    IF(last_lockout_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 24 HOUR), 1, 0) AS recent_lockout
+                                             FROM ${table} WHERE email = ? LIMIT 1`, [normalized]);
+    const account = rows[0];
+    if (!account) return null;
+    const fields = { account_id: String(account.id), role: table === "platform_admins" ? "platform_admin" : account.role };
+    if (Number(account.currently_locked)) {
+        await bcrypt.compare(String(password), DUMMY_PASSWORD_HASH);
+        securityEvent("login_blocked", fields);
+        throw accountLockedError(account, table, account.lockout_count, Math.max(1, Number(account.lock_retry_seconds) || 1));
+    }
+    if (String(account.status).trim().toLowerCase() !== "active" || !account.password_hash) {
+        await bcrypt.compare(String(password), DUMMY_PASSWORD_HASH);
+        securityEvent("login_blocked_inactive", fields);
+        throw securityError(401, AUTH_INVALID, "AUTH_FAILED");
+    }
+    if (!(await bcrypt.compare(String(password), account.password_hash))) {
+        const count = Number(account.active_window) && !account.locked_until ? Number(account.failed_login_attempts) + 1 : 1;
+        const locked = count >= 5;
+        const lockouts = Number(account.recent_lockout) ? Number(account.lockout_count) : 0;
+        const nextLockouts = locked ? lockouts + 1 : lockouts;
+        const minutes = nextLockouts === 1 ? 5 : nextLockouts === 2 ? 15 : 30;
+        await connection.execute(`UPDATE ${table} SET failed_login_attempts = ?,
+                                                      first_failed_login_at = IF(? = 1, UTC_TIMESTAMP(), first_failed_login_at),
+                                                      locked_until = IF(? = 1, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? MINUTE), NULL),
+                                                      lockout_count = ?, last_lockout_at = IF(? = 1, UTC_TIMESTAMP(), last_lockout_at)
+                                  WHERE id = ?`, [count, count, locked ? 1 : 0, minutes, nextLockouts, locked ? 1 : 0, account.id]);
+        securityEvent("login_failed", { ...fields, attempt_count: count });
+        if (locked) {
+            securityEvent("account_locked", { ...fields, duration_minutes: minutes, lockout_count: nextLockouts });
+            // Emit this only for a new lockout, never for retries during an active lockout.
+            if (nextLockouts >= 4) {
+                securityEvent("suspicious_login_activity", {
+                    ...fields, lockout_count: nextLockouts, duration_minutes: minutes,
+                    priority: nextLockouts >= 5 ? "high" : "medium",
+                });
+            }
+            throw accountLockedError(account, table, nextLockouts, minutes * 60);
+        }
+        throw securityError(401, AUTH_INVALID, "AUTH_FAILED");
+    }
+    await connection.execute(`UPDATE ${table} SET failed_login_attempts = 0, first_failed_login_at = NULL, locked_until = NULL${table === "users" ? ", last_login_at = UTC_TIMESTAMP()" : ""} WHERE id = ?`, [account.id]);
+    securityEvent("login_succeeded", fields);
+    return account;
+}
+// Recovery uses a purpose-bound code and a separate 256-bit single-use authorization.
+function resetTokenHash(value) { return crypto.createHmac("sha256", JWT_SECRET).update("stocknbook:reset:" + value).digest("hex"); }
+async function sendRecoveryMail(email, subject, content) {
+    return sendGmailHtmlEmail(email, [
+        `From: ${EMAIL_FROM}`, `To: ${sanitizeEmailHeader(email)}`, `Subject: ${subject}`,
+        `Date: ${new Date().toUTCString()}`, "MIME-Version: 1.0", 'Content-Type: text/html; charset="UTF-8"', "", content,
+    ].join("\r\n"), "account recovery");
+}
+async function recoveryAction(connection, action, body, headers) {
+    const respond = (statusCode, payload) => ({ statusCode, headers, body: JSON.stringify(payload) });
+    const email = String(body.email || "").trim().toLowerCase();
+    if (action === "request_password_reset") {
+        const generic = { message: "If your email is registered, a verification code will be sent.", expires_in: 300, resend_in: 60 };
+        if (!/^\S+@\S+\.\S+$/.test(email) || email.length > 255) return respond(200, generic);
+        await authLock(connection, `account:${email}`);
+        const [rows] = await connection.execute("SELECT id, email, store_id FROM users WHERE email = ? AND status = 'active' AND email_verified_at IS NOT NULL AND password_hash IS NOT NULL LIMIT 1", [email]);
+        // Platform administrators use a controlled recovery procedure, not email-only reset.
+        if (!rows.length) return respond(200, generic);
+        const user = rows[0];
+        // Send only to the canonical, already verified email stored on the account.
+        // MySQL's case/accent-insensitive comparison can match a differently spelled input.
+        const verifiedEmail = String(user.email).trim();
+        const scope = otpScope("password_reset", verifiedEmail);
+        try { await guardOtpSend(connection, scope); } catch (err) { if (err.statusCode === 429) return respond(200, generic); throw err; }
+        const otp = generateOtp();
+        const challenge = crypto.randomBytes(16).toString("hex");
+        await connection.beginTransaction();
+        try {
+            await connection.execute("UPDATE otp_codes SET invalidated_at = UTC_TIMESTAMP(), used_at = COALESCE(used_at, UTC_TIMESTAMP()) WHERE purpose = 'password_reset' AND user_id = ? AND invalidated_at IS NULL", [user.id]);
+            await connection.execute(`INSERT INTO otp_codes (purpose,email,store_id,user_id,challenge_id,otp_hash,expires_at,created_at)
+                                      VALUES ('password_reset',?,?,?,?,?,DATE_ADD(UTC_TIMESTAMP(), INTERVAL 5 MINUTE),UTC_TIMESTAMP())`, [verifiedEmail,user.store_id,user.id,challenge,hashOtp(otp)]);
+            await connection.commit();
+        } catch (err) { await connection.rollback(); throw err; }
+        try {
+            if (LOCAL_OTP_CONSOLE_ONLY) deliverOtpToLocalTerminal("Password recovery", verifiedEmail, otp, 300);
+            else await sendRecoveryMail(verifiedEmail, "StockNBook Password Reset Code", `<p>Your StockNBook password reset code is <strong>${otp}</strong>. It expires in 5 minutes. If you did not request this, ignore this email.</p>`);
+            securityEvent("password_reset_requested", { account_id: String(user.id) });
+        } catch {
+            await connection.execute("UPDATE otp_codes SET invalidated_at = UTC_TIMESTAMP(), used_at = UTC_TIMESTAMP() WHERE challenge_id = ?", [challenge]);
+            securityEvent("password_reset_delivery_failed", { account_id: String(user.id) });
+        }
+        return respond(200, generic);
+    }
+    if (action === "verify_password_reset_otp") {
+        await authLock(connection, `account:${email}`);
+        const scope = otpScope("password_reset", email);
+        const row = await checkOtp(connection, scope, String(body.otp || ""), false);
+        const token = crypto.randomBytes(32).toString("hex");
+        await connection.execute(`UPDATE otp_codes SET used_at = UTC_TIMESTAMP(), verified_at = UTC_TIMESTAMP(), reset_token_hash = ?, reset_expires_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL 10 MINUTE) WHERE id = ?`, [resetTokenHash(token), row.id]);
+        return respond(200, { reset_token: token, expires_in: 600 });
+    }
+    if (action === "reset_password") {
+        const token = String(body.reset_token || ""); const password = body.new_password;
+        if (!passwordPolicy(password) || password !== body.confirm_password) return respond(400, { error: PASSWORD_POLICY_MESSAGE + " Passwords must match." });
+        if (!/^[a-f0-9]{64}$/.test(token)) throw securityError(400, "Invalid or expired password reset authorization.", "RESET_INVALID");
+        await authLock(connection, `account:${email}`);
+        await authLock(connection, otpScope("password_reset", email).key);
+        await connection.beginTransaction();
+        let user;
+        try {
+            const [rows] = await connection.execute(`SELECT o.id AS otp_id, u.id, u.email FROM otp_codes o JOIN users u ON u.id = o.user_id AND u.email = o.email
+                                                     WHERE o.purpose = 'password_reset' AND o.email = ? AND o.reset_token_hash = ? AND o.verified_at IS NOT NULL
+                                                       AND o.invalidated_at IS NULL AND o.reset_expires_at > UTC_TIMESTAMP() AND u.status = 'active' AND u.email_verified_at IS NOT NULL LIMIT 1 FOR UPDATE`, [email, resetTokenHash(token)]);
+            user = rows[0];
+            if (!user) throw securityError(400, "Invalid or expired password reset authorization.", "RESET_INVALID");
+            const hash = await bcrypt.hash(password, 12);
+            await connection.execute(`UPDATE users SET password_hash = ?, password_changed_at = UTC_TIMESTAMP(),
+                                                       failed_login_attempts = 0, first_failed_login_at = NULL, locked_until = NULL, lockout_count = 0, last_lockout_at = NULL WHERE id = ?`, [hash, user.id]);
+            await connection.execute(`UPDATE otp_codes SET invalidated_at = UTC_TIMESTAMP(), used_at = COALESCE(used_at,UTC_TIMESTAMP()), reset_token_hash = NULL WHERE purpose = 'password_reset' AND user_id = ? AND invalidated_at IS NULL`, [user.id]);
+            await connection.commit();
+        } catch(err) { await connection.rollback(); throw err; }
+        securityEvent("password_reset_succeeded", { account_id: String(user.id) });
+        if (!LOCAL_OTP_CONSOLE_ONLY) try { await sendRecoveryMail(user.email, "StockNBook Password Changed", "<p>Your StockNBook password was changed. If you did not make this change, contact your administrator immediately.</p>"); } catch { securityEvent("password_reset_notification_failed", { account_id: String(user.id) }); }
+        return respond(200, { message: "Password reset successful. Please sign in again." });
+    }
+}
+
 function paymentOtpRetrySeconds(value) {
     const seconds = Number(value);
     return Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds) : 60;
@@ -871,6 +1113,7 @@ async function getManagerInviteRecord(connection, inviteToken) {
 async function requireVerifiedManagerInvite(connection, inviteToken, email) {
 
     const inviteTokenHash = hashInviteToken(inviteToken);
+    await authLock(connection, otpScope("manager_invite", email, null, inviteTokenHash).key);
     const [rows] = await connection.execute(
         `SELECT id
          FROM otp_codes
@@ -878,6 +1121,7 @@ async function requireVerifiedManagerInvite(connection, inviteToken, email) {
            AND invite_token_hash = ?
            AND email = ?
            AND verified_at IS NOT NULL
+           AND invalidated_at IS NULL
            AND verified_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 MINUTE)
          ORDER BY id DESC
              LIMIT 1`,
@@ -986,6 +1230,7 @@ async function getStaffInviteRecord(connection, inviteToken) {
 async function requireVerifiedStaffInvite(connection, inviteToken, email) {
 
     const inviteTokenHash = hashInviteToken(inviteToken);
+    await authLock(connection, otpScope("staff_invite", email, null, inviteTokenHash).key);
     const [rows] = await connection.execute(
         `SELECT id
          FROM otp_codes
@@ -993,6 +1238,7 @@ async function requireVerifiedStaffInvite(connection, inviteToken, email) {
            AND invite_token_hash = ?
            AND email = ?
            AND verified_at IS NOT NULL
+           AND invalidated_at IS NULL
            AND verified_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 MINUTE)
          ORDER BY id DESC
              LIMIT 1`,
@@ -1117,7 +1363,7 @@ function buildOtpEmail(toEmail, otp) {
                 </div>
 
                 <p style="color:#7A6E88;">
-                    This OTP will expire in <strong>1 minute and 30 seconds</strong>.
+                    This OTP will expire in <strong>5 minutes</strong>.
                 </p>
 
                 <p style="margin-top:24px; color:#7A6E88; font-size:13px;">
@@ -1397,7 +1643,7 @@ function buildManagerInviteOtpEmail(toEmail, otp, managerName) {
                         <div style="font-size:34px;font-weight:800;letter-spacing:8px;color:#4B2380;">${safeOtp}</div>
                     </div>
                     <p style="margin:0;font-size:13px;line-height:1.6;color:#7A6E88;">
-                        This code expires in 1 minute and 30 seconds. Do not share it with anyone.
+                        This code expires in 5 minutes. Do not share it with anyone.
                     </p>
                 </div>
             </div>
@@ -1441,7 +1687,7 @@ function buildStaffInviteOtpEmail(toEmail, otp, staffName) {
                         <div style="font-size:34px;font-weight:800;letter-spacing:8px;color:#4B2380;">${safeOtp}</div>
                     </div>
                     <p style="margin:0;font-size:13px;line-height:1.6;color:#7A6E88;">
-                        This code expires in 1 minute and 30 seconds. Do not share it with anyone.
+                        This code expires in 5 minutes. Do not share it with anyone.
                     </p>
                 </div>
             </div>
@@ -2117,16 +2363,22 @@ const DEFAULT_PLATFORM_GCASH_SETTINGS = {
 };
 
 async function getPlatformGcashPaymentSettings(connection) {
+    // ===== GCASH QR BLOB CHANGE BEGIN =====
     const [rows] = await connection.execute(
-        `SELECT \`key\`, value
+        `SELECT \`key\`, value, image_data, image_mime_type
          FROM platform_settings
          WHERE \`key\` IN ('gcash_account_name', 'gcash_number', 'gcash_instruction', 'gcash_qr_image')`
     );
 
     const values = {};
     for (const row of rows) {
-        values[String(row.key)] = String(row.value ?? "");
+        const isQrBlob = row.key === "gcash_qr_image" && row.image_data &&
+            ["image/png", "image/jpeg", "image/webp"].includes(row.image_mime_type);
+        values[String(row.key)] = isQrBlob
+            ? `data:${row.image_mime_type};base64,${Buffer.from(row.image_data).toString("base64")}`
+            : String(row.value ?? "");
     }
+    // ===== GCASH QR BLOB CHANGE END =====
 
     const paymentSettings = {
         account_name:
@@ -2334,6 +2586,10 @@ async function processDueSubscriptionPlanChange(connection, storeId) {
         );
 
         // The UPDATE above applied the plan and cleared the scheduled change.
+        await connection.execute(
+            "UPDATE stores SET plan = ? WHERE id = ?",
+            [targetPlan.plan_code, storeId]
+        );
         await connection.commit();
         return null;
     } catch (error) {
@@ -2886,38 +3142,7 @@ async function submitOwnerPlanPayment(connection, decoded, body) {
         throw error;
     }
 
-    const otpHash = hashOtp(otp);
-
-    await connection.execute(
-        `UPDATE otp_codes
-         SET used_at = UTC_TIMESTAMP()
-         WHERE purpose = 'subscription_payment'
-           AND store_id = ?
-           AND used_at IS NULL
-           AND expires_at <= UTC_TIMESTAMP()`,
-        [storeId]
-    );
-
-    const [otpRows] = await connection.execute(
-        `SELECT id
-         FROM otp_codes
-         WHERE purpose = 'subscription_payment'
-           AND store_id = ?
-           AND otp_hash = ?
-           AND used_at IS NULL
-           AND expires_at > UTC_TIMESTAMP()
-         ORDER BY id DESC
-             LIMIT 1`,
-        [storeId, otpHash]
-    );
-
-    if (!otpRows.length) {
-        const error = new Error("That verification code is invalid or has expired. Request a new one.");
-        error.statusCode = 400;
-        throw error;
-    }
-
-    await connection.execute(`UPDATE otp_codes SET used_at = UTC_TIMESTAMP() WHERE id = ?`, [otpRows[0].id]);
+    await checkOtp(connection, otpScope("subscription_payment", "", storeId), otp, true);
 
     const insertColumns = [
         columns.storeId,
@@ -2989,12 +3214,35 @@ module.exports.handler = async (event) => {
         };
     }
 
-    const { action, store_name, email, password } = body;
+    let { action } = body;
+    const { store_name, password } = body;
+    const email = ["login", "platform_admin_login"].includes(action) && typeof body.email === "string"
+        ? body.email.trim().toLowerCase() : body.email;
 
     let connection;
 
     try {
         connection = await dbPool.getConnection();
+
+        if (["request_password_reset", "verify_password_reset_otp", "reset_password"].includes(action))
+            return await recoveryAction(connection, action, body, headers);
+
+        let authenticatedAccount = null;
+        if (action === "login" || action === "platform_admin_login") {
+            if (typeof email !== "string" || !email || email.length > 255 || typeof password !== "string" || !password || Buffer.byteLength(password, "utf8") > 1024)
+                throw securityError(401, AUTH_INVALID, "AUTH_FAILED");
+            authenticatedAccount = await authenticateAccount(connection, "platform_admins", email, password);
+            if (authenticatedAccount) action = "platform_admin_login";
+            else if (action === "login") authenticatedAccount = await authenticateAccount(connection, "users", email, password);
+            if (!authenticatedAccount) {
+                // Keep the dummy bcrypt check; no fake account records.
+                await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
+                if (action === "login") {
+                    throw securityError(401, "No account found with this email address. Please check your email.", "ACCOUNT_NOT_FOUND");
+                }
+                throw securityError(401, AUTH_INVALID, "AUTH_FAILED");
+            }
+        }
 
         if (action === "get_subscription") {
             const token = getBearerTokenFromEvent(event);
@@ -3116,16 +3364,19 @@ module.exports.handler = async (event) => {
             }
 
 
-            // Count accepted or still-in-progress OTP requests. A failed SMTP
-            // request deletes its pending OTP and is counted separately below.
+            await guardOtpSend(connection, otpScope("subscription_payment", "", storeId));
+
+            // Preserve the existing payment-specific delivery safeguards in addition to the shared limits.
             const [recentRows] = await connection.execute(
                 `SELECT COUNT(*) AS total,
-                        TIMESTAMPDIFF(SECOND, NOW(),
+                        TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(),
                                               DATE_ADD(MIN(created_at), INTERVAL ? MINUTE)) AS retry_after_seconds
                  FROM otp_codes
                  WHERE purpose = 'subscription_payment'
+                   AND invalidated_at IS NULL
                    AND store_id = ?
-                   AND created_at > DATE_SUB(NOW(), INTERVAL ? MINUTE)`,
+                   AND created_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? MINUTE)
+                   AND created_at <= UTC_TIMESTAMP()`,
                 [PAYMENT_OTP_RATE_WINDOW_MINUTES, storeId, PAYMENT_OTP_RATE_WINDOW_MINUTES]
             );
 
@@ -3143,12 +3394,13 @@ module.exports.handler = async (event) => {
             // Failed attempts have their own independent 10-minute allowance.
             const [failureRows] = await connection.execute(
                 `SELECT COUNT(*) AS total,
-                        TIMESTAMPDIFF(SECOND, NOW(),
+                        TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(),
                                               DATE_ADD(MIN(created_at), INTERVAL ? MINUTE)) AS retry_after_seconds
                  FROM otp_codes
                  WHERE purpose = 'subscription_payment_email_failure'
                    AND store_id = ?
-                   AND created_at > DATE_SUB(NOW(), INTERVAL ? MINUTE)`,
+                   AND created_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? MINUTE)
+                   AND created_at <= UTC_TIMESTAMP()`,
                 [PAYMENT_OTP_RATE_WINDOW_MINUTES, storeId, PAYMENT_OTP_RATE_WINDOW_MINUTES]
             );
 
@@ -3178,8 +3430,8 @@ module.exports.handler = async (event) => {
             // In particular, do not invalidate the owner's previous active code
             // when delivery of this replacement code fails.
             const [insertResult] = await connection.execute(
-                `INSERT INTO otp_codes (purpose, store_id, email, otp_hash, expires_at, used_at)
-                 VALUES ('subscription_payment', ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), UTC_TIMESTAMP())`,
+                `INSERT INTO otp_codes (purpose, store_id, email, otp_hash, expires_at, used_at, created_at)
+                 VALUES ('subscription_payment', ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), UTC_TIMESTAMP(), UTC_TIMESTAMP())`,
                 [storeId, ownerEmail, otpHash, PAYMENT_OTP_EXPIRY_SECONDS]
             );
             const newOtpId = Number(insertResult.insertId);
@@ -3188,10 +3440,10 @@ module.exports.handler = async (event) => {
                 await sendPaymentOtpEmail(ownerEmail, otp, planName);
             } catch (emailError) {
                 // Remove the code that was never delivered. It will not count
-                // toward the five accepted-email OTP requests.
+                // toward the existing email-delivery limit; the shared request limit retains the record.
                 try {
                     await connection.execute(
-                        `DELETE FROM otp_codes WHERE id = ? AND store_id = ? AND purpose = 'subscription_payment' AND used_at IS NOT NULL`,
+                        `UPDATE otp_codes SET invalidated_at = UTC_TIMESTAMP() WHERE id = ? AND store_id = ? AND purpose = 'subscription_payment' AND used_at IS NOT NULL`,
                         [newOtpId, storeId]
                     );
                 } catch (cleanupError) {
@@ -3206,8 +3458,8 @@ module.exports.handler = async (event) => {
                 try {
                     await connection.execute(
                         `INSERT INTO otp_codes
-                             (purpose, store_id, email, otp_hash, expires_at, used_at)
-                         VALUES ('subscription_payment_email_failure', ?, ?, ?, UTC_TIMESTAMP(), UTC_TIMESTAMP())`,
+                             (purpose, store_id, email, otp_hash, expires_at, used_at, created_at)
+                         VALUES ('subscription_payment_email_failure', ?, ?, ?, UTC_TIMESTAMP(), UTC_TIMESTAMP(), UTC_TIMESTAMP())`,
                         [storeId, ownerEmail, smtpErrorCode]
                     );
                 } catch (trackingError) {
@@ -3278,6 +3530,7 @@ module.exports.handler = async (event) => {
                         : "Verification code sent to your email.",
                     delivery: LOCAL_OTP_CONSOLE_ONLY ? "terminal" : "email",
                     expires_in: PAYMENT_OTP_EXPIRY_SECONDS,
+                    resend_in: OTP_RESEND_SECONDS,
                     email_hint: ownerEmail.replace(/^(.{2}).+(@.+)$/, "$1***$2"),
                 }),
             };
@@ -3305,43 +3558,7 @@ module.exports.handler = async (event) => {
                 return { statusCode: 400, headers, body: JSON.stringify({ error: "Enter a valid 6-digit code." }) };
             }
 
-            // Record unsuccessful checks in the existing OTP table, preventing
-            // unrestricted guessing against this new automatically called action.
-            const [failedChecks] = await connection.execute(
-                `SELECT COUNT(*) AS total FROM otp_codes
-                 WHERE purpose = 'subscription_payment_verify_failure'
-                   AND store_id = ?
-                   AND created_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 10 MINUTE)`,
-                [storeId]
-            );
-            if (Number(failedChecks[0]?.total || 0) >= 8) {
-                return { statusCode: 429, headers, body: JSON.stringify({ error: "Too many incorrect codes. Try again later or request a new code." }) };
-            }
-
-            const [matches] = await connection.execute(
-                `SELECT id FROM otp_codes
-                 WHERE purpose = 'subscription_payment' AND store_id = ?
-                   AND otp_hash = ? AND used_at IS NULL
-                   AND expires_at > UTC_TIMESTAMP()
-                 ORDER BY id DESC LIMIT 1`,
-                [storeId, hashOtp(code)]
-            );
-            if (!matches.length) {
-                let email = String(decoded.email || "").trim().toLowerCase();
-                if (!email) {
-                    const [ownerRows] = await connection.execute(
-                        `SELECT email FROM users WHERE store_id = ? AND role = 'owner' LIMIT 1`,
-                        [storeId]
-                    );
-                    email = String(ownerRows[0]?.email || "").trim().toLowerCase();
-                }
-                await connection.execute(
-                    `INSERT INTO otp_codes (purpose, store_id, email, otp_hash, expires_at, used_at)
-                     VALUES ('subscription_payment_verify_failure', ?, ?, ?, UTC_TIMESTAMP(), UTC_TIMESTAMP())`,
-                    [storeId, email, hashOtp(`failed-check:${storeId}:${Date.now()}`)]
-                );
-                return { statusCode: 400, headers, body: JSON.stringify({ error: "Invalid or expired verification code." }) };
-            }
+            await checkOtp(connection, otpScope("subscription_payment", "", storeId), code, false);
 
             return { statusCode: 200, headers, body: JSON.stringify({ verified: true }) };
         }
@@ -3486,11 +3703,11 @@ module.exports.handler = async (event) => {
                 };
             }
 
-            if (accountPassword.length < 8) {
+            if (!passwordPolicy(accountPassword)) {
                 return {
                     statusCode: 400,
                     headers,
-                    body: JSON.stringify({ error: "Password must contain at least 8 characters." }),
+                    body: JSON.stringify({ error: PASSWORD_POLICY_MESSAGE }),
                 };
             }
 
@@ -3504,9 +3721,10 @@ module.exports.handler = async (event) => {
                 };
             }
 
+            await authLock(connection, `account:${emailAddress}`);
             const [existing] = await connection.execute(
-                `SELECT id FROM users WHERE email = ? LIMIT 1`,
-                [emailAddress]
+                `SELECT id FROM users WHERE email = ? UNION ALL SELECT id FROM platform_admins WHERE email = ? LIMIT 1`,
+                [emailAddress, emailAddress]
             );
 
             if (existing.length > 0) {
@@ -3517,6 +3735,7 @@ module.exports.handler = async (event) => {
                 };
             }
 
+            await guardOtpSend(connection, otpScope("signup", emailAddress));
             const otp = generateOtp();
             const otpHash = hashOtp(otp);
 
@@ -3531,9 +3750,9 @@ module.exports.handler = async (event) => {
 
             await connection.execute(
                 `INSERT INTO otp_codes
-                     (purpose, email, otp_hash, expires_at)
+                     (purpose, email, otp_hash, expires_at, created_at)
                  VALUES
-                     ('signup', ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND))`,
+                     ('signup', ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), UTC_TIMESTAMP())`,
                 [emailAddress, otpHash, OTP_EXPIRY_SECONDS]
             );
 
@@ -3561,6 +3780,7 @@ module.exports.handler = async (event) => {
                         ? "Verification code generated for local testing. Check the IDE terminal."
                         : "OTP sent successfully",
                     expires_in: OTP_EXPIRY_SECONDS,
+                    resend_in: OTP_RESEND_SECONDS,
                 }),
             };
         }
@@ -3584,41 +3804,6 @@ module.exports.handler = async (event) => {
                     statusCode: 400,
                     headers,
                     body: JSON.stringify({ error: "OTP must be exactly 6 digits." }),
-                };
-            }
-
-            const otpHash = hashOtp(otp);
-
-            // Explicitly invalidate every expired OTP for this email.
-            await connection.execute(
-                `UPDATE otp_codes
-                 SET used_at = UTC_TIMESTAMP()
-                 WHERE purpose = 'signup'
-                   AND email = ?
-                   AND used_at IS NULL
-                   AND expires_at <= UTC_TIMESTAMP()`,
-                [otpEmail]
-            );
-
-            // Accept only an unused OTP that has not expired.
-            const [otpRows] = await connection.execute(
-                `SELECT id
-                 FROM otp_codes
-                 WHERE purpose = 'signup'
-                   AND email = ?
-                   AND otp_hash = ?
-                   AND used_at IS NULL
-                   AND expires_at > UTC_TIMESTAMP()
-                 ORDER BY id DESC
-                     LIMIT 1`,
-                [otpEmail, otpHash]
-            );
-
-            if (otpRows.length === 0) {
-                return {
-                    statusCode: 400,
-                    headers,
-                    body: JSON.stringify({ error: "Invalid or expired OTP." }),
                 };
             }
 
@@ -3664,11 +3849,11 @@ module.exports.handler = async (event) => {
                 };
             }
 
-            if (accountPassword.length < 8) {
+            if (!passwordPolicy(accountPassword)) {
                 return {
                     statusCode: 400,
                     headers,
-                    body: JSON.stringify({ error: "Password must contain at least 8 characters." }),
+                    body: JSON.stringify({ error: PASSWORD_POLICY_MESSAGE }),
                 };
             }
 
@@ -3681,9 +3866,10 @@ module.exports.handler = async (event) => {
                 };
             }
 
+            await authLock(connection, `account:${emailAddress}`);
             const [existing] = await connection.execute(
-                `SELECT id FROM users WHERE email = ? LIMIT 1`,
-                [emailAddress]
+                `SELECT id FROM users WHERE email = ? UNION ALL SELECT id FROM platform_admins WHERE email = ? LIMIT 1`,
+                [emailAddress, emailAddress]
             );
 
             if (existing.length > 0) {
@@ -3694,14 +3880,7 @@ module.exports.handler = async (event) => {
                 };
             }
 
-            await connection.execute(
-                `UPDATE otp_codes
-                 SET used_at = UTC_TIMESTAMP(), verified_at = COALESCE(verified_at, UTC_TIMESTAMP())
-                 WHERE purpose = 'signup'
-                   AND email = ?
-                   AND used_at IS NULL`,
-                [emailAddress]
-            );
+            const otpRecord = await checkOtp(connection, otpScope("signup", otpEmail), otp, false);
 
             const hashed = await bcrypt.hash(accountPassword, 10);
 
@@ -3710,6 +3889,7 @@ module.exports.handler = async (event) => {
             let ownerUserId;
             await connection.beginTransaction();
             try {
+                await connection.execute("UPDATE otp_codes SET used_at = UTC_TIMESTAMP(), verified_at = UTC_TIMESTAMP() WHERE id = ?", [otpRecord.id]);
                 const storeCode = await identifiers.allocateStoreCode(connection, storeName, slug);
                 [result] = await connection.execute(
                     `INSERT INTO stores
@@ -4238,14 +4418,17 @@ module.exports.handler = async (event) => {
                 const otp = generateOtp();
                 const otpHash = hashOtp(otp);
                 const inviteTokenHash = hashInviteToken(inviteToken);
+                await guardOtpSend(connection, otpScope("manager_invite", manager.manager_email, null, inviteTokenHash));
+                const refreshed = await getManagerInviteRecord(connection, inviteToken);
+                if (refreshed.manager.status !== "pending") throw securityError(400, "This invitation is no longer pending.", "INVITE_INACTIVE");
 
                 await connection.execute(
                     `UPDATE otp_codes
-                     SET used_at = UTC_TIMESTAMP()
+                     SET used_at = COALESCE(used_at, UTC_TIMESTAMP()), invalidated_at = UTC_TIMESTAMP()
                      WHERE purpose = 'manager_invite'
                        AND invite_token_hash = ?
                        AND email = ?
-                       AND used_at IS NULL`,
+                       AND invalidated_at IS NULL`,
                     [inviteTokenHash, manager.manager_email]
                 );
 
@@ -4256,9 +4439,9 @@ module.exports.handler = async (event) => {
                          invite_token_hash,
                          email,
                          otp_hash,
-                         expires_at
+                         expires_at, created_at
                      )
-                     VALUES ('manager_invite', ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND))`,
+                     VALUES ('manager_invite', ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), UTC_TIMESTAMP())`,
                     [
                         inviteTokenHash,
                         manager.manager_email,
@@ -4319,6 +4502,7 @@ module.exports.handler = async (event) => {
                                 ? "Verification code generated for local testing. Check the IDE terminal."
                                 : "Verification code sent successfully.",
                         expires_in: MANAGER_INVITE_OTP_EXPIRY_SECONDS,
+                        resend_in: OTP_RESEND_SECONDS,
                     }),
                 };
             } catch (inviteError) {
@@ -4327,8 +4511,9 @@ module.exports.handler = async (event) => {
                     headers,
                     body: JSON.stringify({
                         error:
-                            inviteError?.message ||
-                            "Unable to send the verification code.",
+                            inviteError?.statusCode && inviteError.statusCode < 500 ? inviteError.message : "Unable to send the verification code.",
+                        code: inviteError?.code,
+                        retry_after_seconds: inviteError?.retry_after_seconds,
                     }),
                 };
             }
@@ -4356,54 +4541,7 @@ module.exports.handler = async (event) => {
                 }
 
                 const inviteTokenHash = hashInviteToken(inviteToken);
-                const otpHash = hashOtp(otp);
-
-                await connection.execute(
-                    `UPDATE otp_codes
-                     SET used_at = UTC_TIMESTAMP()
-                     WHERE purpose = 'manager_invite'
-                       AND invite_token_hash = ?
-                       AND email = ?
-                       AND used_at IS NULL
-                       AND expires_at <= UTC_TIMESTAMP()`,
-                    [inviteTokenHash, manager.manager_email]
-                );
-
-                const [otpRows] = await connection.execute(
-                    `SELECT id
-                     FROM otp_codes
-                     WHERE purpose = 'manager_invite'
-                       AND invite_token_hash = ?
-                       AND email = ?
-                       AND otp_hash = ?
-                       AND used_at IS NULL
-                       AND expires_at > UTC_TIMESTAMP()
-                     ORDER BY id DESC
-                         LIMIT 1`,
-                    [
-                        inviteTokenHash,
-                        manager.manager_email,
-                        otpHash,
-                    ]
-                );
-
-                if (otpRows.length === 0) {
-                    return {
-                        statusCode: 400,
-                        headers,
-                        body: JSON.stringify({
-                            error: "Invalid or expired verification code.",
-                        }),
-                    };
-                }
-
-                await connection.execute(
-                    `UPDATE otp_codes
-                     SET used_at = UTC_TIMESTAMP(),
-                         verified_at = UTC_TIMESTAMP()
-                     WHERE id = ?`,
-                    [otpRows[0].id]
-                );
+                await checkOtp(connection, otpScope("manager_invite", manager.manager_email, null, inviteTokenHash), otp);
 
                 return {
                     statusCode: 200,
@@ -4418,8 +4556,9 @@ module.exports.handler = async (event) => {
                     headers,
                     body: JSON.stringify({
                         error:
-                            inviteError?.message ||
-                            "Unable to verify the invitation code.",
+                            inviteError?.statusCode && inviteError.statusCode < 500 ? inviteError.message : "Unable to verify the invitation code.",
+                        code: inviteError?.code,
+                        retry_after_seconds: inviteError?.retry_after_seconds,
                     }),
                 };
             }
@@ -4521,11 +4660,7 @@ module.exports.handler = async (event) => {
                     manager.manager_email
                 );
 
-                const passwordValid =
-                    accountPassword.length >= 8 &&
-                    /[A-Z]/.test(accountPassword) &&
-                    /\d/.test(accountPassword) &&
-                    /[^A-Za-z0-9]/.test(accountPassword);
+                const passwordValid = passwordPolicy(accountPassword);
 
                 if (!passwordValid) {
                     return {
@@ -4533,7 +4668,7 @@ module.exports.handler = async (event) => {
                         headers,
                         body: JSON.stringify({
                             error:
-                                "Password must contain at least 8 characters, one uppercase letter, one number, and one special character.",
+                            PASSWORD_POLICY_MESSAGE,
                         }),
                     };
                 }
@@ -4899,85 +5034,16 @@ module.exports.handler = async (event) => {
 
         // PLATFORM ADMIN LOGIN
         // Platform administrators are stored in platform_admins,
-        // which uses the `password` column for the bcrypt hash.
+        // which uses the `password_hash` column for the bcrypt hash.
+        // Account-based throttling is performed above for both login entry points.
         if (action === "platform_admin_login") {
-            if (!email || !password) {
-                return {
-                    statusCode: 400,
-                    headers,
-                    body: JSON.stringify({
-                        error: "Missing email or password",
-                    }),
-                };
-            }
-
-            const adminEmail = String(email).trim().toLowerCase();
-
-            const [adminRows] = await connection.execute(
-                `SELECT
-                     id AS platform_admin_id,
-                     full_name,
-                     email,
-                     password_hash AS password,
-                     status,
-                     role,
-                     CASE WHEN LOWER(status) = 'active' THEN 1 ELSE 0 END AS is_active
-                 FROM platform_admins
-                 WHERE LOWER(email) = ?
-                     LIMIT 1`,
-                [adminEmail]
-            );
-
-            if (adminRows.length === 0) {
-                return {
-                    statusCode: 401,
-                    headers,
-                    body: JSON.stringify({
-                        error: "Invalid email or password",
-                    }),
-                };
-            }
-
-            const admin = adminRows[0];
-            const adminStatus = String(admin.status || "")
-                .trim()
-                .toLowerCase();
-
-            if (adminStatus !== "active" || Number(admin.is_active) !== 1) {
-                return {
-                    statusCode: 403,
-                    headers,
-                    body: JSON.stringify({
-                        error: "Platform administrator account is inactive.",
-                        code: "ACCOUNT_INACTIVE",
-                    }),
-                };
-            }
-
-            if (!admin.password) {
-                return {
-                    statusCode: 401,
-                    headers,
-                    body: JSON.stringify({
-                        error: "Invalid email or password",
-                    }),
-                };
-            }
-
-            const passwordMatches = await bcrypt.compare(
-                String(password),
-                admin.password
-            );
-
-            if (!passwordMatches) {
-                return {
-                    statusCode: 401,
-                    headers,
-                    body: JSON.stringify({
-                        error: "Invalid email or password",
-                    }),
-                };
-            }
+            // Only an account authenticated by the shared limiter may receive an admin token.
+            const admin = {
+                platform_admin_id: authenticatedAccount.id,
+                full_name: authenticatedAccount.full_name,
+                email: authenticatedAccount.email,
+                role: authenticatedAccount.role,
+            };
 
             const token = jwt.sign(
                 {
@@ -5031,17 +5097,10 @@ module.exports.handler = async (event) => {
 
             if (storeRows.length > 0) {
                 const store = storeRows[0];
-                const match = await bcrypt.compare(password, store.password);
-
-                if (!match) {
-                    return {
-                        statusCode: 401,
-                        headers,
-                        body: JSON.stringify({ error: "Invalid email or password" }),
-                    };
+                // The password and lockout were checked once above; bind this response to that same account.
+                if (String(store.user_id) !== String(authenticatedAccount.id) || authenticatedAccount.role !== "owner") {
+                    throw securityError(401, AUTH_INVALID, "AUTH_FAILED");
                 }
-
-
 
                 const token = jwt.sign(
                     {
@@ -5093,6 +5152,11 @@ module.exports.handler = async (event) => {
 
             if (managerRows.length > 0) {
                 const manager = managerRows[0];
+                // The password and lockout were checked once above; bind this response to that same account.
+                if (String(manager.id) !== String(authenticatedAccount.id) || authenticatedAccount.role !== "manager") {
+                    throw securityError(401, AUTH_INVALID, "AUTH_FAILED");
+                }
+
                 const managerStatus = String(
                     manager.status || ""
                 ).trim().toLowerCase();
@@ -5133,21 +5197,6 @@ module.exports.handler = async (event) => {
                             code: "ACCOUNT_UNAVAILABLE",
                             message:
                                 "Your branch manager account is not currently active. Please contact the store owner.",
-                        }),
-                    };
-                }
-
-                const managerMatch = await bcrypt.compare(
-                    password,
-                    manager.password
-                );
-
-                if (!managerMatch) {
-                    return {
-                        statusCode: 401,
-                        headers,
-                        body: JSON.stringify({
-                            error: "Invalid email or password",
                         }),
                     };
                 }
@@ -5209,6 +5258,11 @@ module.exports.handler = async (event) => {
 
             if (staffRows.length > 0) {
                 const staff = staffRows[0];
+                // The password and lockout were checked once above; bind this response to that same account.
+                if (String(staff.id) !== String(authenticatedAccount.id) || authenticatedAccount.role !== "staff") {
+                    throw securityError(401, AUTH_INVALID, "AUTH_FAILED");
+                }
+
 
                 if (!staff.password) {
                     return {
@@ -5217,16 +5271,6 @@ module.exports.handler = async (event) => {
                         body: JSON.stringify({
                             error: "Staff invitation has not been accepted yet",
                         }),
-                    };
-                }
-
-                const staffMatch = await bcrypt.compare(password, staff.password);
-
-                if (!staffMatch) {
-                    return {
-                        statusCode: 401,
-                        headers,
-                        body: JSON.stringify({ error: "Invalid email or password" }),
                     };
                 }
 
@@ -5317,14 +5361,17 @@ module.exports.handler = async (event) => {
                 const otp = generateOtp();
                 const otpHash = hashOtp(otp);
                 const inviteTokenHash = hashInviteToken(inviteToken);
+                await guardOtpSend(connection, otpScope("staff_invite", staff.staff_email, null, inviteTokenHash));
+                const refreshed = await getStaffInviteRecord(connection, inviteToken);
+                if (refreshed.staff.status !== "pending") throw securityError(400, "This invitation is no longer pending.", "INVITE_INACTIVE");
 
                 await connection.execute(
                     `UPDATE otp_codes
-                     SET used_at = UTC_TIMESTAMP()
+                     SET used_at = COALESCE(used_at, UTC_TIMESTAMP()), invalidated_at = UTC_TIMESTAMP()
                      WHERE purpose = 'staff_invite'
                        AND invite_token_hash = ?
                        AND email = ?
-                       AND used_at IS NULL`,
+                       AND invalidated_at IS NULL`,
                     [inviteTokenHash, staff.staff_email]
                 );
 
@@ -5335,9 +5382,9 @@ module.exports.handler = async (event) => {
                          invite_token_hash,
                          email,
                          otp_hash,
-                         expires_at
+                         expires_at, created_at
                      )
-                     VALUES ('staff_invite', ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND))`,
+                     VALUES ('staff_invite', ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), UTC_TIMESTAMP())`,
                     [
                         inviteTokenHash,
                         staff.staff_email,
@@ -5398,6 +5445,7 @@ module.exports.handler = async (event) => {
                                 ? "Verification code generated for local testing. Check the IDE terminal."
                                 : "Verification code sent successfully.",
                         expires_in: STAFF_INVITE_OTP_EXPIRY_SECONDS,
+                        resend_in: OTP_RESEND_SECONDS,
                     }),
                 };
             } catch (inviteError) {
@@ -5406,8 +5454,9 @@ module.exports.handler = async (event) => {
                     headers,
                     body: JSON.stringify({
                         error:
-                            inviteError?.message ||
-                            "Unable to send the verification code.",
+                            inviteError?.statusCode && inviteError.statusCode < 500 ? inviteError.message : "Unable to send the verification code.",
+                        code: inviteError?.code,
+                        retry_after_seconds: inviteError?.retry_after_seconds,
                     }),
                 };
             }
@@ -5435,54 +5484,7 @@ module.exports.handler = async (event) => {
                 }
 
                 const inviteTokenHash = hashInviteToken(inviteToken);
-                const otpHash = hashOtp(otp);
-
-                await connection.execute(
-                    `UPDATE otp_codes
-                     SET used_at = UTC_TIMESTAMP()
-                     WHERE purpose = 'staff_invite'
-                       AND invite_token_hash = ?
-                       AND email = ?
-                       AND used_at IS NULL
-                       AND expires_at <= UTC_TIMESTAMP()`,
-                    [inviteTokenHash, staff.staff_email]
-                );
-
-                const [otpRows] = await connection.execute(
-                    `SELECT id
-                     FROM otp_codes
-                     WHERE purpose = 'staff_invite'
-                       AND invite_token_hash = ?
-                       AND email = ?
-                       AND otp_hash = ?
-                       AND used_at IS NULL
-                       AND expires_at > UTC_TIMESTAMP()
-                     ORDER BY id DESC
-                         LIMIT 1`,
-                    [
-                        inviteTokenHash,
-                        staff.staff_email,
-                        otpHash,
-                    ]
-                );
-
-                if (otpRows.length === 0) {
-                    return {
-                        statusCode: 400,
-                        headers,
-                        body: JSON.stringify({
-                            error: "Invalid or expired verification code.",
-                        }),
-                    };
-                }
-
-                await connection.execute(
-                    `UPDATE otp_codes
-                     SET used_at = UTC_TIMESTAMP(),
-                         verified_at = UTC_TIMESTAMP()
-                     WHERE id = ?`,
-                    [otpRows[0].id]
-                );
+                await checkOtp(connection, otpScope("staff_invite", staff.staff_email, null, inviteTokenHash), otp);
 
                 return {
                     statusCode: 200,
@@ -5497,8 +5499,9 @@ module.exports.handler = async (event) => {
                     headers,
                     body: JSON.stringify({
                         error:
-                            inviteError?.message ||
-                            "Unable to verify the invitation code.",
+                            inviteError?.statusCode && inviteError.statusCode < 500 ? inviteError.message : "Unable to verify the invitation code.",
+                        code: inviteError?.code,
+                        retry_after_seconds: inviteError?.retry_after_seconds,
                     }),
                 };
             }
@@ -5600,11 +5603,7 @@ module.exports.handler = async (event) => {
                     staff.staff_email
                 );
 
-                const passwordValid =
-                    accountPassword.length >= 8 &&
-                    /[A-Z]/.test(accountPassword) &&
-                    /\d/.test(accountPassword) &&
-                    /[^A-Za-z0-9]/.test(accountPassword);
+                const passwordValid = passwordPolicy(accountPassword);
 
                 if (!passwordValid) {
                     return {
@@ -5612,7 +5611,7 @@ module.exports.handler = async (event) => {
                         headers,
                         body: JSON.stringify({
                             error:
-                                "Password must contain at least 8 characters, one uppercase letter, one number, and one special character.",
+                            PASSWORD_POLICY_MESSAGE,
                         }),
                     };
                 }
@@ -7730,24 +7729,33 @@ module.exports.handler = async (event) => {
             body: JSON.stringify({ error: "Invalid action" }),
         };
     } catch (err) {
-        console.error("[stocknbook-auth] Error:", {
-            action,
-            message: err?.message,
-            code: err?.code,
-            stack: err?.stack,
-        });
-
+        const securityAction = /^(login|platform_admin_login|request_password_reset|verify_password_reset_otp|reset_password|send_signup_otp|verify_signup_otp|send_manager_invite_otp|verify_manager_invite_otp|send_staff_invite_otp|verify_staff_invite_otp|send_payment_otp|verify_payment_otp|submit_subscription_payment)$/.test(String(action));
+        if (!securityAction) {
+            console.error("[stocknbook-auth] Error:", { action, message: err?.message, code: err?.code, stack: err?.stack });
+            return { statusCode: Number(err?.statusCode) || 500, headers, body: JSON.stringify({ error: err?.message || "Internal server error", code: err?.code || "UNKNOWN_ERROR" }) };
+        }
+        if (!err?.statusCode || Number(err.statusCode) >= 500)
+            console.error(JSON.stringify({ category: "authentication_backend_error", action, code: err?.code || "INTERNAL_ERROR" }));
         return {
             statusCode: Number(err?.statusCode) || 500,
             headers,
             body: JSON.stringify({
-                error: err?.message || "Internal server error",
-                code: err?.code || "UNKNOWN_ERROR",
+                error: (err?.code === "PAYMENT_OTP_EMAIL_FAILED" || (err?.statusCode && Number(err.statusCode) < 500)) ? err.message : "Unable to process your request. Please try again.",
+                code: (err?.code === "PAYMENT_OTP_EMAIL_FAILED" || (err?.statusCode && Number(err.statusCode) < 500)) ? err.code : "SERVER_ERROR",
+                ...(err?.retry_after_seconds ? { retry_after_seconds: err.retry_after_seconds } : {}),
+                ...(err?.code === "ACCOUNT_LOCKED" ? {
+                    lockout_count: err.lockout_count,
+                    password_recovery_available: err.password_recovery_available,
+                } : {}),
             }),
         };
     } finally {
         if (connection) {
-            connection.release();
+            if (await releaseAuthLocks(connection)) connection.release();
+            else connection.destroy();
         }
     }
 };
+// The existing standalone Platform Administrator login helper shares these same counters.
+module.exports.authenticateAccount = authenticateAccount;
+module.exports.releaseAuthLocks = releaseAuthLocks;

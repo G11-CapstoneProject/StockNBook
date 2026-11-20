@@ -1,6 +1,6 @@
 "use client";
 
-import { getNextStatusConfig, getCustomerCustomRequest, formatBookingListTime } from './_shared';
+import { getNextStatusConfig, getCustomerCustomRequest, getBookingSchedule } from './_shared';
 import { useEffect, useMemo, useState } from "react";
 import {
     BadgeCheck,
@@ -29,6 +29,7 @@ import {
     getBranchGroupName,
     getManagerBookingTypeLabel,
     getManagerBookingCompositionLabel,
+    getBookingTypeDisplay,
     getManagerBookingStatusLabel,
     getManagerPaymentLabel,
     getRequiredDownPayment,
@@ -170,8 +171,9 @@ function zipStored(files: Array<[string, string]>): Blob {
 export function downloadManagerBookingsExcel(bookings: Booking[], context: ManagerBookingExportContext) {
     const header = [
         "Store", "Store ID", "Branch", "Branch ID", "Booking Reference", "Customer Name",
-        "Phone", "Email", "Booking Type", "Event Date", "Event Time", "Event Type",
-        "Theme", "Venue", "Booking Status", "Payment Status", "Agreed Price (PHP)",
+        "Phone", "Email", "Booking Type", "Event Date", "Pickup / Delivery", "Pickup / Delivery Date", "Pickup / Delivery Time",
+        "Return Date", "Return Time", "Event Type",
+        "Theme", "Venue / Delivery Address", "Booking Status", "Payment Status", "Agreed Price (PHP)",
         "Required Down Payment (PHP)", "Amount Paid (PHP)", "Remaining Balance (PHP)",
         "Custom Request", "Notes",
     ];
@@ -179,7 +181,9 @@ export function downloadManagerBookingsExcel(bookings: Booking[], context: Manag
         context.storeName, context.storeId, getBranchGroupName(b) === "Unassigned Branch" ? context.branchName : getBranchGroupName(b),
         String(b.branchId ?? b.branch_id ?? context.branchId), b.bookingReference || `#${b.id}`,
         b.name || "", b.phone || "", b.email || "", getManagerBookingCompositionLabel(b), dateKey(b.date),
-        b.eventTime || b.event_time || "", b.eventType || b.event_type || "", b.theme || "",
+        getBookingSchedule(b).label, getBookingSchedule(b).handoverDate, getBookingSchedule(b).handoverTime,
+        getBookingSchedule(b).returnDate, getBookingSchedule(b).returnTime,
+        b.eventType || b.event_type || "", b.theme || "",
         b.venue || "", getManagerBookingStatusLabel(b.status), getManagerPaymentLabel(b),
         getTotalPrice(b), getRequiredDownPayment(b), getAmountPaid(b), getBalance(b),
         b.customOrder || b.custom_order || "", b.notes || "",
@@ -268,9 +272,11 @@ function renderPdfPages(rows: Booking[], context: ManagerBookingExportContext) {
             ["Email", b.email || "-"], ["Facebook / Messenger", b.facebookName || b.facebook_name || "-"],
             ["Booking type", getManagerBookingCompositionLabel(b)],
             ["Booking branch", getBranchGroupName(b) === "Unassigned Branch" ? context.branchName : getBranchGroupName(b)],
-            ["Event date", formatDate(b.date)], ["Event time", b.eventTime || b.event_time || "-"],
+            ["Event date", formatDate(b.date)],
+            [getBookingSchedule(b).label, getBookingSchedule(b).handoverText || "-"],
+            ...(getBookingSchedule(b).returnText ? [["Return", getBookingSchedule(b).returnText] as [string, unknown]] : []),
             ["Event type", b.eventType || b.event_type || "-"],
-            ["Theme", b.theme || "-"], ["Venue", b.venue || "-"],
+            ["Theme", b.theme || "-"], [b.handoverMethod === "delivery" ? "Delivery address" : "Venue", b.venue || "-"],
             ["Booking status", getManagerBookingStatusLabel(b.status)],
             ["Payment status", getManagerPaymentLabel(b)],
             ["Agreed price", money(getTotalPrice(b))],
@@ -360,6 +366,9 @@ type BookingInventoryItem = {
     used_quantity?: number | string;
     restored_quantity?: number | string;
     unit_price?: number | string;
+    // Price used for cancellation refunds: discounted if the package / quote has a discount (from the Bookings Lambda).
+    refund_unit_price?: number | string;
+    refund_price_ratio?: number | string;
     inventory_status?: string;
 };
 
@@ -377,7 +386,13 @@ type BookingClosureImpact = {
     rentalCancellationBlocked?:boolean;
     requiresFinancialReview:boolean; requiresInventoryReview:boolean;
     refundDecision:string;
+    // Cancellation refund (from get_booking_closure_impact)
+    bookingRefunded?:number; refundableBookingPayment?:number; suggestedRefund?:number; depositRefundOnCancel?:number;
+    usedItemsValue?:number;
 };
+
+// What the Manager hands back when cancelling. Saved together with the cancellation.
+type CancelRefund = { amount: number; method: string; verified: boolean };
 
 // UI-only feedback for booking actions. This does not change API requests
 // or any inventory, approval, or payment business rules.
@@ -488,10 +503,11 @@ function selectedBookingExportLines(
         add("Package", booking.packageName || booking.package_name || booking.package);
         add("Event start date", formatDate(booking.date));
         add("Event end date", booking.eventEndDate ? formatDate(booking.eventEndDate) : "Not specified");
-        add("Event time", formatBookingListTime(booking.eventTime || booking.event_time));
+        add(getBookingSchedule(booking).label, getBookingSchedule(booking).handoverText);
+        if (getBookingSchedule(booking).returnText) add("Return", getBookingSchedule(booking).returnText);
         add("Event type", booking.eventType || booking.event_type);
         add("Theme / motif", booking.theme);
-        add("Venue", booking.venue);
+        add(booking.handoverMethod === "delivery" ? "Delivery address" : "Venue", booking.venue);
         add("Payment status", getManagerPaymentLabel(booking));
         section("Booking payment summary");
         add("Agreed booking price", currency(statement?.booking?.agreedPrice ?? getTotalPrice(booking)));
@@ -781,7 +797,7 @@ export default function ManagerBookings() {
         const shortage = /insufficient.*(sales\s+)?inventory|not enough (sales\s+)?stock/i.test(message);
         showBookingToast("error", shortage ? "Insufficient consumable items" : "Booking action unsuccessful",
             shortage
-                ? "Not enough consumable items are available for this booking. Check the available stock and the booking inclusions before trying again."
+                ? "Not enough stock for this booking's consumables. Check stock, then try again."
                 : message);
     }
 
@@ -937,7 +953,7 @@ export default function ManagerBookings() {
             if (!res.ok || data.success === false || !Array.isArray(data.bookings)) {
                 const message = typeof data.error === 'string' && data.error.trim()
                     ? data.error
-                    : `Bookings API returned HTTP ${res.status}${res.statusText ? ` (${res.statusText})` : ''}.`;
+                    : `Couldn't load bookings (error ${res.status}). Try again.`;
                 console.error('Bookings load failed:', {status: res.status, message, details: data});
                 setBookingActionError(message);
                 setBookings([]);
@@ -983,7 +999,8 @@ export default function ManagerBookings() {
         price?: number,
         usedItems?: CancelUsedItem[],
         noDpReason?: string,
-        cancelReason?: string
+        cancelReason?: string,
+        refund?: CancelRefund
     ): Promise<boolean> {
 
         const token = getToken();
@@ -997,7 +1014,7 @@ export default function ManagerBookings() {
         if (oldStatus === "Pending Review" &&
             ["Awaiting Down Payment", "Confirmed"].includes(cleanStatus) &&
             requiresTermsReview(booking) && !reviewedBookingIds.includes(id)) {
-            setBookingActionError("Review and save payment terms before approving this booking.");
+            setBookingActionError("Set the price and payment terms first.");
             return false;
         }
         if (!["Cancelled","Rejected"].includes(cleanStatus) &&
@@ -1005,13 +1022,13 @@ export default function ManagerBookings() {
             !(oldStatus === "Pending Review" && cleanStatus === "Confirmed" &&
                 getRequiredDownPayment(booking)===0 && (noDpReason||"").trim().length>=10) &&
             !(oldStatus === "Awaiting Down Payment" && cleanStatus === "Confirmed")) {
-            setBookingActionError("Only Staff may advance preparation, release and completion. Managers approve and confirm bookings.");
+            setBookingActionError("Staff handles preparation and hand over.");
             return false;
         }
         if (cleanStatus === "Confirmed" && !(oldStatus === "Pending Review" && getRequiredDownPayment(booking)===0 && (noDpReason||"").trim().length>=10)) {
             const needed = getRequiredDownPayment(booking) > 0 ? getRequiredDownPayment(booking) : getTotalPrice(booking);
             if (getTotalPrice(booking) <= 0 || getAmountPaid(booking) + 0.005 < needed) {
-                setBookingActionError("Verify the required down payment (or full price when no down payment is required) before confirming.");
+                setBookingActionError("Record the down payment before confirming.");
                 return false;
             }
         }
@@ -1023,7 +1040,7 @@ export default function ManagerBookings() {
                 setBookingActionError("Only pending, unapproved requests can be rejected.");return false;
             }
             if (cleanStatus==="Cancelled" && !["Awaiting Down Payment","Confirmed","Preparing"].includes(currentStatus)) {
-                setBookingActionError("Cancellation is available only after approval and before release.");return false;
+                setBookingActionError("A booking can be cancelled only after approval and before hand over.");return false;
             }
         } else {
             const { nextStatus } = getNextStatusConfig(
@@ -1056,6 +1073,9 @@ export default function ManagerBookings() {
             if (cleanStatus === "Cancelled") {
                 body.cancel_reason = (cancelReason || "").trim();
                 body.impact_acknowledged = true;
+                body.booking_refund_amount = refund?.amount ?? 0;
+                body.refund_method = refund?.method || "cash";
+                body.refund_verified = refund?.verified === true;
             }
             if (cleanStatus === "Rejected") body.rejection_reason = (cancelReason || "").trim();
 
@@ -1079,8 +1099,12 @@ export default function ManagerBookings() {
                 status: cleanStatus,
                 approvalStatus: ["Awaiting Down Payment","Confirmed"].includes(cleanStatus) && booking.approvalStatus === "pending" ? "approved" : booking.approvalStatus,
             });
+            const refundNote = cleanStatus === "Cancelled" && (Number(data.booking_refunded) > 0 || Number(data.deposit_refunded) > 0)
+                ? ` Refunded ${peso(Number(data.booking_refunded) || 0)} of the booking payment` +
+                `${Number(data.deposit_refunded) > 0 ? ` and the ${peso(Number(data.deposit_refunded))} security deposit` : ""}.`
+                : "";
             showBookingToast("success", isManagerApproval ? "Booking approved successfully" : "Booking status updated successfully",
-                `${booking.bookingReference || `Booking #${id}`} is now ${getManagerBookingStatusLabel(cleanStatus)}.`);
+                `${booking.bookingReference || `Booking #${id}`} is now ${getManagerBookingStatusLabel(cleanStatus)}.${refundNote}`);
             return true;
         } catch (err) {
             // Expected API/business-rule failures are already shown in the page alert.
@@ -1117,7 +1141,7 @@ export default function ManagerBookings() {
         } finally {setCancelLoading(false);}
     }
 
-    async function confirmCancelBooking(reason: string) {
+    async function confirmCancelBooking(reason: string, refund?: CancelRefund) {
         if (!cancelModal) return;
 
         setCancelSubmitting(true);
@@ -1141,7 +1165,7 @@ export default function ManagerBookings() {
             if(!closureImpact)throw new Error('Closure impact has not been reviewed.');
             const rejecting=normalizeStatus(cancelModal.status)==='Pending Review';
             const updated = await updateStatus(cancelModal.id, rejecting?'Rejected':'Cancelled',
-                undefined, rejecting?undefined:usedItems, undefined, reason);
+                undefined, rejecting?undefined:usedItems, undefined, reason, rejecting?undefined:refund);
             if (!updated) throw new Error("Booking cancellation was not completed.");
 
             setCancelModal(null);
@@ -1151,7 +1175,7 @@ export default function ManagerBookings() {
             await loadBookings();
         } catch (err) {
             console.error("Failed to cancel booking:", err);
-            setCancelError(err instanceof Error ? err.message : "Failed to cancel booking. Check the quantities and retry.");
+            setCancelError(err instanceof Error ? err.message : "Couldn't cancel the booking. Check the quantities and try again.");
         } finally {
             setCancelSubmitting(false);
         }
@@ -1168,7 +1192,7 @@ export default function ManagerBookings() {
     ) {
         const latest = bookings.find(b => b.id === booking.id) ?? booking;
         if (normalizeStatus(latest.status) !== "Pending Review" || latest.approvalStatus === "approved") {
-            throw new Error("Booking price and payment terms are locked after approval.");
+            throw new Error("Price and payment terms can't be changed after approval.");
         }
         const token = getToken();
         const branchId = getBranchId();
@@ -1221,7 +1245,7 @@ export default function ManagerBookings() {
             const savedDeposit = verification.statement?.depositRequired;
             if (!verificationResponse.ok || verification.error || savedDeposit == null ||
                 !Number.isFinite(Number(savedDeposit)) || Math.abs(Number(savedDeposit) - refundableDeposit) > 0.005) {
-                throw new Error("Security deposit was not verified as saved. The booking API must persist refundable_deposit per booking in update_price, then return it as depositRequired in the financial statement. The price or DP may have saved; refresh and verify before approving.");
+                throw new Error("The security deposit didn't save. Refresh the page and check the terms before approving.");
             }
 
             const currentPaid = getAmountPaid(booking);
@@ -1288,7 +1312,7 @@ export default function ManagerBookings() {
             bookingCents > remainingCents ||
             Math.abs(bookingReceivedNow * 100 - bookingCents) > 0.001 ||
             Math.abs(depositReceivedNow * 100 - depositCents) > 0.001) {
-            setPaymentError("Enter valid booking and deposit amounts, using at most two decimal places.");
+            setPaymentError("Enter valid amounts (up to 2 decimal places).");
             return;
         }
         const token = getToken();
@@ -1332,13 +1356,13 @@ export default function ManagerBookings() {
             catch (refreshError) { console.error("Payment saved, but booking list refresh failed:", refreshError); }
             if (result.confirmed) {
                 showBookingToast("success", "Payment verified — booking confirmed and reserved",
-                    `${peso(bookingReceivedNow)} booking payment and ${peso(depositReceivedNow)} refundable deposit recorded. Required inventory was successfully reserved.`);
+                    `${peso(bookingReceivedNow)} booking payment and ${peso(depositReceivedNow)} security deposit recorded. The items are now reserved.`);
             } else if (result.reservationIssue) {
                 showBookingToast("error", "Payment saved — reservation needs attention",
-                    `The payment was recorded, but the booking remains Awaiting Down Payment because inventory could not be reserved: ${result.reservationIssue}`);
+                    `Payment recorded, but the items couldn't be reserved: ${result.reservationIssue}`);
             } else {
                 showBookingToast("success", "Customer payment recorded successfully",
-                    `${peso(bookingReceivedNow)} booking payment and ${peso(depositReceivedNow)} refundable deposit received. Booking is awaiting its required DP or Manager approval.`);
+                    `${peso(bookingReceivedNow)} booking payment and ${peso(depositReceivedNow)} security deposit recorded. The booking is still waiting for the full down payment.`);
             }
         } catch (error) {
             setPaymentError(error instanceof Error ? error.message : "Unable to record payment.");
@@ -1351,7 +1375,7 @@ export default function ManagerBookings() {
         return bookings
             .filter((booking) => !approvalOnly || (booking.approvalStatus === "pending" && booking.status === "Pending Review"))
             .filter((booking) => filter === "All" || booking.status === filter)
-            .filter((booking) => bookingType === "All" || getManagerBookingTypeLabel(booking) === bookingType)
+            .filter((booking) => bookingType === "All" || getBookingTypeDisplay(booking) === bookingType)
             .filter((booking) => !dateFrom || dateKey(booking.date) >= dateFrom)
             .filter((booking) => !dateTo || dateKey(booking.date) <= dateTo)
             .filter((booking) => {
@@ -1387,7 +1411,7 @@ export default function ManagerBookings() {
         return acc;
     }, {} as Record<string, number>);
 
-    const bookingTypes = ["Package", "Custom", "Rental"] as const;
+    const bookingTypes = ["Package", "Custom"] as const;
 
     // Direct PDF / Excel (.xlsx) download. Never opens a print window.
     function exportBookings(rows: Booking[], fileType: "pdf" | "excel", selected = false) {
@@ -1464,7 +1488,14 @@ export default function ManagerBookings() {
 
             <section className="px-4 py-4 sm:px-6">
                 {/* Booking overview: operational counts from the current branch, not demo numbers. */}
-                <div className="mb-4 grid grid-cols-2 gap-3 xl:grid-cols-4">
+                <div
+                    className="mb-4"
+                    style={{
+                        display: "grid",
+                        gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))",
+                        gap: 12,
+                    }}
+                >
                     {([
                         { key: "all", title: "Total Bookings", count: bookings.length, sub: "All recorded bookings", icon: <CalendarDays size={23}/>, tone: "bg-[#F3EBFF] text-[#6C3AD6]" },
                         { key: "confirmed", title: "Confirmed Bookings", count: counts["Confirmed"], sub: "Reserved and ready", icon: <BadgeCheck size={23}/>, tone: "bg-[#EAF7F0] text-[#25865B]" },
@@ -1477,8 +1508,8 @@ export default function ManagerBookings() {
                         <button key={metric.key} type="button"
                                 onClick={() => {setFilter(metric.key === "confirmed" ? "Confirmed" : "All");setApprovalOnly(false);}}
                                 title={metric.key === "actions" || metric.key === "month" ? "Show all bookings; use Filters to narrow results" : `Filter: ${metric.title}`}
-                                className="flex min-h-[108px] w-full items-center gap-3 rounded-[16px] border border-[#E6DDF0] bg-white px-3.5 py-3 text-left shadow-sm transition hover:border-[#B6A1D4] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#7651BA]">
-                            <span className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl ${metric.tone}`}>{metric.icon}</span>
+                                className="flex w-full items-center gap-3 rounded-[14px] border border-[#E6DDF0] bg-white px-3.5 py-3 text-left shadow-sm transition hover:border-[#B6A1D4] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#7651BA]">
+                            <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${metric.tone}`}>{metric.icon}</span>
                             <span className="min-w-0">
                                 <span className="block text-[12px] font-semibold leading-4 text-[#25153D]">{metric.title}</span>
                                 <span className="mt-1 block text-[24px] font-bold leading-none text-[#25153D]">{metric.count}</span>
@@ -1563,11 +1594,11 @@ export default function ManagerBookings() {
                         } : undefined}
                         onSetPrice={canManage ? b => {
                             if (getManagerBookingTypeLabel(b) === "Package" && Number(b.rentalItemCount || 0) === 0) {
-                                setBookingActionError("Fixed package pricing is set by the package catalog. Review rental add-ons and deposit separately.");
+                                setBookingActionError("The package sets the price.");
                                 return;
                             }
                             if (normalizeStatus(b.status) !== "Pending Review" || b.approvalStatus === "approved") {
-                                setBookingActionError("Custom price and down payment are locked after approval.");
+                                setBookingActionError("Price and down payment can't be changed after approval.");
                                 return;
                             }
                             // Reopening terms requires saving them again before approval.
@@ -1595,7 +1626,7 @@ export default function ManagerBookings() {
                         const ok = await updateStatus(approvalModal.id, noDp?"Confirmed":"Awaiting Down Payment",
                             undefined,undefined,noDp?noDpReason:undefined);
                         if (ok) setApprovalModal(null);
-                        else setApprovalError("Approval was not completed. Check the notification and try again.");
+                        else setApprovalError("Couldn't approve the booking. Try again.");
                     } finally { setApprovalSaving(false); }
                 }}
             />}
@@ -1736,7 +1767,7 @@ function ApproveBookingModal({booking, busy, error, onClose, onApprove}: {
     }, [booking.id, booking.branchId, booking.branch_id]);
     function submit() {
         if (depositRequired === null) {
-            setValidation("Load the refundable security deposit before approving the quotation.");
+            setValidation("Wait for the security deposit to load.");
             return;
         }
         if (hasRental === null) {
@@ -1744,14 +1775,14 @@ function ApproveBookingModal({booking, busy, error, onClose, onApprove}: {
             return;
         }
         if (getRequiredDownPayment(booking)===0 && noDpReason.trim().length<10){
-            setValidation("Explain the Manager-authorized no-down-payment confirmation (at least 10 characters)."); return;
+            setValidation("Explain why no down payment is needed (at least 10 characters)."); return;
         }
         if (!agreed) {
-            setValidation("Confirm that the manager and customer agreed on the payment terms.");
+            setValidation("Confirm the customer agreed to these terms.");
             return;
         }
         if (getTotalPrice(booking) <= 0 || getRequiredDownPayment(booking) > getTotalPrice(booking)) {
-            setValidation("Set a valid agreed price and a down payment no greater than the booking price before approving.");
+            setValidation("Set a valid price and a down payment no higher than the price.");
             return;
         }
         setValidation("");
@@ -1770,22 +1801,22 @@ function ApproveBookingModal({booking, busy, error, onClose, onApprove}: {
                 <div className="flex justify-between gap-3"><span>Final Agreed Price</span><strong>{peso(getTotalPrice(booking))}</strong></div>
                 <div className="flex justify-between gap-3"><span>Required Down Payment</span><strong>{peso(getRequiredDownPayment(booking))}</strong></div>
                 {hasRental && <div className="flex justify-between gap-3"><span>Refundable Security Deposit</span><strong>{depositRequired === null ? "Loading…" : peso(depositRequired)}</strong></div>}
-                {hasRental && <p className="text-xs text-[#806A8C]">Manager-selected optional deposit. Any positive amount must be collected before rental release.</p>}
+                {hasRental && <p className="text-xs text-[#806A8C]">Collected before the equipment is handed over.</p>}
                 {depositError && <p role="alert" className="text-xs text-red-600">{depositError}</p>}
             </div>
             {getRequiredDownPayment(booking)===0 && <label className="mt-4 block text-xs font-medium text-[#4F4162]">
-                Manager no-down-payment authorization reason (10+ characters)
+                Reason for no down payment (10+ characters)
                 <textarea value={noDpReason} onChange={e=>setNoDpReason(e.target.value)} rows={2}
                           className="mt-1 w-full rounded-lg border border-[#E2D6EF] p-2" maxLength={500}/>
-                <span className="mt-1 block font-normal text-[#806A8C]">Approval directly confirms/reserves a zero-DP booking; all remaining booking charges must still be paid before release.</span>
+                <span className="mt-1 block font-normal text-[#806A8C]">With no down payment, approving confirms the booking right away. Full payment is still due before hand over.</span>
             </label>}
             <label className="mt-4 flex items-start gap-2 text-xs leading-5 text-[#4F4162]">
                 <input type="checkbox" checked={agreed} onChange={e=>{setAgreed(e.target.checked);setValidation("");}} disabled={busy} className="mt-1 accent-[#673DC8]"/>
-                <span>I confirm that the customer agrees to the final booking price, required down payment, and any applicable refundable rental deposit.</span>
+                <span>The customer agreed to the price, down payment and security deposit.</span>
             </label>
             <p className="mt-3 text-xs leading-5 text-[#816E93]">{getRequiredDownPayment(booking)===0
-                ? "With the documented no-DP exception, Manager approval also confirms and reserves this booking. Full booking payment is still required before release."
-                : "Approval records the agreed terms but does not reserve inventory until the required payment is verified and confirmation is completed."} Payment terms are locked after approval.</p>
+                ? "Approving confirms the booking and reserves the items. Full payment is still due before hand over."
+                : "Approving requests the down payment. Items are reserved once it's paid."} Payment terms are locked after approval.</p>
             {(validation || error) && <p role="alert" className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">{validation || error}</p>}
             <div className="mt-5 flex justify-end gap-2">
                 <button type="button" disabled={busy} onClick={onClose} className="rounded-xl border border-[#E2D6EF] px-4 py-2.5 text-sm font-semibold text-[#47246E]">Back</button>
@@ -1845,7 +1876,7 @@ function RecordPaymentModal({booking, busy, error, onClose, onSave}: {
                     !Number.isFinite(collectedAmount) || requiredAmount < 0 || collectedAmount < 0)
                     throw new Error(data.error || "Security deposit amounts are unavailable.");
                 if (!Array.isArray(statement?.rentalItems))
-                    throw new Error("Rental items could not be verified in the financial statement.");
+                    throw new Error("Couldn't load the rental items. Refresh the page.");
                 if (!cancelled) setDeposit({required: requiredAmount, collected: collectedAmount,
                     hasRental: statement.rentalItems.length > 0});
             } catch (cause) {
@@ -1885,9 +1916,9 @@ function RecordPaymentModal({booking, busy, error, onClose, onSave}: {
         setVerified(false);
     }
     function save() {
-        if (depositLoading || !deposit) {setValidation("The deposit ledger must load before recording a payment.");return;}
-        if (!amountValid) {setValidation("Select a payment or deposit that was actually received.");return;}
-        if (!verified) {setValidation("Confirm that you verified the actual money received before saving.");return;}
+        if (depositLoading || !deposit) {setValidation("Wait for the payment details to load.");return;}
+        if (!amountValid) {setValidation("Choose what the customer paid.");return;}
+        if (!verified) {setValidation("Tick the box to confirm you received the money.");return;}
         setValidation("");
         void onSave(bookingReceived, depositReceived, deposit.collected);
     }
@@ -1897,61 +1928,71 @@ function RecordPaymentModal({booking, busy, error, onClose, onSave}: {
     return <div role="presentation" className="fixed inset-0 z-[110] flex items-center justify-center bg-black/50 px-4 py-6">
         <div role="dialog" aria-modal="true" aria-labelledby="payment-modal-title" className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-[#E7D9F2] bg-white p-5 shadow-2xl">
             <div className="flex items-center justify-between gap-2">
-                <h2 id="payment-modal-title" className="text-lg font-bold text-[#26153F]">Record Payment Received</h2>
+                <h2 id="payment-modal-title" className="text-lg font-bold text-[#26153F]">Record Payment</h2>
                 <button type="button" aria-label="Close" disabled={busy} onClick={onClose} className="rounded-lg p-1.5 hover:bg-[#F5F0FC]"><X size={19}/></button>
             </div>
             <p className="mt-1 text-sm text-[#78698D]">{booking.name} · {booking.bookingReference || `#${booking.id}`}</p>
             <div className="mt-4 space-y-2 rounded-xl border border-[#E9E0EF] bg-[#FCFAFF] p-3 text-sm">
-                <div className="flex justify-between gap-3"><span>Total Booking Price</span><strong>{peso(getTotalPrice(booking))}</strong></div>
-                <div className="flex justify-between gap-3"><span>Booking Payment Already Recorded</span><strong>{peso(paid)}</strong></div>
-                <div className="flex justify-between gap-3"><span>Required Down Payment</span><strong>{peso(required)}</strong></div>
-                <div className="flex justify-between gap-3 border-t border-[#E9E0EF] pt-2 font-semibold"><span>Remaining Booking Balance</span><strong>{peso(balance)}</strong></div>
-                {showRentalDeposit && <>
-                    <div className="flex justify-between gap-3"><span>Refundable Rental Deposit Required</span><strong>{peso(deposit?.required ?? 0)}</strong></div>
-                    <div className="flex justify-between gap-3"><span>Rental Deposit Already Collected</span><strong>{peso(deposit?.collected ?? 0)}</strong></div>
-                    <div className="flex justify-between gap-3 font-semibold"><span>Rental Deposit Still Due</span><strong>{peso(depositDueCents / 100)}</strong></div>
-                </>}
+                <div className="flex justify-between gap-3"><span>Total price</span><strong>{peso(getTotalPrice(booking))}</strong></div>
+                {cents(required) > 0 && <div className="flex items-center justify-between gap-3"><span>Down payment</span>
+                    <span className="flex items-center gap-2"><strong>{peso(required)}</strong><PaidBadge paid={paid} due={required}/></span></div>}
+                {(cents(required) === 0 ? cents(paid) > 0 : cents(paid) > cents(required)) &&
+                    <div className="flex justify-between gap-3"><span>Paid so far</span><strong>{peso(paid)}</strong></div>}
+                <div className="flex justify-between gap-3 border-t border-[#E9E0EF] pt-2 font-semibold"><span>Balance</span><strong>{bookingDueCents > 0 ? peso(balance) : "Fully paid"}</strong></div>
+                {showRentalDeposit && cents(deposit?.required ?? 0) > 0 && <div className="flex items-center justify-between gap-3"><span>Security deposit</span>
+                    <span className="flex items-center gap-2"><strong>{peso(deposit?.required ?? 0)}</strong><PaidBadge paid={deposit?.collected ?? 0} due={deposit?.required ?? 0}/></span></div>}
             </div>
             {depositError && <p role="alert" className="mt-2 text-xs font-medium text-red-700">{depositError} Close and reopen to retry.</p>}
             {bookingDueCents > 0 && <section className="mt-4" aria-label="Choose booking payment received">
-                <p className="mb-2 text-sm font-bold text-[#26153F]">Mark customer booking payment as received</p>
+                <p className="mb-2 text-sm font-bold text-[#26153F]">What did the customer pay?</p>
                 <div className="space-y-2">
                     {remainingDpCents > 0 && <button type="button" className={optionClass(paymentChoice === "dp")} aria-pressed={paymentChoice === "dp"} disabled={busy || depositLoading || !deposit}
-                                                     onClick={() => choose("dp")}><span className="flex items-center justify-between gap-2"><span>Mark Remaining Down Payment as Received</span><strong>{peso(remainingDpCents / 100)}</strong></span></button>}
+                                                     onClick={() => choose("dp")}><span className="flex items-center justify-between gap-2"><span>Down payment</span><strong>{peso(remainingDpCents / 100)}</strong></span></button>}
                     <button type="button" className={optionClass(paymentChoice === "balance")} aria-pressed={paymentChoice === "balance"} disabled={busy || depositLoading || !deposit}
-                            onClick={() => choose("balance")}><span className="flex items-center justify-between gap-2"><span>{remainingDpCents > 0 ? "Mark Full Remaining Booking Payment as Received" : "Mark Remaining Balance as Received"}</span><strong>{peso(bookingDueCents / 100)}</strong></span></button>
+                            onClick={() => choose("balance")}><span className="flex items-center justify-between gap-2"><span>{remainingDpCents > 0 ? "Full balance" : "Remaining balance"}</span><strong>{peso(bookingDueCents / 100)}</strong></span></button>
                     {showRentalDeposit && depositDueCents > 0 && <button type="button" className={optionClass(paymentChoice === "none")} aria-pressed={paymentChoice === "none"} disabled={busy || depositLoading || !deposit}
-                                                                         onClick={() => {choose("none");setIncludeDeposit(true);}}>Mark Rental Deposit Only as Received</button>}
+                                                                         onClick={() => {choose("none");setIncludeDeposit(true);}}>Security deposit only</button>}
                 </div>
             </section>}
-            {bookingDueCents === 0 && <p className="mt-4 rounded-xl bg-[#F1FAF5] p-3 text-sm font-medium text-[#25513B]">Booking fully paid. No further booking payment is needed.</p>}
-            {showRentalDeposit && <section className="mt-4 border-t border-[#E9E0EF] pt-4" aria-label="Rental security deposit">
-                <p className="mb-2 text-sm font-bold text-[#26153F]">Refundable rental security deposit</p>
-                {depositDueCents > 0 ? <>
-                    <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-[#E5D8EF] p-3 text-sm text-[#49366B]">
-                        <input type="checkbox" className="mt-0.5 accent-[#673DC8]" checked={includeDeposit} disabled={busy || depositLoading || !deposit}
-                               onChange={e => {setIncludeDeposit(e.target.checked);setVerified(false);setValidation("");}}/>
-                        <span>Mark Rental Security Deposit as Received — <strong>{peso(depositDueCents / 100)}</strong></span>
-                    </label>
-                </> : <p className="rounded-xl bg-[#F1FAF5] p-3 text-sm font-medium text-[#25513B]">Rental security deposit already collected. No additional deposit required.</p>}
+            {/* Only what still needs paying is shown: a paid deposit needs no section. */}
+            {showRentalDeposit && depositDueCents > 0 && <section className="mt-4 border-t border-[#E9E0EF] pt-4" aria-label="Rental security deposit">
+                <p className="mb-2 text-sm font-bold text-[#26153F]">Security deposit (refundable)</p>
+                <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-[#E5D8EF] p-3 text-sm text-[#49366B]">
+                    <input type="checkbox" className="mt-0.5 accent-[#673DC8]" checked={includeDeposit} disabled={busy || depositLoading || !deposit}
+                           onChange={e => {setIncludeDeposit(e.target.checked);setVerified(false);setValidation("");}}/>
+                    <span>Also received the security deposit — <strong>{peso(depositDueCents / 100)}</strong></span>
+                </label>
             </section>}
             <div className="mt-4 space-y-1 rounded-xl bg-[#F7F1FF] px-3 py-3 text-sm text-[#57436F]">
-                <div className="flex justify-between gap-2"><span>Booking payment being recorded</span><strong>{Number.isFinite(bookingReceived) ? peso(bookingReceived) : "Invalid"}</strong></div>
-                {showRentalDeposit && <div className="flex justify-between gap-2"><span>Rental deposit being recorded</span><strong>{Number.isFinite(depositReceived) ? peso(depositReceived) : "Invalid"}</strong></div>}
-                <div className="flex justify-between gap-2 border-t border-[#E0D4EA] pt-2 font-bold"><span>Total receipt to record</span><strong>{Number.isFinite(totalReceived) ? peso(totalReceived) : "Invalid"}</strong></div>
-                <div className="flex justify-between gap-2 text-xs"><span>Booking balance after this receipt</span><span>{peso(remainingAfter)}</span></div>
-                {showRentalDeposit && <div className="flex justify-between gap-2 text-xs"><span>Deposit still due afterward</span><span>{peso(depositAfter)}</span></div>}
+                {/* The parts are listed only when the money is split between booking payment and deposit. */}
+                {bookingReceivedCents > 0 && depositReceivedCents > 0 && <>
+                    <div className="flex justify-between gap-2"><span>Booking payment</span><strong>{peso(bookingReceived)}</strong></div>
+                    <div className="flex justify-between gap-2"><span>Security deposit</span><strong>{peso(depositReceived)}</strong></div>
+                </>}
+                <div className={`flex justify-between gap-2 font-bold ${bookingReceivedCents > 0 && depositReceivedCents > 0 ? "border-t border-[#E0D4EA] pt-2" : ""}`}><span>Total received now</span><strong>{Number.isFinite(totalReceived) ? peso(totalReceived) : "Invalid"}</strong></div>
+                {totalReceived > 0 && (remainingAfter > 0 || depositAfter > 0 ? <>
+                    {remainingAfter > 0 && <div className="flex justify-between gap-2 text-xs"><span>Balance after this</span><span>{peso(remainingAfter)}</span></div>}
+                    {showRentalDeposit && depositAfter > 0 && <div className="flex justify-between gap-2 text-xs"><span>Deposit still due after this</span><span>{peso(depositAfter)}</span></div>}
+                </> : <p className="flex items-center gap-1.5 text-xs font-semibold text-[#23834A]"><CheckCircle2 size={14}/> Fully paid after this.</p>)}
             </div>
             <label className="mt-3 flex cursor-pointer items-start gap-2.5 rounded-lg border border-[#E8DDF2] bg-[#FCFAFF] p-3 text-xs leading-5 text-[#49376A]">
                 <input type="checkbox" checked={verified} onChange={e=>setVerified(e.target.checked)} disabled={busy || depositLoading || !deposit || !amountValid} className="mt-0.5 accent-[#6435BC]" />
-                <span>I confirm that the customer’s selected payment and/or refundable rental deposit has actually been received and verified.</span>
+                <span>I received this money from the customer.</span>
             </label>
-            <p className="mt-2 text-xs leading-5 text-[#827393]">These buttons record existing charges as received; they do not create new charges. Only booking payments count toward the required DP. The refundable rental deposit stays separate. Full booking payment and any required deposit are due before release.</p>
+            {showRentalDeposit && depositDueCents > 0 && <p className="mt-2 text-xs leading-5 text-[#827393]">The security deposit is kept separately and returned after the equipment comes back.</p>}
             {(validation || error) && <p role="alert" className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-xs font-medium text-red-700">{validation || error}</p>}
             <div className="mt-5 flex gap-2"><button type="button" disabled={busy} onClick={onClose} className="min-h-11 flex-1 rounded-xl border border-[#D9C6E9] bg-white px-3 text-sm font-semibold text-[#352353] hover:bg-[#F7F1FF] disabled:opacity-50">Cancel</button>
-                <button type="button" disabled={busy || depositLoading || !deposit || !amountValid || !verified} onClick={save} className="min-h-11 flex-1 rounded-xl bg-[#432183] px-3 text-sm font-bold text-white hover:bg-[#30145F] disabled:opacity-50">{busy ? "Saving…" : "Mark Selected Payments as Received"}</button></div>
+                <button type="button" disabled={busy || depositLoading || !deposit || !amountValid || !verified} onClick={save} className="min-h-11 flex-1 rounded-xl bg-[#432183] px-3 text-sm font-bold text-white hover:bg-[#30145F] disabled:opacity-50">{busy ? "Saving…" : "Save Payment"}</button></div>
         </div>
     </div>;
+}
+
+// "Paid" when fully paid, "₱X paid" when partly paid, "Not paid" otherwise.
+function PaidBadge({paid, due}: {paid: number; due: number}) {
+    const paidCents = Math.round(paid * 100), dueCents = Math.round(due * 100);
+    const [label, tone] = paidCents >= dueCents ? ["Paid", "bg-[#E7F6EC] text-[#23834A]"] :
+        paidCents > 0 ? [`${peso(paid)} paid`, "bg-[#FFF4DC] text-[#926400]"] : ["Not paid", "bg-[#F4EFF8] text-[#6B5A80]"];
+    return <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${tone}`}>{label}</span>;
 }
 
 function normalizeClosureStatus(status:string){return /^(pending review|pending)$/i.test(status)?"Pending Review":status;}
@@ -1977,10 +2018,16 @@ function CancelInventoryModal({
     error: string;
     onChangeUsedQty: (itemId: number, value: number) => void;
     onClose: () => void;
-    onConfirm: (reason: string) => void;
+    onConfirm: (reason: string, refund?: CancelRefund) => void;
 }) {
     const [reason, setReason] = useState("");
     const [acknowledged,setAcknowledged] = useState(false);
+    // Refund on cancellation: pre-filled with the suggestion, which follows the used quantities
+    // until the Manager types their own amount.
+    const [refundText, setRefundText] = useState("");
+    const [refundTouched, setRefundTouched] = useState(false);
+    const [refundMethod, setRefundMethod] = useState("cash");
+    const [refundVerified, setRefundVerified] = useState(false);
     const rejecting=normalizeClosureStatus(booking.status)==='Pending Review';
     const reservedItems = items.filter(
         (item) => Number(item.reserved_quantity || 0) > 0
@@ -1994,6 +2041,35 @@ function CancelInventoryModal({
     const rentalCancellationBlocked = Boolean(impact?.rentalCancellationBlocked) ||
         checkedOutRentals > 0 || returnedRentals > 0;
     const hasRentalLines = Number(impact?.rentalItemLines || 0) > 0;
+    const refundable = Math.max(0, Number(impact?.refundableBookingPayment ?? 0));
+    // Policy: the store keeps the LARGER of the non-refundable down payment or the products already used.
+    const downPayment = Math.max(0, Number(impact?.requiredDownPayment ?? 0));
+    // Discounted price when the package / quote has a discount, otherwise the normal price.
+    const refundPrice = (item: BookingInventoryItem) => Number(item.refund_unit_price ?? item.unit_price ?? 0);
+    const normalTotal = reservedItems.reduce((sum, item) => sum + Number(item.unit_price || 0) * Number(item.reserved_quantity || 0), 0);
+    const discountedTotal = reservedItems.reduce((sum, item) => sum + refundPrice(item) * Number(item.reserved_quantity || 0), 0);
+    const discountPercent = normalTotal > 0 ? Math.round((1 - discountedTotal / normalTotal) * 1000) / 10 : 0;
+    const hasDiscount = discountPercent >= 0.1;
+    // Same rule as the Lambda: used quantity × the price shown, so the math adds up. When everything is used it is
+    // exactly the deal price (no ₱0.01 left over), and never more than the deal price.
+    const usedOf = (item: BookingInventoryItem) => Math.max(0, Math.min(Number(usedQty[Number(item.id)] || 0), Number(item.reserved_quantity || 0)));
+    const shownUsed = Math.round(reservedItems.reduce((sum, item) => sum + Math.round(usedOf(item) * refundPrice(item) * 100), 0)) / 100;
+    const dealTotal = Math.round(reservedItems.reduce((sum, item) =>
+        sum + Number(item.reserved_quantity || 0) * Number(item.unit_price || 0) * Number(item.refund_price_ratio ?? 1), 0) * 100) / 100;
+    const allUsed = reservedItems.length > 0 && reservedItems.every((item) => usedOf(item) >= Number(item.reserved_quantity || 0));
+    const usedValue = allUsed ? dealTotal : Math.min(shownUsed, dealTotal);
+    const storeKeepsSuggested = Math.min(refundable, Math.max(downPayment, usedValue));
+    const suggestedRefund = Math.max(0, Math.round((refundable - storeKeepsSuggested) * 100) / 100);
+    useEffect(() => {
+        if (impact && !refundTouched) setRefundText(String(suggestedRefund));
+    }, [impact, refundTouched, suggestedRefund]);
+    const depositBack = Math.max(0, Number(impact?.depositRefundOnCancel ?? impact?.depositHeld ?? 0));
+    const showRefund = !rejecting && !!impact && (refundable > 0.005 || depositBack > 0.005);
+    const refundValue = refundable > 0.005 ? Number(refundText) : 0;
+    const refundValid = refundable <= 0.005 || (refundText.trim() !== "" && Number.isFinite(refundValue) && refundValue >= 0 &&
+        refundValue <= refundable + 0.005 && Math.abs(refundValue * 100 - Math.round(refundValue * 100)) < 0.001);
+    const totalBack = (refundValid ? refundValue : 0) + depositBack;
+    const refundReady = !showRefund || (refundValid && (totalBack <= 0.005 || refundVerified));
 
     return (
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/35 px-4 font-sans">
@@ -2013,131 +2089,170 @@ function CancelInventoryModal({
 
                 <div className="max-h-[58vh] overflow-y-auto px-5 py-4">
                     {impact && <div className="mb-4 rounded-xl border border-[#E6DDF0] bg-[#FAF8FD] p-4 text-xs text-[#2B174C]">
-                        <h3 className="mb-3 text-sm font-bold">{rejecting?'Rejection safeguards':'Cancellation impact · Read only'}</h3>
+                        <h3 className="mb-3 text-sm font-bold">{rejecting?'Before rejecting':'Summary'}</h3>
                         <div className="grid grid-cols-2 gap-x-4 gap-y-2">
                             <span>Current status</span><strong className="text-right">{impact.status}</strong>
                             <span>Payment stage</span><strong className="text-right">{impact.paymentStage.replaceAll('_',' ')}</strong>
                             <span>Booking payments received</span><strong className="text-right">{peso(impact.paymentReceived)}</strong>
-                            <span>Rental deposit collected</span><strong className="text-right">{peso(impact.depositCollected)}</strong>
-                            <span>Security deposit still held</span><strong className="text-right">{peso(impact.depositHeld)}</strong>
-                            <span>Reserved consumable units</span><strong className="text-right">{impact.reservedConsumableUnits}</strong>
-                            <span>Previously used consumables</span><strong className="text-right">{impact.usedConsumableUnits}</strong>
-                            <span>Rental items</span><strong className="text-right">{impact.rentalItemLines}</strong>
+                            {/* Only the rows that apply to this booking's contents. */}
+                            {(hasRentalLines || impact.depositCollected > 0.005) && <>
+                                <span>Rental deposit collected</span><strong className="text-right">{peso(impact.depositCollected)}</strong>
+                                <span>Security deposit still held</span><strong className="text-right">{peso(impact.depositHeld)}</strong>
+                            </>}
+                            {items.length > 0 && <>
+                                <span>Reserved consumable units</span><strong className="text-right">{impact.reservedConsumableUnits}</strong>
+                                <span>Previously used consumables</span><strong className="text-right">{impact.usedConsumableUnits}</strong>
+                            </>}
+                            {hasRentalLines && <><span>Rental items</span><strong className="text-right">{impact.rentalItemLines}</strong></>}
                         </div>
                         {!rejecting && <p className="mt-3 border-t border-[#E6DDF0] pt-3 leading-5 text-[#655478]">
-                            Cancellation does not refund or forfeit any payment automatically; refund decisions follow the disclosed policy and need a separate recorded settlement.
+                            {hasReservedItems ? "Step 1: enter the products already used. Step 2: confirm the refund. Both are saved together with the cancellation." : "The refund below is saved together with the cancellation."} Payment records are kept for history.
                         </p>}
                     </div>}
-                    {!rejecting && impact && hasRentalLines && (
-                        <section aria-label="Rental cancellation impact" className="mb-4 rounded-xl border border-[#D6C4F8] bg-[#FAF8FF] p-4 text-xs text-[#2B174C]">
-                            <h3 className="text-sm font-bold">Rental reservation impact</h3>
-                            <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2">
-                                <span>Reserved rental allocations</span><strong className="text-right">{reservedRentals}</strong>
-                                <span>Checked-out allocations</span><strong className="text-right">{checkedOutRentals}</strong>
-                                <span>Returned allocations</span><strong className="text-right">{returnedRentals}</strong>
-                                <span>On cancellation</span>
-                                <strong className="text-right">{rentalCancellationBlocked ? "Blocked — return/settlement required" : reservedRentals > 0 ? "Release rental reservations" : "No active reservation to release"}</strong>
-                            </div>
-                            <p className={`mt-3 border-t pt-3 leading-5 ${rentalCancellationBlocked ? "border-red-200 text-red-700" : "border-[#E6DDF0] text-[#655478]"}`}>
-                                {rentalCancellationBlocked
-                                    ? "Equipment has already been checked out or returned. Use Staff return and inspection followed by Manager settlement; ordinary cancellation is not available."
-                                    : "Cancelling will free the reserved equipment for its booking dates. This changes reservation availability only — physical equipment stock is not increased. The backend rechecks allocation status before saving."}
-                            </p>
-                        </section>
-                    )}
+                    {/* Step 1: products already used. It comes BEFORE the refund because the refund depends on it. */}
                     {loading ? (
-                        <div className="rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-4 py-8 text-center text-sm text-[#806A8C]">
+                        <div className="mb-4 rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-4 py-8 text-center text-sm text-[#806A8C]">
                             Loading booking items...
                         </div>
                     ) : rejecting ? (
-                        <p className="text-xs text-[#655478]">The request has not been approved; no inventory return quantities are needed.</p>
+                        <p className="mb-4 text-xs text-[#655478]">Not approved yet, so no items need returning.</p>
                     ) : !hasReservedItems ? (
-                        <div className="rounded-xl border border-[#F4D79A] bg-[#FFF8E8] px-4 py-4 text-sm text-[#8A5A00]">
+                        <div className="mb-4 rounded-xl border border-[#F4D79A] bg-[#FFF8E8] px-4 py-4 text-sm text-[#8A5A00]">
                             No reserved consumable inventory was found. {hasRentalLines
-                            ? "Rental reservation handling is shown above; no consumable stock will be restored."
-                            : "Cancellation will retain existing financial records for separate settlement."}
+                            ? "No consumables to return."
+                            : "No consumables to return."}
                         </div>
                     ) : (
-                        <div className="space-y-3">
-                            <div className="rounded-xl border border-[#E6DDF0] bg-[#F7F1FF] px-4 py-3 text-sm text-[#4E2C66]">
-                                Enter the quantity that was already used. Anything not used will be returned to inventory.
+                        <section aria-label="Products already used" className="mb-4 overflow-hidden rounded-xl border border-[#D6C4F8] bg-white text-xs text-[#2B174C]">
+                            <div className="flex items-start gap-3 border-b border-[#EFE7F4] px-4 py-3">
+                                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#2B174C] text-[11px] font-bold text-white">1</span>
+                                <div>
+                                    <h3 className="text-sm font-bold">Products already used</h3>
+                                    <p className="mt-0.5 leading-5 text-[#806A8C]">Enter how many of each product were already used and can't go back to inventory. Leave 0 if nothing was used. The rest returns to inventory.</p>
+                                </div>
                             </div>
-
-                            {reservedItems.map((item) => {
-                                const itemId = Number(item.id);
-                                const reserved = Number(item.reserved_quantity || 0);
-                                const used = Math.max(
-                                    0,
-                                    Math.min(Number(usedQty[itemId] || 0), reserved)
-                                );
-                                const restored = Math.max(reserved - used, 0);
-                                const label = item.variant_name
-                                    ? `${item.product_name} — ${item.variant_name}`
-                                    : item.product_name;
-
-                                return (
-                                    <div
-                                        key={item.id}
-                                        className="rounded-2xl border border-[#E6DDF0] bg-white p-4 shadow-sm"
-                                    >
-                                        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                                            <div className="min-w-0">
-                                                <p className="text-sm font-bold text-[#1A1220]">
-                                                    {label}
-                                                </p>
-
-                                                <p className="mt-1 text-xs text-[#7A6A84]">
-                                                    Reserved: {reserved}
-                                                </p>
-
-                                                <p className="mt-1 text-xs font-semibold text-[#138342]">
-                                                    Will return to inventory: {restored}
-                                                </p>
-                                            </div>
-
-                                            <div className="w-full md:w-[180px]">
-                                                <label className="text-xs font-semibold text-[#5F4E75]">
-                                                    Used quantity
-                                                </label>
-
-                                                <input
-                                                    type="number"
-                                                    min={0}
-                                                    max={reserved}
-                                                    value={used}
-                                                    disabled={submitting}
-                                                    onChange={(event) => {
-                                                        const nextValue = Math.max(
-                                                            0,
-                                                            Math.min(Number(event.target.value || 0), reserved)
-                                                        );
-
-                                                        onChangeUsedQty(itemId, nextValue);
-                                                    }}
-                                                    className="mt-1 h-11 w-full rounded-xl border border-[#D8CBE7] bg-white px-3 text-sm font-semibold text-[#1A1220] outline-none transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:opacity-60"
-                                                />
-
-                                                <p className="mt-1 text-[11px] text-[#806A8C]">
-                                                    Max: {reserved}
-                                                </p>
-                                            </div>
-                                        </div>
-                                    </div>
-                                );
-                            })}
-                        </div>
+                            {hasDiscount && <p className="border-b border-[#EFE7F4] bg-[#F5F0FF] px-4 py-2 leading-5 text-[#4D2B85]">
+                                {getManagerBookingTypeLabel(booking) === "Package" ? "Package discount" : "Discount"} applied ({discountPercent}% off):
+                                used products are valued at the <strong>discounted price</strong> the customer agreed to.</p>}
+                            <div className="overflow-x-auto">
+                                <table className="w-full min-w-[560px] text-left">
+                                    <thead className="bg-[#F7F2FC] text-[10px] font-bold uppercase tracking-wide text-[#6A5582]">
+                                    <tr><th className="px-4 py-2">Product</th><th className="px-2 py-2 text-right">Price</th><th className="px-2 py-2 text-center">Booked</th>
+                                        <th className="px-2 py-2 text-center">Used</th><th className="px-2 py-2 text-center">Back to inventory</th><th className="px-4 py-2 text-right">Used value</th></tr>
+                                    </thead>
+                                    <tbody>{reservedItems.map((item) => {
+                                        const itemId = Number(item.id);
+                                        const reserved = Number(item.reserved_quantity || 0);
+                                        const used = Math.max(0, Math.min(Number(usedQty[itemId] || 0), reserved));
+                                        const label = item.variant_name ? `${item.product_name} — ${item.variant_name}` : item.product_name;
+                                        return <tr key={item.id} className="border-t border-[#EFE7F4]">
+                                            <td className="px-4 py-2 font-semibold text-[#1A1220]">{label}</td>
+                                            <td className="px-2 py-2 text-right tabular-nums">
+                                                {refundPrice(item) < Number(item.unit_price || 0) - 0.005
+                                                    ? <><span className="block text-[10px] text-[#75657E] line-through">{peso(Number(item.unit_price || 0))}</span>{peso(refundPrice(item))}</>
+                                                    : peso(Number(item.unit_price || 0))}</td>
+                                            <td className="px-2 py-2 text-center tabular-nums">{reserved}</td>
+                                            <td className="px-2 py-2 text-center">
+                                                <input type="number" min={0} max={reserved} value={used} disabled={submitting}
+                                                       aria-label={`Used quantity of ${label}`}
+                                                       onChange={(event) => onChangeUsedQty(itemId, Math.max(0, Math.min(Number(event.target.value || 0), reserved)))}
+                                                       className="h-9 w-20 rounded-lg border border-[#D8CBE7] bg-white px-2 text-center text-sm font-semibold text-[#1A1220] outline-none focus:border-[#2B174C] focus:ring-2 focus:ring-[#2B174C]/10 disabled:opacity-60"/>
+                                            </td>
+                                            <td className="px-2 py-2 text-center font-semibold tabular-nums text-[#138342]">{Math.max(reserved - used, 0)}</td>
+                                            <td className="px-4 py-2 text-right font-semibold tabular-nums">{peso(used * refundPrice(item))}</td>
+                                        </tr>;
+                                    })}</tbody>
+                                    <tfoot><tr className="border-t-2 border-[#E6DDF0] bg-[#FBF8FF]">
+                                        <td colSpan={5} className="px-4 py-2 text-right font-bold">Products already used</td>
+                                        <td className="px-4 py-2 text-right font-bold tabular-nums">{peso(usedValue)}</td>
+                                    </tr></tfoot>
+                                </table>
+                            </div>
+                        </section>
                     )}
-
+                    {showRefund && impact && (
+                        <section aria-label="Refund on cancellation" className="mb-4 rounded-xl border border-[#D6C4F8] bg-white p-4 text-xs text-[#2B174C]">
+                            <div className="flex items-start gap-3">
+                                {hasReservedItems && <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#2B174C] text-[11px] font-bold text-white">2</span>}
+                                <div>
+                                    <h3 className="text-sm font-bold">Refund to customer</h3>
+                                    <p className="mt-0.5 leading-5 text-[#806A8C]">{hasReservedItems
+                                        ? <>The store keeps whichever is <strong>bigger</strong>: the down payment ({peso(downPayment)}) or the products already used ({peso(usedValue)}). The rest is refunded.</>
+                                        : <>The store keeps the down payment ({peso(downPayment)}). The rest is refunded.</>}</p>
+                                </div>
+                            </div>
+                            <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2">
+                                <span>Booking payments received</span><strong className="text-right">{peso(refundable)}</strong>
+                                <span>Down payment (non-refundable)</span><strong className="text-right">{peso(downPayment)}</strong>
+                                {hasReservedItems && <><span>Products already used (step 1)</span><strong className="text-right">{peso(usedValue)}</strong></>}
+                                <span>{hasReservedItems ? (usedValue > downPayment ? "Store keeps (products used is bigger)" : "Store keeps (down payment is bigger)") : "Store keeps (the down payment)"}</span><strong className="text-right">{peso(storeKeepsSuggested)}</strong>
+                                <span className="font-semibold">Suggested refund</span><strong className="text-right">{peso(suggestedRefund)}</strong>
+                            </div>
+                            {refundable > 0.005 && <label className="mt-3 block font-semibold text-[#4E2C66]">
+                                Booking payment to refund
+                                <input type="number" min={0} max={refundable} step="0.01" inputMode="decimal" value={refundText}
+                                       disabled={submitting} onChange={e => { setRefundText(e.target.value); setRefundTouched(true); }}
+                                       className="mt-1 h-10 w-full rounded-xl border border-[#D8CBE7] bg-white px-3 text-sm font-semibold text-[#1A1220] outline-none focus:border-[#6C3AD6]"/>
+                                <span className="mt-1 block font-normal leading-5 text-[#806A8C]">
+                                    {hasReservedItems
+                                        ? <>Amount paid minus the larger of the down payment or the products already used
+                                            {hasRentalLines ? " (rental equipment is not counted: it goes back to stock)" : ""}.</>
+                                        : hasRentalLines
+                                            ? "Rental equipment is not used up: it goes back to stock and the dates are freed, so the store keeps only the down payment."
+                                            : "Nothing has been reserved or used yet, so the store keeps only the down payment."}
+                                    {" "}You can change it, for example a full refund if the store cancelled. Maximum {peso(refundable)}.
+                                </span>
+                                {refundTouched && Number(refundText) !== suggestedRefund && <button type="button" disabled={submitting}
+                                                                                                    onClick={() => setRefundTouched(false)}
+                                                                                                    className="mt-1 text-xs font-semibold text-[#6335BC] hover:underline">Use suggested refund ({peso(suggestedRefund)})</button>}
+                                {!refundValid && <span role="alert" className="mt-1 block font-semibold text-red-700">Enter an amount from ₱0 to {peso(refundable)} (up to two decimals).</span>}
+                            </label>}
+                            <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 border-t border-[#EFE7F4] pt-3">
+                                {refundable > 0.005 && <><span>Kept by the store</span><strong className="text-right">{peso(Math.max(0, refundable - (refundValid ? refundValue : 0)))}</strong></>}
+                                {depositBack > 0.005 && <><span>Security deposit refunded (automatic)</span><strong className="text-right">{peso(depositBack)}</strong></>}
+                                <span className="font-bold">Total to give back</span><strong className="text-right text-[#138342]">{peso(totalBack)}</strong>
+                            </div>
+                            {totalBack > 0.005 && <>
+                                <label className="mt-3 block font-semibold text-[#4E2C66]">Refund method
+                                    <select value={refundMethod} onChange={e => setRefundMethod(e.target.value)} disabled={submitting}
+                                            className="mt-1 h-10 w-full rounded-xl border border-[#D8CBE7] bg-white px-3 text-sm text-[#1A1220]">
+                                        <option value="cash">Cash</option><option value="gcash">GCash</option><option value="bank_transfer">Bank transfer</option>
+                                    </select>
+                                </label>
+                                <label className="mt-3 flex items-start gap-2 leading-5 text-[#4D3A60]">
+                                    <input type="checkbox" checked={refundVerified} onChange={e => setRefundVerified(e.target.checked)} disabled={submitting} className="mt-1"/>
+                                    I have given {peso(totalBack)} back to the customer.
+                                </label>
+                            </>}
+                        </section>
+                    )}
+                    {!rejecting && impact && hasRentalLines && (
+                        <section aria-label="Rental cancellation impact" className="mb-4 rounded-xl border border-[#D6C4F8] bg-[#FAF8FF] p-4 text-xs text-[#2B174C]">
+                            <h3 className="text-sm font-bold">Rental equipment</h3>
+                            <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2">
+                                <span>Reserved equipment</span><strong className="text-right">{reservedRentals}</strong>
+                                <span>Handed over</span><strong className="text-right">{checkedOutRentals}</strong>
+                                <span>Returned</span><strong className="text-right">{returnedRentals}</strong>
+                                <span>After cancelling</span>
+                                <strong className="text-right">{rentalCancellationBlocked ? "Can't cancel" : reservedRentals > 0 ? "Equipment is freed" : "Nothing reserved"}</strong>
+                            </div>
+                            <p className={`mt-3 border-t pt-3 leading-5 ${rentalCancellationBlocked ? "border-red-200 text-red-700" : "border-[#E6DDF0] text-[#655478]"}`}>
+                                {rentalCancellationBlocked
+                                    ? "The equipment was already handed over, so this booking can't be cancelled. Use the return and settlement steps instead."
+                                    : "Cancelling frees the reserved equipment for these dates."}
+                            </p>
+                        </section>
+                    )}
                     <div className="mt-4 space-y-2 rounded-xl border border-[#E6DDF0] bg-white p-4">
                         <label htmlFor="cancel-booking-reason" className="block text-sm font-semibold text-[#2B174C]">{rejecting?'Rejection reason':'Cancellation reason'} <span className="text-red-600">*</span></label>
                         <textarea id="cancel-booking-reason" rows={2} maxLength={500} value={reason}
                                   onChange={event => setReason(event.target.value)} disabled={submitting}
                                   placeholder={rejecting?'Explain why this booking request was declined.':'Explain why the booking is being cancelled.'}
                                   className="w-full rounded-xl border border-[#D8CBE7] p-3 text-sm outline-none focus:border-[#6C3AD6]" />
-                        <p className="text-xs text-[#806A8C]">Required for the booking audit history. No payments are automatically forfeited or refunded.</p>
+                        <p className="text-xs text-[#806A8C]">Saved in the booking history.</p>
                         {!rejecting && <label className="flex items-start gap-2 border-t border-[#EFE7F4] pt-3 text-xs leading-5 text-[#4D3A60]">
                             <input type="checkbox" checked={acknowledged} onChange={e=>setAcknowledged(e.target.checked)} disabled={submitting||loading||!impact} className="mt-1"/>
-                            I reviewed the payment, deposit, inventory and preparation impact; any refund or approved charge will be handled separately according to the disclosed cancellation policy.
+                            I reviewed the items and the refund above.
                         </label>}
                     </div>
                     {error && (
@@ -2159,8 +2274,9 @@ function CancelInventoryModal({
 
                     <button
                         type="button"
-                        onClick={() => onConfirm(reason.trim())}
-                        disabled={loading || submitting || !impact || reason.trim().length < 5 || (!rejecting&&!acknowledged) || rentalCancellationBlocked || (rejecting?!impact.eligibleForReject:!impact.eligibleForCancel)}
+                        onClick={() => onConfirm(reason.trim(), rejecting ? undefined : {
+                            amount: refundable > 0.005 ? Math.round(refundValue * 100) / 100 : 0, method: refundMethod, verified: refundVerified })}
+                        disabled={loading || submitting || !impact || reason.trim().length < 5 || (!rejecting&&!acknowledged) || (!rejecting&&!refundReady) || rentalCancellationBlocked || (rejecting?!impact.eligibleForReject:!impact.eligibleForCancel)}
                         className="inline-flex h-11 items-center justify-center rounded-xl bg-[#A33E20] px-4 text-sm font-semibold text-white transition hover:bg-[#883117] disabled:cursor-not-allowed disabled:opacity-60"
                     >
                         {submitting ? "Processing..." : rejecting?"Confirm Rejection":"Confirm Cancellation"}

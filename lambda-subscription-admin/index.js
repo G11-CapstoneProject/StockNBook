@@ -1275,6 +1275,10 @@ async function approvePayment(connection, paymentId, admin) {
 
         // Approval also updates the store-level label atomically with the
         // paid subscription. The payment and audit records remain unchanged.
+        await connection.execute(
+            "UPDATE stores SET plan = ? WHERE id = ?",
+            [plan.plan_code, payment[c.storeId]]
+        );
         await connection.commit();
 
         // Once committed, an email outage must not undo a genuine approval.
@@ -1445,8 +1449,48 @@ async function extendSubscription(connection, subscriptionId, admin, extensionDa
     }
 }
 
+// ===== GCASH QR BLOB CHANGE BEGIN =====
+const GCASH_QR_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"];
+const MAX_GCASH_QR_DATA_URL_BYTES = 2 * 1024 * 1024;
+
+function decodeGcashQrImage(value) {
+    if (!value) return { data: null, mimeType: null };
+    if (Buffer.byteLength(value, "utf8") > MAX_GCASH_QR_DATA_URL_BYTES) {
+        throw httpError(413, "GCash QR image is too large. Choose a smaller QR image (maximum 2 MB after processing).");
+    }
+    const comma = value.indexOf(",");
+    const header = comma >= 0 ? value.slice(0, comma) : "";
+    const match = /^data:(image\/(?:png|jpeg|webp));base64$/.exec(header);
+    const base64 = comma >= 0 ? value.slice(comma + 1) : "";
+    if (!match || !base64 || base64.length % 4 !== 0) {
+        throw httpError(400, "Upload a valid PNG, JPG, JPEG, or WEBP GCash QR image.");
+    }
+    const mimeType = match[1];
+    const data = Buffer.from(base64, "base64");
+    if (!data.length || data.toString("base64") !== base64) {
+        throw httpError(400, "The GCash QR image data is invalid.");
+    }
+    const validImage = mimeType === "image/png"
+        ? data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+        : mimeType === "image/jpeg"
+            ? data.length >= 3 && data[0] === 255 && data[1] === 216 && data[2] === 255
+            : data.length >= 12 && data.toString("ascii", 0, 4) === "RIFF" &&
+            data.toString("ascii", 8, 12) === "WEBP";
+    if (!validImage) throw httpError(400, "The selected file is not a valid GCash QR image.");
+    return { data, mimeType };
+}
+
 async function getPlatformSettings(connection) {
-    const [rows] = await connection.execute("SELECT `key`, value, updated_at FROM platform_settings ORDER BY `key` ASC");
+    const [storedRows] = await connection.execute(
+        "SELECT `key`, value, image_data, image_mime_type, updated_at FROM platform_settings ORDER BY `key` ASC"
+    );
+    const rows = storedRows.map(row => ({
+        key: row.key,
+        value: row.key === "gcash_qr_image" && row.image_data && GCASH_QR_IMAGE_TYPES.includes(row.image_mime_type)
+            ? `data:${row.image_mime_type};base64,${Buffer.from(row.image_data).toString("base64")}`
+            : row.value,
+        updated_at: row.updated_at,
+    }));
     const settings = {};
     for (const row of rows) settings[row.key] = row.value;
     return { settings, rows };
@@ -1463,14 +1507,20 @@ async function updatePlatformSettings(connection, values) {
             currentSettingKey = cleanKey;
             const settingValue = String(value ?? "");
 
-            // Guard the QR upload size. The database column must also be MEDIUMTEXT
-            // (see GCash_QR_Database_Migration.sql). This is NOT a substitute for migration.
-            if (cleanKey === "gcash_qr_image" && Buffer.byteLength(settingValue, "utf8") > 2 * 1024 * 1024) {
-                throw httpError(413, "GCash QR image is too large. Choose a smaller QR image (maximum 2 MB after processing).");
+            if (cleanKey === "gcash_qr_image") {
+                const { data, mimeType } = decodeGcashQrImage(settingValue);
+                // Bind a Buffer: mysql2 sends binary image bytes, not base64 text.
+                // Keep the existing text protocol for compatibility with large QR values.
+                await connection.query(
+                    "INSERT INTO platform_settings (`key`, value, image_data, image_mime_type, updated_at) " +
+                    "VALUES (?, NULL, ?, ?, NOW()) " +
+                    "ON DUPLICATE KEY UPDATE value = NULL, image_data = VALUES(image_data), " +
+                    "image_mime_type = VALUES(image_mime_type), updated_at = NOW()",
+                    [cleanKey, data, mimeType]
+                );
+                continue;
             }
 
-            // Keep the text protocol: mysql2's prepared-statement binary packet
-            // caused COM_STMT_EXECUTE serialization errors with larger QR values.
             await connection.query(
                 "INSERT INTO platform_settings (`key`, value, updated_at) " +
                 "VALUES (?, ?, NOW()) " +
@@ -1484,11 +1534,12 @@ async function updatePlatformSettings(connection, values) {
         await connection.rollback();
         if (currentSettingKey === "gcash_qr_image" &&
             (error.code === "ER_DATA_TOO_LONG" || error.errno === 1406)) {
-            throw httpError(400, "The platform_settings.value database column is too small for a GCash QR image. Run the supplied MEDIUMTEXT SQL migration, then save again.");
+            throw httpError(400, "The GCash QR image exceeds the database column capacity. Verify the MEDIUMBLOB migration.");
         }
         throw error;
     }
 }
+// ===== GCASH QR BLOB CHANGE END =====
 
 async function listStores(connection, search, planName, storeStatus) {
     const values = [];

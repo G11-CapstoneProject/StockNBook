@@ -2,8 +2,8 @@
 
 import * as React from "react";
 import {
-    AlertTriangle, ArrowLeftRight, CalendarDays, ChevronDown, ClipboardList,
-    Package, PackagePlus, RefreshCw, Search, ShoppingCart, X, CalendarClock, Truck, Download,
+    AlertTriangle, CalendarDays, ChevronDown, ClipboardList,
+    Package, PackagePlus, RefreshCw, Search, ShoppingCart, X, Truck,
 } from "lucide-react";
 import { useInventoryController } from "@/hooks/useInventory";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
@@ -148,26 +148,6 @@ function StaffInventoryFilterSelect({ containerClassName = "", className = "", c
         </span>
     );
 }
-// Same PDF report format as the Manager Inventory downloads.
-async function downloadStaffInventoryReport(title: string, headers: string[], rows: string[][],
-                                            branchName: string, dateRange: string, filename: string) {
-    const { exportTableAsPdf } = await import("@/components/dashboard/_shared");
-    exportTableAsPdf({ title, headers, rows }, {
-        storeName: sessionStorage.getItem("store_name") || "StockNBook",
-        branch: branchName,
-        dateRange,
-    }, filename);
-}
-// Date and time lines in the Manager Stock Activity format (PH time).
-function activityDateTime(value: string) {
-    const parsed = value ? new Date(value.includes(" ") ? value.replace(" ", "T") : value) : null;
-    if (!parsed || Number.isNaN(parsed.getTime())) return { date: value || "—", time: "" };
-    return {
-        date: parsed.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "Asia/Manila" }),
-        time: parsed.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Manila" }).toLowerCase(),
-    };
-}
-
 function dateInManila(value = new Date()) {
     const parts = new Intl.DateTimeFormat("en-US", {
         timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit",
@@ -186,14 +166,6 @@ function safeDate(value: string) {
     return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString("en-PH", {
         month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila",
     });
-}
-
-// Keep the compact activity panel limited to the current Philippine business day.
-// The View All Activity dialog retains its existing selectable date range.
-function isActivityFromToday(value: string, today: string) {
-    if (!value) return false;
-    const parsed = new Date(value.includes(" ") ? value.replace(" ", "T") : value);
-    return !Number.isNaN(parsed.getTime()) && dateInManila(parsed) === today;
 }
 
 function staffExpirationRisk(value?: string | null): "Expired" | "Expiring Soon" | null {
@@ -313,22 +285,14 @@ function Stat({label,value,helper,icon,color,loading=false}: {
     label:string;value:number|null;helper:string;icon:React.ReactNode;color:string;loading?:boolean;
 }) {
     return (
-        <div aria-busy={loading} className="flex min-h-[146px] min-w-0 w-full items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm">
-            {loading ? <>
-                <span className="h-14 w-14 shrink-0 animate-pulse rounded-full bg-[#EEE8F3]" aria-hidden="true"/>
-                <span className="min-w-0 flex-1 space-y-2.5" role="status" aria-label={`Loading ${label}`}>
-                    <span className="block h-3.5 w-32 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
-                    <span className="block h-7 w-24 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
-                    <span className="block h-2.5 w-40 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
-                </span>
-            </> : <>
-                <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${color}`} aria-hidden="true">{icon}</span>
-                <span className="min-w-0 flex-1">
-                    <span className="block text-[14px] font-semibold leading-5 text-[#4B3E55]">{label}</span>
-                    <span className="mt-1 block break-words text-[28px] font-bold leading-tight tracking-[-0.03em] text-[#1A1220] tabular-nums">{value == null ? "—" : value.toLocaleString("en-PH")}</span>
-                    <span className="mt-2 block text-[11px] leading-4 text-[#8A7D92]">{helper}</span>
-                </span>
-            </>}
+        <div aria-busy={loading} className="flex min-h-[108px] min-w-0 w-full items-center gap-3 rounded-[16px] border border-[#E6DDF0] bg-white px-3.5 py-3 text-left shadow-sm">
+            <span className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl ${loading ? "animate-pulse bg-[#EEE8F3]" : color}`} aria-hidden="true">{!loading && icon}</span>
+            <span className="min-w-0 flex-1">
+                <span className="block text-[12px] font-semibold leading-4 text-[#25153D]">{label}</span>
+                {loading ? <span className="mt-1 block h-6 w-12 animate-pulse rounded bg-[#EEE8F3]"/> :
+                    <span className="mt-1 block break-words text-[24px] font-bold leading-none tabular-nums text-[#25153D]">{value == null ? "—" : value.toLocaleString("en-PH")}</span>}
+                <span className="mt-1 block text-[11px] leading-4 text-[#806A8C]">{helper}</span>
+            </span>
         </div>
     );
 }
@@ -342,6 +306,12 @@ export default function StaffInventory() {
     const refreshAll = inv.refreshAll;
     const [now, setNow] = React.useState<Date | null>(null);
     const [tab, setTab] = React.useState<"sales" | "rental">("sales");
+    // Support links from the Staff Dashboard without changing the default tab.
+    // Read after mounting to keep the server and initial client render consistent.
+    React.useEffect(() => {
+        const requestedTab = new URLSearchParams(window.location.search).get("tab");
+        if (requestedTab === "rental") setTab("rental");
+    }, []);
     const [search, setSearch] = React.useState("");
     const [category, setCategory] = React.useState("all");
     const [status, setStatus] = React.useState("all");
@@ -355,7 +325,6 @@ export default function StaffInventory() {
     const [restockTarget, setRestockTarget] = React.useState<Product | null>(null);
     const [restockQuantities, setRestockQuantities] = React.useState<Record<string, string>>({});
     const [restockExpirations, setRestockExpirations] = React.useState<Record<string, string>>({});
-    const [alertsExportError, setAlertsExportError] = React.useState("");
     // Kept across a network retry so one physical restock cannot be recorded twice.
     const restockRequestKey = React.useRef("");
     const [shortageReports, setShortageReports] = React.useState<ShortageReport[]>([]);
@@ -395,8 +364,6 @@ export default function StaffInventory() {
     const [rentalKey, setRentalKey] = React.useState(0);
     const lastFocusSync = React.useRef(0);
     const previousDay = React.useRef<string | null>(null);
-    const [activities, setActivities] = React.useState<ActivityRow[]>([]);
-    const [todayMovementCount, setTodayMovementCount] = React.useState<number | null>(null);
     const [showActivityHistory, setShowActivityHistory] = React.useState(false);
     const [activityFilter, setActivityFilter] = React.useState<"all" | "sales" | "receiving" | "adjustments">("all");
     const [activityPeriod, setActivityPeriod] = React.useState<"today" | "week" | "all">("week");
@@ -408,8 +375,6 @@ export default function StaffInventory() {
     const [historyRetry, setHistoryRetry] = React.useState(0);
     const closeStaffNotice = React.useCallback(() => setActionNotice(""), []);
     const [activityError, setActivityError] = React.useState<string | null>(null);
-    const [activityLoading, setActivityLoading] = React.useState(true);
-    const [activityDirection, setActivityDirection] = React.useState<"all" | "in" | "out">("all");
     const isRental = tab === "rental";
     const lines = React.useMemo(() => toStockLines(inv.baseProducts), [inv.baseProducts]);
     const {low, out, attention} = React.useMemo(() => {
@@ -438,15 +403,6 @@ export default function StaffInventory() {
         conditionReports.some(report => report.productId === line.product.id &&
             (report.variantId ?? null) === line.variantId && report.issueType === issueType);
     const branch = inv.assignedBranchName || "Assigned Branch";
-    // Staff sees today's records only; the Activity filter and search narrow today's list.
-    const todayActivities = React.useMemo(() => {
-        const today = dateInManila(now ?? new Date());
-        const query = search.trim().toLowerCase();
-        return activities.filter(item => isActivityFromToday(item.at, today) && (item.quantity ?? 0) !== 0 &&
-            (activityDirection === "all" || (activityDirection === "in" ? (item.quantity ?? 0) > 0 : (item.quantity ?? 0) < 0)) &&
-            (!query || [item.item, item.reference, item.kind].join(" ").toLowerCase().includes(query)));
-    }, [activities, now, activityDirection, search]);
-
     React.useEffect(() => {
         setNow(new Date());
         const interval = window.setInterval(() => setNow(new Date()), 30000);
@@ -488,9 +444,9 @@ export default function StaffInventory() {
         if (isRental) return;
         const controller = new AbortController();
         const load = async () => {
-            setActivityLoading(true); setActivityError(null);
+            setActivityError(null);
             const token = sessionStorage.getItem("token");
-            if (!token) {setActivityError("Session expired.");setActivityLoading(false);return;}
+            if (!token) {setActivityError("Session expired.");return;}
             try {
                 const response = await fetch("/api/products", {method:"POST",cache:"no-store",signal:controller.signal,
                     headers:{"Authorization":`Bearer ${token}`,"Content-Type":"application/json"},
@@ -506,15 +462,11 @@ export default function StaffInventory() {
                 setShortageReports(Array.isArray(data.shortages) ? data.shortages : []);
                 setConditionReports(Array.isArray(data.conditionReports) ? data.conditionReports : []);
                 setConditionReportingSupported(data.supportsConditionReports === true);
-                setActivities(fromMovements(Array.isArray(data.movements) ? data.movements : []));
-                setTodayMovementCount(Number.isSafeInteger(data.todayMovementCount) && data.todayMovementCount >= 0
-                    ? data.todayMovementCount : null);
             } catch (error) {
                 if (controller.signal.aborted) return;
-                setCanReceive(false); setPartialReceiptSupported(false); setReceivingTasks([]); setShortageReports([]); setConditionReports([]); setConditionReportingSupported(false); setActivities([]);
-                setTodayMovementCount(null);
+                setCanReceive(false); setPartialReceiptSupported(false); setReceivingTasks([]); setShortageReports([]); setConditionReports([]); setConditionReportingSupported(false);
                 setActivityError(error instanceof Error ? error.message : "Unable to load stock activity.");
-            } finally {if (!controller.signal.aborted) setActivityLoading(false);}
+            }
         };
         void load();
         return ()=>controller.abort();
@@ -698,22 +650,20 @@ export default function StaffInventory() {
             </section>
             {isRental ? <StaffRentalInventory key={rentalKey} branchName={branch}/> : inv.productsLoading ?
                 <div className="space-y-4">
-                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                        <Stat label="Items to Restock" value={null} helper="Products at or below their reorder point" color="bg-[#FFF3DE] text-[#E68A00]" icon={<PackagePlus size={19}/>} loading/>
-                        <Stat label="Low Stock Alerts" value={null} helper="Product variants approaching shortage" color="bg-[#FFF3DE] text-[#E68A00]" icon={<AlertTriangle size={19}/>} loading/>
-                        <Stat label="Out of Stock" value={null} helper="Product variants with no available stock" color="bg-[#FFE7EB] text-[#CF3348]" icon={<Package size={19}/>} loading/>
-                        <Stat label="Today's Stock Movements" value={null} helper="Actual branch inventory movements today (PH time)" color="bg-[#E9F2FF] text-[#1E6FE8]" icon={<ArrowLeftRight size={19}/>} loading/>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                        <Stat label="Items to Restock" value={null} helper="Products at or below their reorder point" color="bg-[#F3EBFF] text-[#6C3AD6]" icon={<PackagePlus size={23}/>} loading/>
+                        <Stat label="Low Stock Alerts" value={null} helper="Product variants approaching shortage" color="bg-[#FFF7E9] text-[#B7832E]" icon={<AlertTriangle size={23}/>} loading/>
+                        <Stat label="Out of Stock" value={null} helper="Product variants with no available stock" color="bg-[#FFE7EB] text-[#CF3348]" icon={<Package size={23}/>} loading/>
                     </div>
                     <ModuleSkeleton variant="inventory"/>
                 </div> : inv.productsError ?
                     <section role="alert" className={`${card} space-y-2 p-6`}><p className="font-semibold text-[#B92727]">Inventory could not be loaded.</p><p className="text-sm text-[#806A8C]">{inv.productsError}</p>
                         <button type="button" className={outline} onClick={()=>void refresh()}>Try Again</button></section> :
                     <div className="space-y-4">
-                        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                            <Stat label="Items to Restock" value={attention.length} helper="Products at or below their reorder point" color="bg-[#FFF3DE] text-[#E68A00]" icon={<PackagePlus size={19}/>}/>
-                            <Stat label="Low Stock Alerts" value={low.length} helper="Product variants approaching shortage" color="bg-[#FFF3DE] text-[#E68A00]" icon={<AlertTriangle size={19}/>}/>
-                            <Stat label="Out of Stock" value={out.length} helper="Product variants with no available stock" color="bg-[#FFE7EB] text-[#CF3348]" icon={<Package size={19}/>}/>
-                            <Stat label="Today's Stock Movements" value={activityLoading || activityError ? null : todayMovementCount} loading={activityLoading} helper="Actual branch inventory movements today (PH time)" color="bg-[#E9F2FF] text-[#1E6FE8]" icon={<ArrowLeftRight size={19}/>}/>
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                            <Stat label="Items to Restock" value={attention.length} helper="Products at or below their reorder point" color="bg-[#F3EBFF] text-[#6C3AD6]" icon={<PackagePlus size={23}/>}/>
+                            <Stat label="Low Stock Alerts" value={low.length} helper="Product variants approaching shortage" color="bg-[#FFF7E9] text-[#B7832E]" icon={<AlertTriangle size={23}/>}/>
+                            <Stat label="Out of Stock" value={out.length} helper="Product variants with no available stock" color="bg-[#FFE7EB] text-[#CF3348]" icon={<Package size={23}/>}/>
                         </div>
                         {canReceive && receivingTasks.length > 0 && <section aria-label="Deliveries to receive" className="flex flex-wrap items-center gap-3 rounded-xl border border-[#E7DFEC] bg-[#F5F1FF] px-4 py-3 shadow-sm">
                             <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[#ECE3FF] text-[#5A35A5]"><PackagePlus size={19}/></span>
@@ -723,10 +673,10 @@ export default function StaffInventory() {
                             </div>
                             <button type="button" className={`${outline} h-9 px-3 text-xs`} onClick={()=>{setActionError("");chooseReceipt(null);setShowReceivingInfo(true);}}>View Deliveries</button>
                         </section>}
-                        <div className="grid items-stretch gap-4 xl:grid-cols-[1.15fr_1fr]">
+                        <div className="grid min-w-0 grid-cols-1 gap-4">
                             {/* Same container, header, filter and table design as the Manager Stock Action Center. */}
-                            <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
-                                <div className="flex flex-col gap-3 border-b border-[#E9E1EE] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
+                            <section className="flex min-w-0 flex-col overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
+                                <div className="flex shrink-0 flex-wrap items-start justify-between gap-3 border-b border-[#E9E1EE] px-4 py-3.5">
                                     <div className="flex items-start gap-3">
                                         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]"><ClipboardList size={18}/></span>
                                         <div>
@@ -738,26 +688,15 @@ export default function StaffInventory() {
                                         <StaffInventoryFilterSelect containerClassName="w-[165px]" aria-label="Filter stock alerts by status" value={taskFilter} onChange={e=>setTaskFilter(e.target.value)}>
                                             <option value="all">All Status</option><option value="Low Stock">Low Stock</option><option value="Out of Stock">Out of Stock</option>
                                         </StaffInventoryFilterSelect>
-                                        <button type="button" title="Download filtered stock alerts report (PDF)" aria-label="Download stock alerts report"
-                                                onClick={() => void downloadStaffInventoryReport("Stock Alerts to Review",
-                                                    ["Product", "Current Stock", "Reorder Point", "Status", "Action"],
-                                                    tasks.map(item => [item.name, String(item.stock), String(item.reorder), item.status,
-                                                        item.status === "Out of Stock" ? "Restock Now" : "Restock"]),
-                                                    branch, `${taskFilter === "all" ? "All Status" : taskFilter}${search.trim() ? ` · Search: “${search.trim()}”` : ""}`,
-                                                    "stocknbook_stock_alerts_to_review")
-                                                    .then(() => setAlertsExportError(""))
-                                                    .catch(() => setAlertsExportError("Unable to download stock alerts report."))}
-                                                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#D9CDF0] bg-white text-[#5A35A5] hover:bg-[#F7F1FF]">
-                                            <Download size={16}/>
-                                        </button>
+
                                     </div>
                                 </div>
-                                {alertsExportError && <p role="alert" className="px-4 py-1 text-xs text-red-600">{alertsExportError}</p>}
+
                                 {tasks.length===0 ? (
                                     <div className="px-5 py-8 text-center text-sm text-[#8A7D90]">No stock alerts match the selected filters.</div>
                                 ) : (
-                                    <div className="min-h-0 w-full flex-1 overflow-y-auto overflow-x-hidden" role="region" tabIndex={0} aria-label="Stock alerts to review">
-                                        <table className="w-full min-w-0 table-fixed text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                                    <div className="max-h-[220px] w-full overflow-auto overscroll-contain" role="region" tabIndex={0} aria-label="Stock alerts to review">
+                                        <table className="w-full min-w-[430px] table-fixed text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
                                             <colgroup><col className="w-[32%]"/><col className="w-[17%]"/><col className="w-[16%]"/><col className="w-[17%]"/><col className="w-[18%]"/></colgroup>
                                             <thead className="sticky top-0 z-10 bg-[#FFFCF8]"><tr className="border-b border-[#E9E1EE]">
                                                 {["Product","Current Stock","Reorder Point","Status","Action"].map(label=><th key={label} className={headClass}>{label}</th>)}
@@ -777,135 +716,88 @@ export default function StaffInventory() {
                                     </div>
                                 )}
                             </section>
-                            {/* Same container, header and table design as the Manager Consumable Stock Activity. */}
-                            <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm" aria-label="Today's Recent Consumable Activity">
-                                <div className="flex min-w-0 flex-col gap-2 border-b border-[#E9E1EE] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
-                                    <div className="flex min-w-0 flex-1 items-start gap-3">
-                                        <span className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]"><CalendarClock size={18}/></span>
+                            {/* Same container, header, filters and search layout as the Manager Branch Inventory List (Staff actions only). */}
+                            <section id="staff-sales-list" className="flex h-[470px] min-w-0 flex-col overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
+                                <div className="flex shrink-0 flex-wrap items-start justify-between gap-3 px-4 py-3.5">
+                                    <div className="flex items-start gap-3">
+                                        <span className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]"><Package size={18}/></span>
                                         <div>
-                                            <h2 className="text-[15px] font-bold text-[#21132E]">Today&apos;s Recent Consumable Activity</h2>
-                                            <p className="mt-0.5 text-[11px] text-[#86778F]">Consumable stock movements recorded today (PH time, read-only)</p>
+                                            <h2 className="text-[15px] font-bold text-[#21132E]">Branch Sales Inventory List</h2>
+                                            <p className="mt-0.5 text-[11px] text-[#86778F]">Products available for daily stock operations · {branch}</p>
                                         </div>
                                     </div>
-                                    <div className="flex shrink-0 items-center justify-end gap-1.5">
-                                        <StaffInventoryFilterSelect containerClassName="w-[116px]" aria-label="Filter today's consumable activity" value={activityDirection}
-                                                                    onChange={e=>setActivityDirection(e.target.value as "all" | "in" | "out")}>
-                                            <option value="all">All Activity</option><option value="in">Stock In</option><option value="out">Stock Out</option>
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <StaffInventoryFilterSelect containerClassName="w-[168px]" aria-label="Filter categories" value={category} onChange={e=>setCategory(e.target.value)}>
+                                            <option value="all">All Categories</option>{categories.map(cat=><option key={cat} value={cat}>{cat}</option>)}
+                                        </StaffInventoryFilterSelect>
+                                        <StaffInventoryFilterSelect containerClassName="w-[140px]" aria-label="Filter stock statuses" value={status} onChange={e=>setStatus(e.target.value)}>
+                                            <option value="all">All Status</option>{["In Stock","Low Stock","Out of Stock","Expiring Soon","Expired"].map(value=><option key={value} value={value}>{value}</option>)}
                                         </StaffInventoryFilterSelect>
                                     </div>
                                 </div>
-                                {activityLoading ? (
-                                    <div className="px-5 py-8 text-center text-sm text-[#8A7D90]">Loading recent stock activity...</div>
-                                ) : activityError ? (
-                                    <p role="alert" className="px-5 py-8 text-center text-sm text-red-700">{activityError} <button type="button" className="ml-2 underline" onClick={()=>setActivityKey(key=>key+1)}>Retry</button></p>
-                                ) : todayActivities.length===0 ? (
-                                    <div className="px-5 py-8 text-center text-sm text-[#8A7D90]">{activityDirection === "all" && !search.trim() ? "No consumable stock activity recorded today." : "No consumable stock activity today matches the selected filters."}</div>
-                                ) : (
-                                    <div className="min-h-0 flex-1 w-full overflow-y-auto overflow-x-hidden" role="region" tabIndex={0} aria-label="Today's recent consumable activity">
-                                        <table className="w-full min-w-0 table-fixed text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-                                            <colgroup><col className="w-[19%]"/><col className="w-[27%]"/><col className="w-[18%]"/><col className="w-[9%]"/><col className="w-[27%]"/></colgroup>
-                                            <thead className="sticky top-0 z-10 bg-[#FFFCF8]"><tr className="border-b border-[#E9E1EE]">
-                                                {["Date & Time","Product","Activity","Qty","Reference No."].map(label=><th key={label} className={headClass}>{label}</th>)}
-                                            </tr></thead>
-                                            <tbody>{todayActivities.map(item=>{
-                                                const at=activityDateTime(item.at);
-                                                return <tr key={item.id} className="border-b border-[#EFE8F2] last:border-b-0">
-                                                    <td className="py-2 text-[#4F3A5A] px-4 text-left">
-                                                        <div className="whitespace-nowrap font-medium">{at.date}</div>
-                                                        {at.time&&<div className="mt-0.5 whitespace-nowrap text-[10px] text-[#8A7D90]">{at.time}</div>}
-                                                    </td>
-                                                    <td className="break-words px-2 py-2 font-medium text-[#2B174C]">{item.item}</td>
-                                                    <td className="px-2 py-2 text-center"><span className={`inline-block text-[10px] font-semibold ${(item.quantity ?? 0) > 0 ? "text-[#23834A]" : "text-[#D92C3F]"}`}>{(item.quantity ?? 0) > 0 ? "Stock In" : "Stock Out"}</span></td>
-                                                    <td className={`px-2 py-2 text-center font-semibold ${(item.quantity ?? 0) > 0 ? "text-[#23834A]" : "text-[#D92C3F]"}`}>{(item.quantity ?? 0) > 0 ? "+" : "-"}{Math.abs(item.quantity ?? 0).toLocaleString("en-PH")}</td>
-                                                    <td className="px-2 py-2 text-center text-[#5F4E75]">{item.reference}</td>
-                                                </tr>;
-                                            })}</tbody>
-                                        </table>
+                                <div className="shrink-0 border-b border-[#E9E1EE] px-4 pb-4">
+                                    <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_auto]">
+                                        <label className="relative min-w-0"><span className="sr-only">Search sales inventory</span>
+                                            <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"/>
+                                            <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search product no., products, variants, or categories..." className="h-[44px] w-full rounded-xl border border-[#E3D8EA] bg-white pl-11 pr-4 text-sm text-[#1A1220] shadow-sm outline-none placeholder:text-[#9B8AAA] focus:border-[#2B174C]"/>
+                                        </label>
+                                        {canReceive && <button type="button" className="inline-flex h-[44px] items-center justify-center gap-2 rounded-xl border border-[#D9CDF0] bg-[#F5F0FF] px-5 text-sm font-semibold text-[#5330B6] shadow-sm transition hover:bg-[#ECE3FF]" onClick={()=>{setActionError("");setShowReceivingInfo(true);}}><PackagePlus size={16}/> Record Stock In{receivingTasks.length ? ` (${receivingTasks.length})` : ""}</button>}
                                     </div>
-                                )}
+                                </div>
+                                <div className="min-h-0 w-full flex-1 overflow-auto overscroll-contain" role="region" aria-label="Branch sales inventory list" tabIndex={0}>
+                                    <table className="w-full min-w-[760px] table-auto text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                                        <colgroup><col className="w-[14%]"/><col className="w-[24%]"/><col className="w-[12%]"/><col className="w-[10%]"/><col className="w-[9%]"/><col className="w-[10%]"/><col className="w-[10%]"/><col className="w-[11%]"/></colgroup>
+                                        <thead className="sticky top-0 z-10 bg-[#FFFCF8]"><tr className="border-b border-[#E9E1EE]">
+                                            {['Product No.','Product','Category','Available Stock','Reorder Point','Expiration','Status','Action'].map(label=><th key={label} className={headClass}>{label}</th>)}
+                                        </tr></thead>
+                                        <tbody>{visibleProducts.map(product=>{
+                                            const variants=product.hasVariants&&product.variants?.length?product.variants:[];
+                                            const expandable=variants.length>0;
+                                            const expanded=Boolean(expandedProductIds[product.id]);
+                                            const reorder=expandable?variants.reduce((sum,v)=>sum+Math.max(0,Number(v.alertLevel||0)),0):Math.max(0,Number(product.alertLevel||0));
+                                            const expirations=(expandable?variants.map(v=>v.expirationDate):[product.expirationDate]).filter((v):v is string=>!!v);
+                                            const expiration=expirations.map(v=>v.slice(0,10)).sort()[0]||null;
+                                            const sellableProduct={...product,
+                                                stock:product.sellableStock ?? product.stock,
+                                                variants:variants.map(v=>({...v,stock:v.sellableStock ?? v.stock}))};
+                                            const availableStock=expandable
+                                                ? variants.reduce((total,v)=>total+Number(v.sellableStock ?? v.stock),0)
+                                                : Number(product.sellableStock ?? product.stock);
+                                            return <React.Fragment key={product.id}>
+                                                <tr className={`h-12 border-b border-[#EFE8F2] text-[#2B174C] hover:bg-[#FFFCF8] ${expandable?'cursor-pointer':''}`}
+                                                    onClick={expandable?()=>setExpandedProductIds(old=>({...old,[product.id]:!old[product.id]})):undefined}>
+                                                    <td className="whitespace-nowrap py-2 px-4 text-left font-semibold">
+                                                        <div className="flex items-center justify-start gap-1.5">{expandable?<ChevronDown size={13} className={`shrink-0 transition ${expanded?'rotate-180':''}`}/>:<span className="inline-block w-[13px] shrink-0" aria-hidden="true"/>}<span>{product.productNumber||"—"}</span></div>
+                                                    </td>
+                                                    <td className="break-words px-2 py-2 font-semibold">{product.name}</td>
+                                                    <td className="break-words px-2 py-2 text-[#5F4E75]">{product.category||"—"}</td>
+                                                    <td className="px-2 py-2 text-center font-semibold">{availableStock.toLocaleString('en-PH')}</td>
+                                                    <td className="px-2 py-2 text-center text-[#5F4E75]">{reorder.toLocaleString('en-PH')}</td>
+                                                    <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(expiration)}</td>
+                                                    <td className="px-2 py-2 text-center">{staffInventoryStatusBadge(staffProductDisplayStatus(sellableProduct))}</td>
+                                                    <td className="px-2 py-2 text-center"><button type="button" disabled={!canRestock} aria-label={`Restock ${product.name}`}
+                                                                                                  title={canRestock?undefined:"Full Inventory access is required to restock."} className={staffRestockAction}
+                                                                                                  onClick={e=>{e.stopPropagation();openRestock(product);}}><PackagePlus size={11}/> Restock</button></td>
+                                                </tr>
+                                                {expandable&&expanded&&variants.map(variant=>{
+                                                    return <tr key={variant.id} className="h-12 border-b border-[#EFE8F2] bg-[#FCF9FF] text-[#2B174C]">
+                                                        <td className="whitespace-nowrap py-2 pr-4 pl-[35px] text-left text-[10px] font-semibold text-[#5F3D82]" title="Variant Number">{variant.variantNumber||"—"}</td>
+                                                        <td className="break-words px-2 py-2 pl-8 text-[10px] font-semibold text-[#5F3D82]">↳ {staffVariantDisplayName(variant.variantValues)}</td>
+                                                        <td className="px-2 py-2 text-[#8A7D90]">Variant</td>
+                                                        <td className="px-2 py-2 text-center font-semibold">{Number(variant.sellableStock ?? variant.stock ?? 0).toLocaleString('en-PH')}</td>
+                                                        <td className="px-2 py-2 text-center text-[#5F4E75]">{Number(variant.alertLevel||0).toLocaleString('en-PH')}</td>
+                                                        <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(variant.expirationDate)}</td>
+                                                        <td className="px-2 py-2 text-center">{staffInventoryStatusBadge(staffLineDisplayStatus(Number(variant.sellableStock ?? variant.stock),Number(variant.alertLevel),variant.expirationDate))}</td>
+                                                        <td className="px-2 py-2 text-center"><button type="button" disabled={!canRestock} aria-label={`Restock ${product.name} variant`} title={canRestock?undefined:"Full Inventory access is required to restock."} onClick={()=>openRestock(product)} className={staffRestockAction}><PackagePlus size={11}/> Restock</button></td>
+                                                    </tr>;
+                                                })}
+                                            </React.Fragment>;
+                                        })}</tbody>
+                                    </table>
+                                    {visibleProducts.length===0&&<p className="py-10 text-center text-sm text-[#806A8C]">No products match your search or filters.</p>}
+                                </div>
                             </section>
                         </div>
-                        {/* Same container, header, filters and search layout as the Manager Branch Inventory List (Staff actions only). */}
-                        <section id="staff-sales-list" className="overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
-                            <div className="flex flex-col gap-3 px-4 py-3.5 xl:flex-row xl:items-center xl:justify-between">
-                                <div className="flex items-start gap-3">
-                                    <span className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]"><Package size={18}/></span>
-                                    <div>
-                                        <h2 className="text-[15px] font-bold text-[#21132E]">Branch Sales Inventory List</h2>
-                                        <p className="mt-0.5 text-[11px] text-[#86778F]">Products available for daily stock operations · {branch}</p>
-                                    </div>
-                                </div>
-                                <div className="flex flex-wrap items-center gap-2">
-                                    <StaffInventoryFilterSelect containerClassName="w-[168px]" aria-label="Filter categories" value={category} onChange={e=>setCategory(e.target.value)}>
-                                        <option value="all">All Categories</option>{categories.map(cat=><option key={cat} value={cat}>{cat}</option>)}
-                                    </StaffInventoryFilterSelect>
-                                    <StaffInventoryFilterSelect containerClassName="w-[140px]" aria-label="Filter stock statuses" value={status} onChange={e=>setStatus(e.target.value)}>
-                                        <option value="all">All Status</option>{["In Stock","Low Stock","Out of Stock","Expiring Soon","Expired"].map(value=><option key={value} value={value}>{value}</option>)}
-                                    </StaffInventoryFilterSelect>
-                                </div>
-                            </div>
-                            <div className="border-b border-[#E9E1EE] px-4 pb-4">
-                                <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_auto]">
-                                    <label className="relative min-w-0"><span className="sr-only">Search sales inventory</span>
-                                        <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]"/>
-                                        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search product no., products, variants, or categories..." className="h-[44px] w-full rounded-xl border border-[#E3D8EA] bg-white pl-11 pr-4 text-sm text-[#1A1220] shadow-sm outline-none placeholder:text-[#9B8AAA] focus:border-[#2B174C]"/>
-                                    </label>
-                                    {canReceive && <button type="button" className="inline-flex h-[44px] items-center justify-center gap-2 rounded-xl border border-[#D9CDF0] bg-[#F5F0FF] px-5 text-sm font-semibold text-[#5330B6] shadow-sm transition hover:bg-[#ECE3FF]" onClick={()=>{setActionError("");setShowReceivingInfo(true);}}><PackagePlus size={16}/> Record Stock In{receivingTasks.length ? ` (${receivingTasks.length})` : ""}</button>}
-                                </div>
-                            </div>
-                            <div className="max-h-[360px] w-full overflow-y-auto overflow-x-auto overscroll-contain" role="region" aria-label="Branch sales inventory list" tabIndex={0}>
-                                <table className="w-full min-w-0 table-auto text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-                                    <colgroup><col className="w-[14%]"/><col className="w-[24%]"/><col className="w-[12%]"/><col className="w-[10%]"/><col className="w-[9%]"/><col className="w-[10%]"/><col className="w-[10%]"/><col className="w-[11%]"/></colgroup>
-                                    <thead className="sticky top-0 z-10 bg-[#FFFCF8]"><tr className="border-b border-[#E9E1EE]">
-                                        {['Product No.','Product','Category','Available Stock','Reorder Point','Expiration','Status','Action'].map(label=><th key={label} className={headClass}>{label}</th>)}
-                                    </tr></thead>
-                                    <tbody>{visibleProducts.map(product=>{
-                                        const variants=product.hasVariants&&product.variants?.length?product.variants:[];
-                                        const expandable=variants.length>0;
-                                        const expanded=Boolean(expandedProductIds[product.id]);
-                                        const reorder=expandable?variants.reduce((sum,v)=>sum+Math.max(0,Number(v.alertLevel||0)),0):Math.max(0,Number(product.alertLevel||0));
-                                        const expirations=(expandable?variants.map(v=>v.expirationDate):[product.expirationDate]).filter((v):v is string=>!!v);
-                                        const expiration=expirations.map(v=>v.slice(0,10)).sort()[0]||null;
-                                        const sellableProduct={...product,
-                                            stock:product.sellableStock ?? product.stock,
-                                            variants:variants.map(v=>({...v,stock:v.sellableStock ?? v.stock}))};
-                                        const availableStock=expandable
-                                            ? variants.reduce((total,v)=>total+Number(v.sellableStock ?? v.stock),0)
-                                            : Number(product.sellableStock ?? product.stock);
-                                        return <React.Fragment key={product.id}>
-                                            <tr className={`h-12 border-b border-[#EFE8F2] text-[#2B174C] hover:bg-[#FFFCF8] ${expandable?'cursor-pointer':''}`}
-                                                onClick={expandable?()=>setExpandedProductIds(old=>({...old,[product.id]:!old[product.id]})):undefined}>
-                                                <td className="whitespace-nowrap py-2 px-4 text-left font-semibold">
-                                                    <div className="flex items-center justify-start gap-1.5">{expandable?<ChevronDown size={13} className={`shrink-0 transition ${expanded?'rotate-180':''}`}/>:<span className="inline-block w-[13px] shrink-0" aria-hidden="true"/>}<span>{product.productNumber||"—"}</span></div>
-                                                </td>
-                                                <td className="break-words px-2 py-2 font-semibold">{product.name}</td>
-                                                <td className="break-words px-2 py-2 text-[#5F4E75]">{product.category||"—"}</td>
-                                                <td className="px-2 py-2 text-center font-semibold">{availableStock.toLocaleString('en-PH')}</td>
-                                                <td className="px-2 py-2 text-center text-[#5F4E75]">{reorder.toLocaleString('en-PH')}</td>
-                                                <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(expiration)}</td>
-                                                <td className="px-2 py-2 text-center">{staffInventoryStatusBadge(staffProductDisplayStatus(sellableProduct))}</td>
-                                                <td className="px-2 py-2 text-center"><button type="button" disabled={!canRestock} aria-label={`Restock ${product.name}`}
-                                                                                              title={canRestock?undefined:"Full Inventory access is required to restock."} className={staffRestockAction}
-                                                                                              onClick={e=>{e.stopPropagation();openRestock(product);}}><PackagePlus size={11}/> Restock</button></td>
-                                            </tr>
-                                            {expandable&&expanded&&variants.map(variant=>{
-                                                return <tr key={variant.id} className="h-12 border-b border-[#EFE8F2] bg-[#FCF9FF] text-[#2B174C]">
-                                                    <td className="whitespace-nowrap py-2 pr-4 pl-[35px] text-left text-[10px] font-semibold text-[#5F3D82]" title="Variant Number">{variant.variantNumber||"—"}</td>
-                                                    <td className="break-words px-2 py-2 pl-8 text-[10px] font-semibold text-[#5F3D82]">↳ {staffVariantDisplayName(variant.variantValues)}</td>
-                                                    <td className="px-2 py-2 text-[#8A7D90]">Variant</td>
-                                                    <td className="px-2 py-2 text-center font-semibold">{Number(variant.sellableStock ?? variant.stock ?? 0).toLocaleString('en-PH')}</td>
-                                                    <td className="px-2 py-2 text-center text-[#5F4E75]">{Number(variant.alertLevel||0).toLocaleString('en-PH')}</td>
-                                                    <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(variant.expirationDate)}</td>
-                                                    <td className="px-2 py-2 text-center">{staffInventoryStatusBadge(staffLineDisplayStatus(Number(variant.sellableStock ?? variant.stock),Number(variant.alertLevel),variant.expirationDate))}</td>
-                                                    <td className="px-2 py-2 text-center"><button type="button" disabled={!canRestock} aria-label={`Restock ${product.name} variant`} title={canRestock?undefined:"Full Inventory access is required to restock."} onClick={()=>openRestock(product)} className={staffRestockAction}><PackagePlus size={11}/> Restock</button></td>
-                                                </tr>;
-                                            })}
-                                        </React.Fragment>;
-                                    })}</tbody>
-                                </table>
-                                {visibleProducts.length===0&&<p className="py-10 text-center text-sm text-[#806A8C]">No products match your search or filters.</p>}
-                            </div>
-                        </section>
                     </div>}
         </main>
         {showActivityHistory && !isRental && <div className="fixed inset-0 z-[95] flex items-center justify-center bg-[#21132E]/50 p-4"
@@ -984,9 +876,6 @@ export default function StaffInventory() {
                                 <div><div className="text-xs text-[#806A8C]">Available After Receiving</div>
                                     <div className="mt-1 text-xl font-bold text-[#2B174C]">{restockNeedsReconciliation ? "—" : (restockAvailableBefore + restockTotal).toLocaleString("en-PH")}</div></div>
                             </div>
-                            {restockNeedsReconciliation && <p role="alert" className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
-                                Some recorded stock is not currently sellable in this branch (for example expired batches). Ask your Manager to reconcile the records; newly received units are still added.
-                            </p>}
                         </div>
                         <section className="space-y-3">
                             <h3 className="text-sm font-bold text-[#21132E]">{restockTarget.hasVariants ? "Variants to Restock" : "Stock to Receive"}</h3>

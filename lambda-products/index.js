@@ -2506,6 +2506,7 @@ function buildOwnerInventoryPerformance({dateFrom, dateTo, asOfDate, storeName, 
     const orders = new Map();
     const consumables = new Map();
     const branchConsumables = new Map();
+    const branchVariantUnits = new Map();
     const branchRentals = new Map();
     const branchTotals = new Map();
     const trendTotals = new Map();
@@ -2580,6 +2581,21 @@ function buildOwnerInventoryPerformance({dateFrom, dateTo, asOfDate, storeName, 
             if (!validQuantity || salesCents === null || unitCostCents === null) detail.costKnown = false;
             else detail.profitCents += salesCents - Math.round(Number(item.costPriceAtSale) * quantity * 100);
             branchConsumables.set(branchKey, detail);
+            // Preserve actual recorded variant identity, including historical/archived variants.
+            // Never allocate a product total to a variant based on today's catalog.
+            if (item.variantId != null && item.productId != null) {
+                const productId = Number(item.productId);
+                const variantId = Number(item.variantId);
+                if (Number.isSafeInteger(productId) && productId > 0 && Number.isSafeInteger(variantId) && variantId > 0) {
+                    const variantKey = `${branchId}:${productId}:${variantId}`;
+                    const variant = branchVariantUnits.get(variantKey) || {branchId, productId, variantId, unitsSold: 0, unitsKnown: true};
+                    if (Number.isSafeInteger(quantity) && quantity > 0) {
+                        variant.unitsSold += quantity;
+                        if (!Number.isSafeInteger(variant.unitsSold)) variant.unitsKnown = false;
+                    } else variant.unitsKnown = false;
+                    branchVariantUnits.set(variantKey, variant);
+                }
+            }
             if (validQuantity) product.unitsSold += quantity;
             if (salesCents !== null) {
                 product.cents += salesCents;
@@ -2665,6 +2681,10 @@ function buildOwnerInventoryPerformance({dateFrom, dateTo, asOfDate, storeName, 
             sales: item.salesKnown ? item.cents / 100 : null,
             grossProfit: item.salesKnown && item.costKnown ? item.profitCents / 100 : null,
         })),
+        branchVariantUnits: posAvailable ? [...branchVariantUnits.values()].map(item => ({
+            branchId: item.branchId, productId: item.productId, variantId: item.variantId,
+            unitsSold: item.unitsKnown ? item.unitsSold : null,
+        })) : null,
         rentalCosting: rentalReport.rentalCosting || null,
         branchRentals: [...branchRentals.values()].map(item => ({
             branchId: item.branchId, key: item.key, revenue: item.cents / 100,
@@ -2715,7 +2735,7 @@ async function loadOwnerInventoryPerformance(connection, {storeId, branchId, dat
     const [salesRows] = await connection.execute(
         `SELECT o.order_number AS orderId,o.branch_id AS branchId,b.branch_name AS branchName,
                 DATE_FORMAT(o.order_date,'%Y-%m-%d') AS orderDate,o.total AS orderTotal,
-                oi.id AS itemId,oi.product_id AS productId,
+                oi.id AS itemId,oi.product_id AS productId,oi.catalog_variant_id AS variantId,
                 oi.product_name AS productName,oi.quantity AS quantity,
                 oi.line_total AS lineTotal,oi.cost_price_at_sale AS costPriceAtSale
          FROM orders o LEFT JOIN branches b ON b.id=o.branch_id AND b.store_id=o.store_id
@@ -2739,11 +2759,11 @@ async function loadOwnerInventoryPerformance(connection, {storeId, branchId, dat
         `SELECT b.branch_id AS branchId, bki.equipment_id AS equipmentId,
                 SUM(bki.quantity) AS unitsRented
          FROM booking_items bki
-         JOIN bookings b ON b.id=bki.booking_id AND b.store_id=bki.store_id
+                  JOIN bookings b ON b.id=bki.booking_id AND b.store_id=bki.store_id
          WHERE b.store_id=? AND bki.item_type='rental'
            AND bki.equipment_id IS NOT NULL
            AND bki.released_at >= ? AND bki.released_at < DATE_ADD(?, INTERVAL 1 DAY)
-           ${branchId ? "AND b.branch_id=?" : ""}
+             ${branchId ? "AND b.branch_id=?" : ""}
          GROUP BY b.branch_id,bki.equipment_id`,
         [storeId,dateFrom,dateTo,...(branchId ? [branchId] : [])]);
     const branchRentalUnits = releasedRows.map(row => {

@@ -6,8 +6,11 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
 import {
     AlertTriangle,
     BarChart3,
-    Box,
+    PieChart,
     CalendarClock,
+    CalendarDays,
+    ChevronLeft,
+    ChevronRight,
     ArrowRight,
     Info,
     PackageX,
@@ -22,16 +25,6 @@ import type { ExportContext, ExportTable } from "./_shared";
 
 // Keep the very large Reports/_shared module out of the initial dashboard bundle.
 // It is loaded only if the user actually exports a dashboard table.
-function exportTableAsPdf(
-    table: ExportTable,
-    context: ExportContext,
-    filenamePrefix: string,
-) {
-    void import("./_shared")
-        .then((module) => module.exportTableAsPdf(table, context, filenamePrefix))
-        .catch((error) => console.error("Dashboard PDF export failed:", error));
-}
-
 function exportTableAsExcel(
     table: ExportTable,
     context: ExportContext,
@@ -69,6 +62,8 @@ type Booking = {
     branch_name?: string | null;
     name: string;
     date?: string;
+    reservationDate?: string;
+    eventEndDate?: string;
     createdAt?: string;
     time?: string;
     status?: string;
@@ -340,6 +335,8 @@ function normalizeBooking(value: unknown): Booking {
             "created_at",
             "createdAt",
         ]),
+        reservationDate: readText(raw, ["eventDate", "event_date", "date"]),
+        eventEndDate: readText(raw, ["eventEndDate", "event_end_date"]),
         createdAt: readText(raw, ["createdAt", "created_at"]),
         time: readText(raw, [
             "time",
@@ -1231,17 +1228,38 @@ function ManagerForecastSkeleton() {
 
 function ManagerDashboardSkeleton() {
     return <div className="space-y-4 animate-pulse" role="status" aria-label="Loading manager dashboard">
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">{[0,1,2,3].map(item=><ManagerMetricSkeleton key={item}/>)}</div>
-        <div className="h-[280px] rounded-2xl border border-[#E9E0EF] bg-white p-4 shadow-sm"><ManagerSkeletonBar className="h-4 w-36"/><div className="mt-6 flex h-[185px] items-end justify-around gap-4">{[40,25,70,52,62,90].map((h,i)=><div key={i} className="w-[8%] rounded-t-md bg-[#EEE8F3]" style={{height:`${h}%`}}/>)}</div></div>
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3">{[0,1,2].map(item=><ManagerAttentionSkeleton key={item}/>)}</div>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">{[0,1,2,3].map(item=><div key={item} className={managerKpiCardClass}><span className="h-12 w-12 shrink-0 rounded-xl bg-[#EEE8F3]"/><span className="min-w-0 flex-1 space-y-2"><span className="block h-3.5 w-24 rounded bg-[#EEE8F3]"/><span className="block h-7 w-12 rounded bg-[#EEE8F3]"/></span></div>)}</div>
+        <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-2">
+            <div className="flex min-w-0 flex-col gap-3">
+                <div className={`${managerPanelClass} min-h-[220px] p-4`}><ManagerSkeletonBar className="h-4 w-40"/><div className="mt-5 flex flex-wrap items-center gap-4"><div className="mx-auto h-[132px] w-[132px] rounded-full border-[22px] border-[#EEE8F3]"/><div className="min-w-[120px] flex-1 space-y-2">{[0,1,2,3].map(i=><ManagerSkeletonBar key={i} className="h-6 w-full"/>)}</div></div></div>
+                <div className={`${managerPanelClass} min-h-[200px] flex-1 p-4`}><ManagerSkeletonBar className="h-4 w-40"/><div className="mt-6 space-y-5">{[0,1,2].map(row=><ManagerSkeletonBar key={row} className="h-3 w-full"/>)}</div></div>
+            </div>
+            <div className={`${managerPanelClass} flex min-h-[360px] flex-col p-4`}><ManagerSkeletonBar className="h-4 w-40"/><div className="mt-5 grid flex-1 grid-cols-7 gap-1">{Array.from({length:35},(_,i)=><div key={i} className="min-h-9 rounded-md bg-[#F1EDF4]"/>)}</div><ManagerSkeletonBar className="mt-3 h-4 w-32"/><ManagerSkeletonBar className="mt-3 h-3 w-full"/></div>
+        </div>
+        <div className={`${managerPanelClass} min-h-[270px] p-4`}><ManagerSkeletonBar className="h-4 w-36"/><div className="mt-5 flex h-[150px] items-end justify-around gap-4">{[40,25,70,52,62,90].map((h,i)=><div key={i} className="w-[8%] rounded-t-md bg-[#EEE8F3]" style={{height:`${h}%`}}/>)}</div></div>
     </div>;
 }
+
+// Manager dashboard visual tokens match the Owner dashboard and booking KPI cards.
+const managerKpiCardClass = "flex min-h-[108px] min-w-0 w-full items-center gap-3 rounded-[16px] border border-[#E6DDF0] bg-white px-3.5 py-3 text-left shadow-sm transition hover:border-[#B6A1D4] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#7651BA]";
+const managerDashboardTones = {
+    purple: "bg-[#F3EBFF] text-[#6C3AD6]",
+    green: "bg-[#EAF7F0] text-[#25865B]",
+    amber: "bg-[#FFF7E9] text-[#B7832E]",
+    blue: "bg-[#E8F1FF] text-[#2169CF]",
+    indigo: "bg-[#ECEEFF] text-[#4F57C5]",
+    teal: "bg-[#E5F7F5] text-[#147D77]",
+    rose: "bg-[#FCECF1] text-[#B74470]",
+    orange: "bg-[#FFF0E5] text-[#C36A28]",
+    cyan: "bg-[#E7F5FB] text-[#237C9B]",
+} as const;
+type ManagerDashboardTone = keyof typeof managerDashboardTones;
+const managerPanelClass = "min-w-0 rounded-2xl border border-[#E7DFEC] bg-white shadow-sm";
 
 // Dashboard-only projections of the existing branch-scoped APIs.
 const MD_BOOKING_STAGES = ["Pending", "Approved", "Confirmed", "Preparing", "Released", "Completed"] as const;
 type MDStage = typeof MD_BOOKING_STAGES[number];
 type MDAlert = { key: string; product: string; status: string };
-type MDSettlement = { booking: Booking; refund: string };
 function mdStatus(booking: Booking) { return String(booking.status || "").trim().toLowerCase(); }
 function mdStage(booking: Booking): MDStage | null {
     switch (mdStatus(booking)) {
@@ -1260,26 +1278,21 @@ function mdBookingDay(value?: string) {
     const date = new Date(raw);
     return Number.isNaN(date.getTime()) ? "" : mdLocalDay(date);
 }
-function mdBookingAction(booking: Booking) {
-    if (mdStage(booking) === "Pending") {
-        return Number(booking.agreed_price ?? booking.agreedPrice ?? 0) > 0 ? "Approve" : "Set Price";
+function mdBookingStatusLabel(booking: Booking) {
+    switch (mdStatus(booking)) {
+        case "pending": return "Pending";
+        case "pending review": return "Pending Review";
+        case "approved": return "Approved";
+        case "awaiting down payment": return "Awaiting Down Payment";
+        case "pending settlement": return "Pending Settlement";
+        default: return mdStage(booking) || "Unknown";
     }
-    if (mdStage(booking) === "Approved") {
-        const required = booking.requiredDownPayment;
-        const paid = Number(booking.amount_paid ?? booking.amountPaid ?? 0);
-        return required != null && paid + 0.005 >= required ? "Confirm" : "Review";
-    }
-    return "Review";
+}
+function mdBookingStatusColor(booking: Booking) {
+    return mdStage(booking) === "Approved" ? "text-[#2169CF]" :
+        mdStatus(booking) === "pending settlement" ? "text-[#C36A28]" : "text-[#A66A00]";
 }
 function mdReference(booking: Booking) { return booking.bookingNumber || `#${booking.id}`; }
-function mdRefundLabel(statement: unknown) {
-    const raw = toRecord(statement);
-    const held = readNullableNumber(raw, ["depositHeld"]);
-    const claimBalance = readNullableNumber(raw, ["claimBalance"]);
-    if (held === null || held < 0 || claimBalance === null || claimBalance < 0) return "—";
-    if (claimBalance > 0.005) return "Review";
-    return `Up to ${held.toLocaleString("en-PH", { style: "currency", currency: "PHP" })}`;
-}
 function mdRentalAlerts(equipment: unknown[]): MDAlert[] {
     return equipment.flatMap((value, index) => {
         const item = toRecord(value);
@@ -1296,39 +1309,236 @@ function mdRentalAlerts(equipment: unknown[]): MDAlert[] {
         return status ? [{ key: `rental-${readText(item, ["id"], String(index))}`, product: readText(item, ["name"], "Rental equipment"), status }] : [];
     });
 }
+function mdUnderRepairCount(equipment: unknown[]): number {
+    return equipment.reduce<number>((count, value) => {
+        const item = toRecord(value);
+        if (item.active === false || item.active === 0) return count;
+        const maintenance = readNullableNumber(item, ["maintenanceUnits"]);
+        return count + ((maintenance ?? 0) > 0 ? 1 : 0);
+    }, 0);
+}
+
 function mdAlertClass(status: string) {
     return ["Out of Stock", "Unavailable", "Expired"].includes(status) ? "text-[#D52B2B]" :
         ["Low Stock", "Low Availability", "Very Low Stock", "Expiring Soon"].includes(status) ? "text-[#A66A00]" : "text-[#6D35D4]";
 }
 
-type MDTableRow = { key: string; left: string; right: string; href?: string; statusColor?: string };
-function MDCompactPanel({ title, icon, headers, rows, unavailable, empty, onViewAll, onExport, onNavigate }: {
-    title: string; icon: React.ReactNode; headers: [string, string]; rows: MDTableRow[];
-    unavailable: boolean; empty: string; onViewAll: () => void; onExport: () => void; onNavigate: (href: string) => void;
+type MDTableRow = { key: string; left: string; right: string; statusColor?: string };
+function MDCompactPanel({ title, description, icon, tone, headers, rows, unavailable, empty, onViewAll }: {
+    title: string; description: string; icon: React.ReactNode; tone: ManagerDashboardTone; headers: [string, string]; rows: MDTableRow[];
+    unavailable: boolean; empty: string; onViewAll: () => void;
 }) {
-    return <section className="flex min-h-[280px] min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E9E0EF] bg-white shadow-sm">
-        <div className="flex items-center justify-between gap-2 px-4 py-3.5">
-            <div className="flex min-w-0 items-center gap-2.5"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]">{icon}</span><h2 className="text-[15px] font-bold leading-5 text-[#1A1220]">{title}</h2></div>
-            <button type="button" aria-label={`Download ${title} PDF`} title={`Download ${title} PDF`} onClick={onExport} disabled={unavailable} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF] disabled:opacity-40"><MdDownload size={17}/></button>
+    return <section className={`${managerPanelClass} flex min-h-[200px] flex-1 flex-col overflow-hidden`}>
+        <div className="flex min-h-[56px] min-w-0 items-center gap-2.5 px-4 pt-3.5">
+            <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] ${managerDashboardTones[tone]}`} aria-hidden="true">{icon}</span>
+            <div className="min-w-0 flex-1">
+                <h2 className="break-words text-[15px] font-bold leading-5 text-[#1A1220]">{title}</h2>
+                <p className="mt-0.5 text-[11px] leading-4 text-[#86778F]">{description}</p>
+            </div>
         </div>
-        <div className="flex-1 overflow-x-auto"><table className="w-full table-fixed text-[11px]">
-            <thead className="border-y border-[#EEE7F2] bg-[#FFFCF8] text-[10px] font-semibold uppercase text-[#806A8C]"><tr><th className="w-[56%] px-4 py-3 text-left font-semibold">{headers[0]}</th><th className="px-4 py-3 text-right font-semibold">{headers[1]}</th></tr></thead>
-            <tbody>{rows.map(row => <tr key={row.key} className="border-b border-[#EFE8F2] last:border-b-0 hover:bg-[#FFFCF7]"><td className="break-words px-4 py-3 font-medium text-[#2B174C]">{row.left}</td><td className={`break-words px-4 py-3 text-right font-semibold ${row.statusColor || "text-[#6D35D4]"}`}>{row.href ? <button type="button" onClick={() => onNavigate(row.href!)} className="hover:underline focus-visible:outline-[#6D35D4]">{row.right}</button> : row.right}</td></tr>)}
-            {!rows.length && <tr><td colSpan={2} className="px-4 py-10 text-center text-[#8A7D92]">{unavailable ? "Data unavailable. Refresh to try again." : empty}</td></tr>}</tbody>
+        <div className="mt-3 max-h-[180px] min-h-0 flex-1 overflow-auto"><table className="w-full table-fixed text-[11px]">
+            <thead className="bg-[#FFFCF7] text-[10px] font-semibold uppercase text-[#806A8C]"><tr><th className="w-[56%] px-3 py-2 text-left font-semibold">{headers[0]}</th><th className="px-3 py-2 text-right font-semibold">{headers[1]}</th></tr></thead>
+            <tbody>{rows.map(row => <tr key={row.key} className="border-t border-[#F1ECF4]"><td className="break-words px-3 py-2 font-semibold text-[#392648]">{row.left}</td><td className={`break-words px-3 py-2 text-right font-semibold ${row.statusColor || "text-[#6D35D4]"}`}>{row.right}</td></tr>)}
+            {!rows.length && <tr><td colSpan={2} className="h-[76px] px-4 text-center text-[#86778F]">{unavailable ? "Data unavailable. Refresh to try again." : empty}</td></tr>}</tbody>
         </table></div>
-        <div className="flex items-center justify-end gap-2 border-t border-[#EEE7F2] px-4 py-2.5 text-[11px]"><button type="button" onClick={onViewAll} className="font-semibold text-[#6D35D4] hover:underline">View all</button></div>
+        <button type="button" onClick={onViewAll} className="border-t border-[#F1ECF4] px-4 py-2 text-right text-[11px] font-semibold text-[#6D35D4] hover:bg-[#FAF7FE]">View all</button>
     </section>;
 }
-function MDBookingOverview({ counts, unavailable, onExport }: { counts: Record<MDStage, number>; unavailable: boolean; onExport: () => void }) {
+type MDPieSlice = {
+    key: string;
+    label: string;
+    value: number;
+    color: string;
+    bg: string;
+};
+
+function MDInventoryAlertsPie({ slices, unavailable, onViewAll }: {
+    slices: MDPieSlice[];
+    unavailable: boolean;
+    onViewAll: () => void;
+}) {
+    const total = slices.reduce((sum, slice) => sum + slice.value, 0);
+    const radius = 54;
+    const circumference = 2 * Math.PI * radius;
+    const segments = slices.map((slice, index) => {
+        const previousTotal = slices.slice(0, index).reduce((sum, previous) => sum + previous.value, 0);
+        return {
+            ...slice,
+            length: total > 0 ? (slice.value / total) * circumference : 0,
+            offset: total > 0 ? (previousTotal / total) * circumference : 0,
+        };
+    }).filter(slice => slice.value > 0);
+
+    return <section className={`${managerPanelClass} flex min-h-[220px] shrink-0 flex-col overflow-hidden`}>
+        <div className="flex min-h-[56px] min-w-0 items-center gap-2.5 px-4 pt-3.5">
+            <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] ${managerDashboardTones.rose}`} aria-hidden="true"><PieChart size={18}/></span>
+            <div className="min-w-0 flex-1">
+                <h2 className="break-words text-[15px] font-bold leading-5 text-[#1A1220]">Inventory Alert Summary</h2>
+                <p className="mt-0.5 text-[11px] leading-4 text-[#86778F]">Alert distribution for consumable inventory items</p>
+            </div>
+        </div>
+        <div className="mt-2 flex min-h-0 flex-1 flex-col px-4 pb-3">
+            {unavailable ? <p className="flex flex-1 items-center justify-center text-center text-xs text-[#8A7D92]">Inventory alert summary unavailable.</p> : total === 0 ? <p className="flex flex-1 items-center justify-center text-center text-xs text-[#8A7D92]">No inventory alerts.</p> : <div className="flex flex-1 flex-col justify-center gap-3 sm:flex-row sm:items-center">
+                <div className="mx-auto flex shrink-0 items-center justify-center">
+                    <div className="relative h-[132px] w-[132px]">
+                        <svg viewBox="0 0 160 160" className="h-full w-full -rotate-90" aria-label={slices.map(slice => `${slice.label}: ${slice.value}`).join(', ')} role="img">
+                            <circle cx="80" cy="80" r={radius} fill="none" stroke="#F2ECF6" strokeWidth="22" />
+                            {segments.map(segment => (
+                                <circle key={segment.key} cx="80" cy="80" r={radius} fill="none" stroke={segment.color} strokeWidth="22" strokeLinecap="butt" strokeDasharray={`${segment.length} ${circumference - segment.length}`} strokeDashoffset={-segment.offset} />
+                            ))}
+                        </svg>
+                        <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+                            <span className="text-[9px] font-medium uppercase tracking-[0.08em] text-[#86778F]">Alerts</span>
+                            <span className="mt-1 text-[24px] font-bold leading-none text-[#1A1220]">{total}</span>
+                        </div>
+                    </div>
+                </div>
+                <div className="grid min-w-0 flex-1 grid-cols-1 gap-1.5">
+                    {slices.map(slice => <div key={slice.key} className={`flex items-center justify-between rounded-xl border border-[#EFE7F4] ${slice.bg} px-3 py-1`}>
+                        <div className="flex min-w-0 items-center gap-2.5">
+                            <span className="h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: slice.color }} aria-hidden="true" />
+                            <span className="truncate text-[12px] font-medium text-[#392648]">{slice.label}</span>
+                        </div>
+                        <span className="ml-3 text-[13px] font-bold text-[#1A1220]">{slice.value}</span>
+                    </div>)}
+                </div>
+            </div>}
+        </div>
+        <button type="button" onClick={onViewAll} className="border-t border-[#F1ECF4] px-4 py-2 text-right text-[11px] font-semibold text-[#6D35D4] hover:bg-[#FAF7FE]">View all</button>
+    </section>;
+}
+
+function MDBookingOverview({ counts, unavailable }: { counts: Record<MDStage, number>; unavailable: boolean }) {
     const max = Math.max(1, ...MD_BOOKING_STAGES.map(stage => counts[stage]));
     const step = Math.max(1, Math.ceil(max / 4));
     const axisMax = step * 4;
-    return <section className="min-w-0 rounded-2xl border border-[#E9E0EF] bg-white shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3.5"><div className="flex items-center gap-2.5"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#F1EBFF] text-[#6D35D4]"><BarChart3 size={19}/></span><h2 className="text-[15px] font-bold text-[#1A1220]">Booking Overview</h2></div><div className="flex items-center gap-2"><span className="rounded-xl border border-[#E6DDF0] px-3 py-2 text-xs font-semibold text-[#2B174C]">This Month</span><button type="button" aria-label="Download Booking Overview PDF" title="Download Booking Overview PDF" onClick={onExport} disabled={unavailable} className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#E6DDF0] text-[#6D35D4] hover:bg-[#F7F1FF] disabled:opacity-40"><MdDownload size={17}/></button></div></div>
-        {unavailable ? <p className="flex h-[220px] items-center justify-center text-xs text-[#8A7D92]">Booking overview unavailable.</p> : <div className="overflow-x-auto px-4 pb-4"><div className="min-w-[420px]"><div className="relative h-[185px] pl-9" role="img" aria-label={`This month by event date: ${MD_BOOKING_STAGES.map(stage => `${stage} ${counts[stage]}`).join(", ")}`}>
+    return <section className={`${managerPanelClass} flex min-h-[270px] flex-col p-4`}>
+        <div className="flex min-w-0 items-center gap-2.5">
+            <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] ${managerDashboardTones.indigo}`} aria-hidden="true"><BarChart3 size={18}/></span>
+            <div className="min-w-0 flex-1">
+                <h2 className="text-[15px] font-bold leading-5 text-[#1A1220]">Booking Overview</h2>
+                <p className="mt-0.5 text-[11px] leading-4 text-[#86778F]">Booking status breakdown for the current month</p>
+            </div>
+        </div>
+        {unavailable ? <p className="flex min-h-[150px] flex-1 items-center justify-center text-xs text-[#8A7D92]">Booking overview unavailable.</p> : <div className="flex min-h-0 flex-1 flex-col overflow-x-auto px-1 pb-1 pt-5"><div className="flex min-w-[420px] flex-1 flex-col"><div className="relative min-h-[150px] flex-1 pl-9" role="img" aria-label={`This month by event date: ${MD_BOOKING_STAGES.map(stage => `${stage} ${counts[stage]}`).join(", ")}. Released includes return inspection and pending settlement.`}>
             {[0,1,2,3,4].map(tick => <div key={tick} className="pointer-events-none absolute left-9 right-0 flex items-center border-t border-[#EEE7F2]" style={{bottom: `${tick * 25}%`}}><span className="absolute right-full mr-2 -translate-y-1/2 text-[10px] text-[#806A8C]">{tick * step}</span></div>)}
-            <div className="relative flex h-full items-end justify-around gap-2">{MD_BOOKING_STAGES.map(stage => <div key={stage} className="relative flex h-full min-w-0 flex-1 items-end justify-center"><div className="relative w-[54%] max-w-[70px] rounded-t-md bg-[#9670D9] transition-all" style={{height: `${counts[stage] / axisMax * 100}%`}} title={`${stage}: ${counts[stage]}`}><span className="absolute bottom-full left-1/2 mb-1 -translate-x-1/2 text-[11px] font-semibold text-[#2B174C]">{counts[stage]}</span></div></div>)}</div>
-        </div><div className="ml-9 flex justify-around gap-2 pt-2">{MD_BOOKING_STAGES.map(stage => <span key={stage} className="min-w-0 flex-1 text-center text-[10px] text-[#806A8C]">{stage}</span>)}</div></div><p className="mt-3 text-center text-[10px] text-[#8A7D92]">Released includes return inspection and pending settlement.</p></div>}
+            <div className="absolute inset-y-0 left-9 right-0 flex items-end justify-around gap-2">{MD_BOOKING_STAGES.map(stage => <div key={stage} className="relative flex h-full min-w-0 flex-1 items-end justify-center"><div className="relative w-[54%] max-w-[70px] rounded-t-md bg-[#9670D9] transition-all" style={{height: `${counts[stage] / axisMax * 100}%`}} title={`${stage}: ${counts[stage]}${stage === "Released" ? " (includes return inspection and pending settlement)" : ""}`}><span className="absolute bottom-full left-1/2 mb-1 -translate-x-1/2 text-[11px] font-semibold text-[#2B174C]">{counts[stage]}</span></div></div>)}</div>
+        </div><div className="ml-9 flex shrink-0 justify-around gap-2 pt-2">{MD_BOOKING_STAGES.map(stage => <span key={stage} className="min-w-0 flex-1 text-center text-[10px] text-[#806A8C]">{stage}</span>)}</div></div></div>}
+    </section>;
+}
+
+// Event-date calendar, independent of the current-month Booking Overview chart.
+// Use UTC for calendar arithmetic on date-only values, with Manila's date as today.
+function mdCalendarDate(value?: string): string {
+    const raw = String(value || "").trim();
+    const match = /^(\d{4}-\d{2}-\d{2})(?:$|[ T])/.exec(raw);
+    if (!match) return "";
+    const date = new Date(`${match[1]}T00:00:00Z`);
+    return Number.isFinite(date.getTime()) && date.toISOString().slice(0,10) === match[1] ? match[1] : "";
+}
+function mdCalendarMonthShift(month: string, offset: number) {
+    const date = new Date(`${month}-01T00:00:00Z`);
+    date.setUTCMonth(date.getUTCMonth() + offset);
+    return date.toISOString().slice(0,7);
+}
+function mdCalendarLabel(day: string, options: Intl.DateTimeFormatOptions) {
+    return new Date(`${day}T00:00:00Z`).toLocaleDateString("en-US", {...options, timeZone:"UTC"});
+}
+function mdCalendarDays(month: string): (string | null)[] {
+    const first = new Date(`${month}-01T00:00:00Z`);
+    const next = new Date(`${mdCalendarMonthShift(month,1)}-01T00:00:00Z`);
+    const days = Math.round((next.getTime()-first.getTime()) / 86_400_000);
+    const offset = first.getUTCDay();
+    const cellCount = Math.ceil((offset+days)/7)*7;
+    return Array.from({length:cellCount},(_,i)=>i<offset || i>=offset+days ? null : `${month}-${String(i-offset+1).padStart(2,"0")}`);
+}
+function mdCalendarBookings(bookings: Booking[], days: (string|null)[]) {
+    const result: Record<string, Booking[]> = {};
+    for (const day of days) if(day) result[day]=[];
+    for (const booking of bookings) {
+        // Pending/approved requests are shown with their actual status; cancelled bookings are excluded.
+        if (!mdStage(booking)) continue;
+        const start=mdCalendarDate(booking.reservationDate);
+        if (!start) continue;
+        const end=mdCalendarDate(booking.eventEndDate);
+        const last=end && end>=start ? end : start;
+        for (const day of days) if(day && day>=start && day<=last) result[day].push(booking);
+    }
+    for (const day of Object.keys(result)) result[day].sort((a,b)=>(a.time || "99:99").localeCompare(b.time || "99:99") || mdReference(a).localeCompare(mdReference(b)));
+    return result;
+}
+// Calendar reservation indicators are intentionally limited to these two workflow stages.
+function mdCalendarReservationType(booking: Booking): "tentative" | "reserved" | null {
+    const stage = mdStage(booking);
+    return stage === "Approved" ? "tentative" : stage === "Confirmed" ? "reserved" : null;
+}
+function mdCalendarReservationCounts(bookings: Booking[]) {
+    let tentative = 0, reserved = 0;
+    for (const booking of bookings) {
+        const type = mdCalendarReservationType(booking);
+        if (type === "tentative") tentative++;
+        if (type === "reserved") reserved++;
+    }
+    return { tentative, reserved };
+}
+function mdCalendarStatusColor(booking: Booking) {
+    const type = mdCalendarReservationType(booking);
+    return type === "tentative" ? "text-[#A66A00]" : type === "reserved" ? "text-[#25865B]" : "text-[#86778F]";
+}
+function mdCalendarStatusLabel(booking: Booking) {
+    const type = mdCalendarReservationType(booking);
+    return type === "tentative" ? "Tentative" : type === "reserved" ? "Reserved" : mdBookingStatusLabel(booking);
+}
+function MDBookingCalendar({bookings, today}: {bookings: Booking[] | null | undefined; today: string}) {
+    const [month,setMonth]=useState(()=>today.slice(0,7));
+    const [selected,setSelected]=useState(today);
+    const days=useMemo(()=>mdCalendarDays(month),[month]);
+    const byDay=useMemo(()=>mdCalendarBookings(bookings || [],days),[bookings,days]);
+    const selectedBookings=byDay[selected] || [];
+    const changeMonth=(offset:number)=>{
+        const next=mdCalendarMonthShift(month,offset);
+        setMonth(next); setSelected(next===today.slice(0,7)?today:`${next}-01`);
+    };
+    const navClass="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-[#E6DDF0] bg-white text-[#5A35A5] hover:bg-[#F5F0FF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#7651BA]";
+    return <section className={`${managerPanelClass} flex min-h-[360px] flex-col p-4`}>
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-2">
+            <div className="flex min-w-0 flex-1 basis-[210px] items-center gap-2.5">
+                <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] ${managerDashboardTones.cyan}`} aria-hidden="true"><CalendarDays size={18}/></span>
+                <div className="min-w-0 flex-1"><h2 className="text-[15px] font-bold leading-5 text-[#1A1220]">Booking Reservation Calendar</h2><p className="mt-0.5 text-[11px] leading-4 text-[#86778F]">View scheduled bookings by event date</p></div>
+            </div>
+            <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1.5">
+                <div className="flex items-center gap-1.5"><button type="button" aria-label="Previous month" onClick={()=>changeMonth(-1)} className={navClass}><ChevronLeft size={15}/></button><span className="min-w-[100px] text-center text-xs font-semibold text-[#2B174C]" aria-live="polite">{mdCalendarLabel(`${month}-01`,{month:"long",year:"numeric"})}</span><button type="button" aria-label="Next month" onClick={()=>changeMonth(1)} className={navClass}><ChevronRight size={15}/></button></div>
+            </div>
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] font-medium" aria-label="Reservation status legend">
+            <span className="inline-flex items-center gap-1.5 text-[#A66A00]"><span className="h-2.5 w-2.5 rounded-sm border border-[#E7C27A] bg-[#FFF3D9]" aria-hidden="true"/>Tentative</span>
+            <span className="inline-flex items-center gap-1.5 text-[#25865B]"><span className="h-2.5 w-2.5 rounded-sm border border-[#A7D8B9] bg-[#EAF7F0]" aria-hidden="true"/>Reserved</span>
+        </div>
+        <div className="mt-3 grid min-h-0 flex-1 grid-cols-7 gap-1" style={{gridTemplateRows: `auto repeat(${days.length / 7}, minmax(36px, 1fr))`}} aria-label="Monthly reservation calendar">
+            {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(day=><div key={day} className="py-1 text-center text-[10px] font-semibold text-[#806A8C]">{day}</div>)}
+            {days.map((day,i)=>{
+                if(!day) return <div key={`blank-${i}`} className="min-h-[36px]" aria-hidden="true"/>;
+                const {tentative,reserved}=mdCalendarReservationCounts(byDay[day] || []);
+                const active=day===selected;
+                // When both statuses occur on the same date, keep both visible.
+                const dayTone = tentative && reserved
+                    ? "border-[#D9D6AA] bg-gradient-to-r from-[#FFF7E9] to-[#EAF7F0] text-[#392648]"
+                    : tentative ? "border-[#E7C27A] bg-[#FFF7E9] text-[#A66A00]"
+                        : reserved ? "border-[#A7D8B9] bg-[#EAF7F0] text-[#25865B]"
+                            : "border-transparent bg-white text-[#5F4E75] hover:border-[#E6DDF0] hover:bg-[#FAF8FF]";
+                return <button key={day} type="button" onClick={()=>setSelected(day)} aria-pressed={active} aria-current={day===today?"date":undefined} aria-label={`${mdCalendarLabel(day,{month:"long",day:"numeric",year:"numeric"})}: ${bookings ? `${tentative} tentative, ${reserved} reserved` : "booking data unavailable"}`} className={`relative flex min-h-[36px] min-w-0 flex-col items-center justify-center rounded-lg border text-[11px] font-semibold leading-none transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#7651BA] ${dayTone} ${active?"ring-1 ring-inset ring-[#7651BA]":""}`}>
+                    <span>{Number(day.slice(-2))}</span>
+                    {(tentative>0 || reserved>0) && <span className="mt-0.5 flex max-w-full items-center justify-center gap-0.5" aria-hidden="true">
+                        {tentative>0 && <span className="min-w-0 truncate rounded-full bg-[#A66A00] px-1 py-px text-[9px] leading-none text-white" title={`${tentative} tentative`}>T {tentative}</span>}
+                        {reserved>0 && <span className="min-w-0 truncate rounded-full bg-[#25865B] px-1 py-px text-[9px] leading-none text-white" title={`${reserved} reserved`}>R {reserved}</span>}
+                    </span>}
+                </button>;
+            })}
+        </div>
+        <div className="mt-3 shrink-0 border-t border-[#E9E1EE] pt-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-1"><h3 className="text-xs font-bold text-[#2B174C]">{mdCalendarLabel(selected,{month:"short",day:"numeric",year:"numeric"})}</h3><span className="text-[11px] text-[#86778F]" aria-live="polite">{bookings ? `${selectedBookings.length} booking${selectedBookings.length===1?"":"s"}` : "Unavailable"}</span></div>
+            {!bookings ? <p className="py-3 text-[11px] text-[#86778F]">Booking data unavailable. Refresh to try again.</p> : selectedBookings.length===0 ? <p className="py-3 text-[11px] text-[#86778F]">No bookings scheduled for this date.</p> : <ul className="mt-1 max-h-[160px] divide-y divide-[#F1ECF4] overflow-y-auto" aria-label="Bookings for selected date">{selectedBookings.map(booking=><li key={booking.id} className="flex items-start justify-between gap-2 py-1.5 text-[11px]"><div className="min-w-0 flex-1"><p className="break-words font-semibold text-[#392648]">{mdReference(booking)}</p><p className="mt-0.5 break-words text-[#86778F]">{[booking.name,booking.packageName || booking.eventName,booking.time].filter(Boolean).join(" · ")}</p></div><span className={`shrink-0 text-right font-semibold ${mdCalendarStatusColor(booking)}`}>{mdCalendarStatusLabel(booking)}</span></li>)}</ul>}
+        </div>
     </section>;
 }
 
@@ -1337,7 +1547,7 @@ export default function ManagerDashboard() {
     const { user } = useCurrentUser();
     const [currentDateTime, setCurrentDateTime] = useState(() => new Date());
     const [isRefreshing, setIsRefreshing] = useState(false);
-    const [data, setData] = useState<{ scope: string; bookings: Booking[] | null; products: Product[] | null; equipment: unknown[] | null; settlements: MDSettlement[]; errors: string[] } | null>(null);
+    const [data, setData] = useState<{ scope: string; bookings: Booking[] | null; products: Product[] | null; equipment: unknown[] | null; errors: string[] } | null>(null);
     const dashboardStoreId = getUserValue(user, "store_id") || getUserValue(user, "storeId") || getSavedItem("store_id") || getSavedItem("stocknbook_store_id");
     const dashboardBranchId = getAssignedBranchId(user);
     const scope = `${dashboardStoreId}:${dashboardBranchId}`;
@@ -1351,7 +1561,7 @@ export default function ManagerDashboard() {
         if (!silent) setIsRefreshing(true);
         try {
             if (!token || !dashboardBranchId) {
-                setData({scope, bookings:null, products:null, equipment:null, settlements:[], errors:["No valid manager session or branch assignment was found."]});
+                setData({scope, bookings:null, products:null, equipment:null, errors:["No valid manager session or branch assignment was found."]});
                 return;
             }
             const post = async (url: string, body: Record<string, unknown>) => {
@@ -1371,16 +1581,7 @@ export default function ManagerDashboard() {
             const products = p.status === "fulfilled" && Array.isArray(p.value.products) ? p.value.products.map(normalizeProduct).filter(item => belongsToAssignedBranch(item,dashboardBranchId)) : null;
             const equipment = r.status === "fulfilled" && r.value.success === true && String(r.value.branchId) === dashboardBranchId && Array.isArray(r.value.equipment) ? r.value.equipment : null;
             const errors = [!bookings && "Booking data unavailable.", !products && "Consumable stock data unavailable.", !equipment && "Rental availability data unavailable."].filter((x):x is string => Boolean(x));
-            const pending = (bookings || []).filter(item => mdStatus(item) === "pending settlement").slice(0,5);
-            const settlements = await Promise.all(pending.map(async booking => {
-                try {
-                    const payload = await post("/api/bookings", {action:"get_booking_financial_statement", bookingId:booking.id, branch_id:branch});
-                    const statement = toRecord(payload.statement);
-                    if (Number(toRecord(statement.booking).id) !== booking.id) return {booking, refund:"—"};
-                    return {booking, refund:mdRefundLabel(statement)};
-                } catch { return {booking, refund:"—"}; }
-            }));
-            if (!controller.signal.aborted) setData({scope, bookings, products, equipment, settlements, errors});
+            if (!controller.signal.aborted) setData({scope, bookings, products, equipment, errors});
         } finally {
             if (request.current === controller) { request.current = null; setIsRefreshing(false); }
         }
@@ -1404,29 +1605,40 @@ export default function ManagerDashboard() {
         ...getDashboardStockAlertItems(current?.products || []).map(item=>({key:`consumable-${item.id}`,product:item.variantName ? `${item.productName} (${item.variantName})`:item.productName,status:item.status})),
         ...mdRentalAlerts(current?.equipment || []),
     ],[current?.products,current?.equipment]);
+    const expirationAlerts = useMemo<ExpirationAlertItem[]>(() => getExpirationAlertItems(current?.products || []), [current?.products]);
     const stockUnavailable = !current?.products || !current?.equipment;
-    const actions = [...pending,...awaiting].map(b=>({key:String(b.id),left:mdReference(b),right:mdBookingAction(b),href:"/bookings"}));
-    const alertRows = stockAlerts.map(a=>({key:a.key,left:a.product,right:a.status,statusColor:mdAlertClass(a.status)}));
-    const settlementRows = (current?.settlements || []).map(s=>({key:String(s.booking.id),left:mdReference(s.booking),right:s.refund,href:"/bookings"}));
+    const actions = [...pending,...awaiting].map(b=>({key:`action-${String(b.id)}`,left:mdReference(b),right:mdBookingStatusLabel(b),statusColor:mdBookingStatusColor(b)}));
+    const settlementRows = settlements.slice(0,5).map(b=>({key:`settlement-${String(b.id)}`,left:mdReference(b),right:mdBookingStatusLabel(b),statusColor:mdBookingStatusColor(b)}));
+    const combinedActionRows = [...actions, ...settlementRows].slice(0, 8);
+    const inventoryPieSlices: MDPieSlice[] = [
+        { key: "expiring", label: "Soon to Expire", value: expirationAlerts.filter(item => item.status === "Expiring").length, color: "#E19A21", bg: "bg-[#FFF8EA]" },
+        { key: "expired", label: "Expired", value: expirationAlerts.filter(item => item.status === "Expired").length, color: "#D64545", bg: "bg-[#FFF1F1]" },
+        { key: "low-stock", label: "Low Stock", value: getDashboardStockAlertItems(current?.products || []).filter(item => item.status === "Low Stock").length, color: "#8A63D2", bg: "bg-[#F6F0FF]" },
+        { key: "out-stock", label: "Out of Stock", value: getDashboardStockAlertItems(current?.products || []).filter(item => item.status === "Out of Stock").length, color: "#237C9B", bg: "bg-[#ECF8FB]" },
+        { key: "under-repair", label: "Under Repair", value: mdUnderRepairCount(current?.equipment || []), color: "#1FA87A", bg: "bg-[#ECFAF4]" },
+    ];
     const navigate = (href:string)=>router.push(href);
-    const download = (title:string, headers:string[], rows:MDTableRow[], name:string)=>mdExportRows(title,headers,rows.map(r=>[r.left,r.right]),name,branchName,today);
     return <>
-        <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur"><div className="flex min-h-[88px] flex-wrap items-center justify-between gap-4 px-6 py-3"><div className="min-w-0"><h1 className="text-[25px] font-bold text-[#1A1220]">Manager Dashboard</h1><p className="mt-0.5 text-xs text-[#766983]">Booking and inventory overview for {branchName}.</p></div><div className="flex flex-wrap gap-2.5"><span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">{formatCurrentDashboardDateTime(currentDateTime)}</span><button type="button" onClick={()=>void loadManagerDashboard()} disabled={isRefreshing} className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:opacity-60"><RefreshCw size={16} className={isRefreshing?"animate-spin":""}/>{isRefreshing?"Refreshing...":"Refresh"}</button></div></div></header>
+        <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur"><div className="flex flex-wrap items-center justify-between gap-3 px-6 py-3"><div className="min-w-0"><h1 className="text-[25px] font-bold text-[#1A1220]">Manager Dashboard</h1><p className="mt-0.5 text-xs text-[#766983]">Booking and inventory overview for {branchName}.</p></div><div className="flex flex-wrap items-center gap-2.5"><time className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">{formatCurrentDashboardDateTime(currentDateTime)}</time><button type="button" onClick={()=>void loadManagerDashboard()} disabled={isRefreshing} className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:opacity-60"><RefreshCw size={16} className={isRefreshing?"animate-spin":""}/>{isRefreshing?"Refreshing...":"Refresh"}</button></div></div></header>
         <section className="px-5 py-5 font-sans" aria-busy={!current || isRefreshing}>
             {!current ? <ManagerDashboardSkeleton/> : <div className="space-y-4">
                 {current.errors.length>0 && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-xs text-red-700">{current.errors.join(" ")}</p>}
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                    <ManagerMetricCard title="Pending Bookings" value={bookings?pending.length:null} subtitle="Needs price or approval" icon={<CalendarClock size={24}/>} tone="violet" onClick={()=>navigate("/bookings")}/>
-                    <ManagerMetricCard title="Awaiting Confirmation" value={bookings?awaiting.length:null} subtitle="Approved · awaiting payment review" icon={<MdCheckCircle size={24}/>} tone="blue" onClick={()=>navigate("/bookings")}/>
-                    <ManagerMetricCard title="Stock Alerts" value={stockUnavailable?null:stockAlerts.length} subtitle="Consumable and rental alerts" icon={<AlertTriangle size={24}/>} tone="orange" onClick={()=>navigate("/inventory")}/>
-                    <ManagerMetricCard title="Pending Settlements" value={bookings?settlements.length:null} subtitle="Awaiting deposit settlement" icon={<MdWallet size={24}/>} tone="violet" onClick={()=>navigate("/bookings")}/>
+                    <ManagerMetricCard title="Pending Bookings" value={bookings?pending.length:null} subtitle="Needs price or approval" icon={<CalendarClock size={23}/>} tone="purple" onClick={()=>navigate("/bookings")}/>
+                    <ManagerMetricCard title="Awaiting Confirmation" value={bookings?awaiting.length:null} subtitle="Approved · awaiting payment review" icon={<MdCheckCircle size={23}/>} tone="blue" onClick={()=>navigate("/bookings")}/>
+                    <ManagerMetricCard title="Stock Alerts" value={stockUnavailable?null:stockAlerts.length} subtitle="Consumable and rental alerts" icon={<AlertTriangle size={23}/>} tone="amber" onClick={()=>navigate("/inventory")}/>
+                    <ManagerMetricCard title="Pending Settlements" value={bookings?settlements.length:null} subtitle="Awaiting deposit settlement" icon={<MdWallet size={23}/>} tone="green" onClick={()=>navigate("/bookings")}/>
                 </div>
-                <MDBookingOverview counts={counts} unavailable={!bookings} onExport={()=>mdExportRows("Booking Overview",["Status","Bookings"],MD_BOOKING_STAGES.map(s=>[s,String(counts[s])]),"manager_booking_overview",branchName,`${today.slice(0,7)} (event dates; Released includes return inspection and pending settlement)`)}/>
-                <div className="grid grid-cols-1 items-stretch gap-3 lg:grid-cols-2 xl:grid-cols-3">
-                    <MDCompactPanel title="Booking Action Center" icon={<CalendarClock size={19}/>} headers={["Booking","Action"]} rows={actions.slice(0,5)} unavailable={!bookings} empty="No bookings require action." onViewAll={()=>navigate("/bookings")} onNavigate={navigate} onExport={()=>download("Booking Action Center",["Booking","Action"],actions.slice(0,5),"manager_booking_actions")}/>
-                    <MDCompactPanel title="Inventory Stock Alerts" icon={<Box size={19}/>} headers={["Product","Status"]} rows={alertRows.slice(0,5)} unavailable={stockUnavailable} empty="No stock alerts." onViewAll={()=>navigate("/inventory")} onNavigate={navigate} onExport={()=>download("Inventory Stock Alerts",["Product","Status"],alertRows.slice(0,5),"manager_stock_alerts")}/>
-                    <MDCompactPanel title="Pending Deposit Settlements" icon={<MdWallet size={19}/>} headers={["Booking","Refund"]} rows={settlementRows} unavailable={!bookings} empty="No pending settlements." onViewAll={()=>navigate("/bookings")} onNavigate={navigate} onExport={()=>download("Pending Deposit Settlements",["Booking","Potential Refund"],settlementRows,"manager_pending_settlements")}/>
+                {/* Desktop: two compact panels in the left column, one tall calendar on the right. */}
+                <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-2">
+                    <div className="flex min-w-0 flex-col gap-3">
+                        <MDInventoryAlertsPie slices={inventoryPieSlices} unavailable={stockUnavailable} onViewAll={()=>navigate("/inventory")}/>
+                        <MDCompactPanel title="Booking Action Center" description="Bookings awaiting approval, payment review, or deposit settlement" tone="teal" icon={<CalendarClock size={18}/>} headers={["Booking","Status"]} rows={combinedActionRows} unavailable={!bookings} empty="No booking actions or settlements." onViewAll={()=>navigate("/bookings")}/>
+                    </div>
+                    <MDBookingCalendar key={scope} bookings={bookings} today={today}/>
                 </div>
+                {/* Full-width booking chart below both columns. */}
+                <MDBookingOverview counts={counts} unavailable={!bookings}/>
             </div>}
         </section>
     </>;
@@ -1438,16 +1650,6 @@ function mdLocalDay(date: Date) {
     const part = (name: string) => parts.find(p => p.type === name)?.value || "";
     return `${part("year")}-${part("month")}-${part("day")}`;
 }
-function mdExportRows(title: string, headers: string[], rows: string[][], filename: string, branch: string, date: string) {
-    // Reuse the existing StockNBook dashboard PDF generator, loaded only on export.
-    // No separate PDF component, extra file, or duplicate document renderer.
-    exportTableAsPdf({ title, headers, rows }, {
-        storeName: getSavedItem("store_name") || getSavedItem("stocknbook_store_name") || "StockNBook",
-        branch,
-        dateRange: date,
-    }, filename);
-}
-
 function MdWrenchIcon() { return <MdWrench size={24}/>; }
 function MDWalletIcon() { return <MdWallet size={24}/>; }
 function MdCloseIcon() { return <MdX size={18}/>; }
@@ -1987,47 +2189,22 @@ function buildManagerInventoryForecast(
         .slice(0, 3);
 }
 
-function ManagerMetricCard({
-                               title,
-                               value,
-                               subtitle,
-                               icon,
-                               tone,
-                               onClick,
-                           }: {
+function ManagerMetricCard({ title, value, subtitle, icon, tone, onClick }: {
     title: string;
     value: number | null;
     subtitle: string;
     icon: React.ReactNode;
-    tone: DashboardTone;
+    tone: ManagerDashboardTone;
     onClick?: () => void;
 }) {
-    const style = toneStyles[tone];
-
-    return (
-        <button
-            type="button"
-            onClick={onClick}
-            className="flex min-h-[146px] min-w-0 w-full items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm transition hover:border-[#D7C9E3] hover:shadow-md focus:outline-none focus:ring-2 focus:ring-[#D9C6F5]"
-        >
-            <span
-                className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${style.background} ${style.icon}`}
-            >
-                {icon}
-            </span>
-            <span className="min-w-0 flex-1">
-                <span className="block text-[14px] font-semibold leading-5 text-[#4B3E55]">
-                    {title}
-                </span>
-                <span className="mt-1 block break-words text-[28px] font-bold leading-tight tracking-[-0.03em] text-[#1A1220] tabular-nums">
-                    {value === null ? "—" : value.toLocaleString("en-PH")}
-                </span>
-                <span className="mt-2 block text-[11px] leading-4 text-[#8A7D92]">
-                    {subtitle}
-                </span>
-            </span>
-        </button>
-    );
+    return <button type="button" onClick={onClick} className={managerKpiCardClass}>
+        <span className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl ${managerDashboardTones[tone]}`} aria-hidden="true">{icon}</span>
+        <span className="min-w-0 flex-1">
+            <span className="block text-[12px] font-semibold leading-4 text-[#25153D]">{title}</span>
+            <span className="mt-1 block break-words text-[24px] font-bold leading-none tabular-nums text-[#25153D]">{value === null ? "—" : value.toLocaleString("en-PH")}</span>
+            <span className="mt-1 block text-[11px] leading-4 text-[#806A8C]">{subtitle}</span>
+        </span>
+    </button>;
 }
 
 function ManagerDonutPanel({

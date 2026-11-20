@@ -18,6 +18,8 @@ import {
     AlertCircle,
     Trash2,
     Truck,
+    Store as StoreIcon,
+    RotateCcw,
 } from "lucide-react";
 
 const STORE_MESSENGER = "your.page.username";
@@ -54,6 +56,16 @@ type PackageItem = {
     cover_image?: string;
     inclusions: PackageInclusion[];
 };
+
+// What's inside a package, shown next to its name so customers know before booking.
+function packageContentsLabel(pkg: PackageItem | null | undefined): string {
+    const lines = pkg?.inclusions || [];
+    const rentals = lines.some(line => line.itemType === "rental");
+    const consumables = lines.some(line => line.itemType !== "rental");
+    if (rentals && consumables) return "Consumables + Rentals";
+    if (rentals) return "Rentals only";
+    return consumables ? "Consumables only" : "";
+}
 
 type ProductVariant = {
     id: number;
@@ -134,6 +146,11 @@ type Booking = {
     date: string;
     eventEndDate?: string | null;
     eventTime: string;
+    handoverMethod?: "pickup" | "delivery";
+    handoverDate?: string;
+    handoverTime?: string;
+    returnDate?: string;
+    returnTime?: string;
     eventType: string;
     package: string;
     customOrder: string;
@@ -184,8 +201,8 @@ function canonicalBookingStatus(status: string): string {
 }
 
 const STATUS_GUIDANCE: Record<string, string> = {
-    "Pending Review": "Your request was received. The store will review your requested items, date, and quotation.",
-    "Approved — Awaiting Down Payment": "The store has approved the request. Follow verified payment instructions and wait for payment confirmation before your reservation is secured.",
+    "Pending Review": "Your request was received. The store will review it and contact you.",
+    "Approved — Awaiting Down Payment": "Your booking is approved. Pay the down payment using the store's payment instructions to secure your date.",
     "Confirmed & Reserved": "Your reservation is confirmed. The store will prepare your booking according to your event schedule.",
     "Preparing": "The store is preparing your order and any rental equipment.",
     "Released": "Your booking has been released. Rental items, if any, still require return and inspection.",
@@ -194,6 +211,26 @@ const STATUS_GUIDANCE: Record<string, string> = {
 };
 
 // Format YYYY-MM-DD without converting a rental event date to the browser timezone.
+// "14:30" -> "2:30 PM"
+function formatTime12(time?: string | null): string {
+    const m = String(time || "").match(/^(\d{1,2}):(\d{2})/);
+    if (!m) return "";
+    const hour = Number(m[1]);
+    return `${hour % 12 || 12}:${m[2]} ${hour < 12 ? "AM" : "PM"}`;
+}
+
+// "2026-12-19", "14:30" -> "Dec 19, 2026 · 2:30 PM"
+function formatSchedule(isoDate?: string | null, time?: string | null): string {
+    if (!isoDate) return "";
+    const t = formatTime12(time);
+    return `${formatRentalCalendarDate(isoDate)}${t ? ` · ${t}` : ""}`;
+}
+
+const shiftIsoDate = (isoDate: string, days: number) =>
+    new Date(Date.parse(`${isoDate}T00:00:00Z`) + days * 86400000).toISOString().slice(0, 10);
+const HANDOVER_LEAD_DAYS = 7;   // pickup/delivery at most 7 days before the event
+const RETURN_GRACE_DAYS = 7;    // return at most 7 days after the event
+
 function formatRentalCalendarDate(isoDate: string): string {
     const [year, month, day] = isoDate.split("-").map(Number);
     return new Intl.DateTimeFormat("en-PH", {
@@ -835,8 +872,13 @@ function StatusDrawer({ onClose, storeId }: { onClose: () => void; storeId: numb
                                 value={`${new Date(displayBooking.date).toLocaleDateString("en-PH", { month: "long", day: "numeric", year: "numeric" })}${displayBooking.eventEndDate && new Date(displayBooking.eventEndDate) > new Date(displayBooking.date) ? ` – ${new Date(displayBooking.eventEndDate).toLocaleDateString("en-PH", { month: "long", day: "numeric", year: "numeric" })}` : ""}`}
                                 icon={<CalendarDays size={13} className="text-purple-400" />}
                             />
-                            {displayBooking.eventTime && <DetailItem label="Time" value={displayBooking.eventTime} icon={<Clock size={13} className="text-purple-400" />} />}
-                            {displayBooking.venue && <DetailItem label="Venue" value={displayBooking.venue} icon={<MapPin size={13} className="text-purple-400" />} />}
+                            {(displayBooking.handoverDate || displayBooking.eventTime) && <DetailItem
+                                label={displayBooking.handoverMethod === "delivery" ? "Delivery" : "Pickup"}
+                                value={formatSchedule(displayBooking.handoverDate || displayBooking.date, displayBooking.handoverTime || displayBooking.eventTime)}
+                                icon={displayBooking.handoverMethod === "delivery" ? <Truck size={13} className="text-purple-400" /> : <Clock size={13} className="text-purple-400" />} />}
+                            {displayBooking.returnDate && <DetailItem label="Return" value={formatSchedule(displayBooking.returnDate, displayBooking.returnTime)}
+                                                                      icon={<RotateCcw size={13} className="text-purple-400" />} />}
+                            {displayBooking.venue && <DetailItem label={displayBooking.handoverMethod === "delivery" ? "Delivery address" : "Venue"} value={displayBooking.venue} icon={<MapPin size={13} className="text-purple-400" />} />}
                             {displayBooking.theme && <DetailItem label="Theme" value={displayBooking.theme} icon={<Palette size={13} className="text-purple-400" />} />}
                             {displayBooking.bookingType === "package" && displayBooking.package && <DetailItem label="Package" value={displayBooking.package} />}
                             {displayBooking.bookingType === "custom" && displayBooking.customOrder && <DetailItem label="Custom Request" value={displayBooking.customOrder} />}
@@ -1086,7 +1128,8 @@ export default function CustomerBookingPage() {
 
     const [showStatusDrawer, setShowStatusDrawer] = useState(() => !!searchParams.get("ref"));
 
-    const [bookingType, setBookingType] = useState<"package" | "custom" | "rental">("package");
+    // Two booking types: a ready-made Package, or Custom ("Build Your Own": consumables, rental equipment, or both).
+    const [bookingType, setBookingType] = useState<"package" | "custom">("package");
     const [selectedPackage, setSelectedPackage] = useState("");
     const [customOrder, setCustomOrder] = useState("");
 
@@ -1121,7 +1164,12 @@ export default function CustomerBookingPage() {
     const [phone, setPhone] = useState("");
     const [email, setEmail] = useState("");
     const [date, setDate] = useState("");
-    const [eventTime, setEventTime] = useState("");
+    // When the customer gets the items (replaces "event time"). Dates left blank follow the event dates.
+    const [handoverMethod, setHandoverMethod] = useState<"pickup" | "delivery">("pickup");
+    const [handoverDate, setHandoverDate] = useState("");
+    const [handoverTime, setHandoverTime] = useState("");
+    const [returnDate, setReturnDate] = useState("");
+    const [returnTime, setReturnTime] = useState("");
     const [eventType, setEventType] = useState("");
     const [theme, setTheme] = useState("");
     const [venue, setVenue] = useState("");
@@ -1130,7 +1178,6 @@ export default function CustomerBookingPage() {
     // A guided flow keeps only the relevant task visible.
     const [bookingStep, setBookingStep] = useState<1 | 2 | 3 | 4>(1);
     const [showPackageCatalog, setShowPackageCatalog] = useState(false);
-    const [showRentalAddons, setShowRentalAddons] = useState(false);
     const [showOptionalNotes, setShowOptionalNotes] = useState(false);
     const [showSuccess, setShowSuccess] = useState(false);
     const [bookingReference, setBookingReference] = useState("");
@@ -1191,11 +1238,19 @@ export default function CustomerBookingPage() {
     const requestedEventDays = date && eventEndDate && eventEndDate >= date
         ? Math.round((Date.parse(`${eventEndDate}T00:00:00Z`) - Date.parse(`${date}T00:00:00Z`)) / 86400000) + 1
         : 0;
+    // Rental period = pickup/delivery date → return date (defaults: event start → event end).
+    const handoverWord = handoverMethod === "delivery" ? "Delivery" : "Pickup";
+    const rentalFrom = handoverDate || date;
+    const rentalTo = returnDate || eventEndDate;
+    const rentalPeriodDays = rentalFrom && rentalTo && rentalTo >= rentalFrom
+        ? Math.round((Date.parse(`${rentalTo}T00:00:00Z`) - Date.parse(`${rentalFrom}T00:00:00Z`)) / 86400000) + 1
+        : 0;
     // Invalid or unusually long ranges must never generate a misleading quotation.
-    const rentalDuration = requestedEventDays <= 30 && (eventDurationType === "single" || eventEndDate > date)
-        ? requestedEventDays : 0;
+    const rentalDuration = requestedEventDays <= 30 && (eventDurationType === "single" || eventEndDate > date) &&
+    rentalFrom <= date && rentalTo >= eventEndDate && rentalPeriodDays <= 30
+        ? rentalPeriodDays : 0;
     const rentalPeriodKey = store?.id && customBranchId && rentalDuration > 0
-        ? `${store.id}:${customBranchId}:${date}:${eventEndDate}` : "";
+        ? `${store.id}:${customBranchId}:${rentalFrom}:${rentalTo}` : "";
     const rentalAvailabilityReady = !!rentalPeriodKey && rentalCatalogPeriodKey === rentalPeriodKey &&
         !rentalCatalogLoading && !rentalCatalogError;
     // Included rentals belong to the package's fixed price. Customer additions are
@@ -1212,6 +1267,8 @@ export default function CustomerBookingPage() {
         return quantities;
     }, [bookingType, selectedPackageData]);
     const packageHasIncludedRentals = includedRentalQuantities.size > 0;
+    // A return date/time is only asked when the booking has rental equipment.
+    const needsReturn = selectedRentalItems.length > 0 || (bookingType === "package" && packageHasIncludedRentals);
     // Only advisory in the browser; the backend must validate atomically on approval.
     const packageRentalIssues = bookingType === "package" && rentalAvailabilityReady
         ? [...includedRentalQuantities.entries()].filter(([id, included]) => {
@@ -1237,12 +1294,15 @@ export default function CustomerBookingPage() {
         timeZone: "Asia/Manila", month: "short", day: "numeric", year: "numeric"
     }).format(new Date());
     const rentalSelectedDateLabel = rentalAvailabilityReady
-        ? (date === eventEndDate ? formatRentalCalendarDate(date)
-            : `${formatRentalCalendarDate(date)} – ${formatRentalCalendarDate(eventEndDate)}`)
+        ? (rentalFrom === rentalTo ? formatRentalCalendarDate(rentalFrom)
+            : `${formatRentalCalendarDate(rentalFrom)} – ${formatRentalCalendarDate(rentalTo)}`)
         : "";
     const estimatedDelivery = serviceDelivery && !(bookingType === "package" && feePolicy.deliveryIncludedPackage) ? feePolicy.deliveryFee : 0;
     const estimatedSetup = serviceSetup && !(bookingType === "package" && feePolicy.setupIncludedPackage) ? feePolicy.setupFee : 0;
     const estimatedBase = bookingType === "package" ? Number(selectedPackageData?.package_price || 0) : 0;
+    // Build Your Own with only rental equipment (what used to be a "Rental booking"):
+    // event type and theme are optional, like before.
+    const equipmentOnly = bookingType === "custom" && selectedCustomItems.length === 0 && selectedRentalItems.length > 0;
     // The custom product subtotal is a request estimate; Manager confirms its agreed price.
     const selectedRentalTotal = selectedRentalItems.reduce(
         (sum, item) => sum + item.dailyRate * item.quantity * rentalDuration, 0
@@ -1371,17 +1431,13 @@ export default function CustomerBookingPage() {
         const hasSelection =
             bookingType === "package"
                 ? !!selectedPackage
-                : bookingType === "rental"
-                    ? selectedRentalItems.length > 0
-                    : selectedCustomItems.length > 0 || selectedRentalItems.length > 0 || !!customOrder.trim();
+                : selectedCustomItems.length > 0 || selectedRentalItems.length > 0 || !!customOrder.trim();
 
         if (!hasSelection) {
             errors.selection =
                 bookingType === "package"
                     ? "Please select a package."
-                    : bookingType === "rental"
-                        ? "Select at least one rental item before submitting."
-                        : "Select consumable goods, rental goods, or describe your custom request.";
+                    : "Select consumable goods, rental goods, or describe your custom request.";
         }
 
         if (bookingType === "custom" && selectedCustomItems.length && (loadingInventory || inventoryError))
@@ -1397,7 +1453,7 @@ export default function CustomerBookingPage() {
             errors.selection = 'The included and additional rentals exceed availability for these dates. Choose different dates or contact the branch.';
         else if (rentalSelectionConflict)
             errors.selection = `${rentalSelectionConflict.name} exceeds the available units for your event dates.`;
-        if (bookingType === "custom" && !eventType.trim()) errors.eventType = "Event type is required.";
+        if (bookingType === "custom" && !equipmentOnly && !eventType.trim()) errors.eventType = "Event type is required.";
         if (!customBranchId || !branches.some(b => b.id === customBranchId))
             errors.selection = "Select a valid branch before booking.";
         if (bookingType === "package" && selectedPackage && !selectedPackageData)
@@ -1405,7 +1461,7 @@ export default function CustomerBookingPage() {
         if (bookingType === "package" && selectedPackageData && !selectedPackageStockAvailable)
             errors.selection = packageStockReady
                 ? "This package is no longer available in sufficient stock for your event date. Choose another package."
-                : "Wait until package stock availability can be verified for your branch and date.";
+                : "Checking package availability for your date. Please wait.";
         if (bookingType === "package" && selectedPackageData && packageBranchId !== urlBranchId)
             errors.selection = "This package is not available at this branch. Choose another package.";
         if (eventDurationType === "multiple") {
@@ -1433,9 +1489,25 @@ export default function CustomerBookingPage() {
             else if (selected > maxDate) errors.date = "Date is too far ahead. Max 2 years from now.";
         }
 
-        if (!eventTime) errors.eventTime = "Event time is required.";
-        if (!venue.trim()) errors.venue = "Venue is required.";
-        if (bookingType !== "rental" && !theme.trim()) errors.theme = "Theme / motif is required.";
+        const handoverLower = handoverWord.toLowerCase();
+        if (!handoverTime) errors.handoverTime = `Choose a ${handoverLower} time.`;
+        if (date && rentalFrom) {
+            if (rentalFrom > date) errors.handoverDate = `${handoverWord} date must be on or before the event date.`;
+            else if (rentalFrom < shiftIsoDate(date, -HANDOVER_LEAD_DAYS))
+                errors.handoverDate = `${handoverWord} date can be at most ${HANDOVER_LEAD_DAYS} days before the event.`;
+            else if (rentalFrom < todayForPicker) errors.handoverDate = `${handoverWord} date can't be in the past.`;
+        }
+        if (needsReturn) {
+            if (!returnTime) errors.returnTime = "Choose a return time.";
+            if (eventEndDate && rentalTo < eventEndDate) errors.returnDate = "Return date must be on or after the last day of the event.";
+            else if (eventEndDate && rentalTo > shiftIsoDate(eventEndDate, RETURN_GRACE_DAYS))
+                errors.returnDate = `Return date can be at most ${RETURN_GRACE_DAYS} days after the event.`;
+            else if (rentalPeriodDays > 30) errors.returnDate = "The rental period can be at most 30 days.";
+            else if (rentalTo === rentalFrom && handoverTime && returnTime && returnTime <= handoverTime)
+                errors.returnTime = `Return time must be later than the ${handoverLower} time.`;
+        }
+        if (handoverMethod === "delivery" && !venue.trim()) errors.venue = "Enter the delivery address.";
+        if (!equipmentOnly && !theme.trim()) errors.theme = "Theme / motif is required.";
 
         return errors;
     }
@@ -1605,14 +1677,14 @@ export default function CustomerBookingPage() {
                     signal: controller.signal,
                     body: JSON.stringify({
                         action: 'get_public_rental_catalog', storeId: store.id, branchId: customBranchId,
-                        ...(requestedKey ? {startDate: date, endDate: eventEndDate} : {})
+                        ...(requestedKey ? {startDate: rentalFrom, endDate: rentalTo} : {})
                     })
                 });
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.error || 'Unable to check rental equipment availability.');
                 if (controller.signal.aborted) return;
                 if (Number(data.branchId) !== customBranchId) throw new Error('Rental catalog branch mismatch.');
-                if (requestedKey && (data.startDate !== date || data.endDate !== eventEndDate || !data.availabilityForDates))
+                if (requestedKey && (data.startDate !== rentalFrom || data.endDate !== rentalTo || !data.availabilityForDates))
                     throw new Error('Rental availability response does not match the chosen event dates.');
                 setRentalCatalog(Array.isArray(data.equipment) ? data.equipment : []);
                 setRentalCatalogPeriodKey(requestedKey);
@@ -1626,7 +1698,7 @@ export default function CustomerBookingPage() {
             }
         })();
         return () => controller.abort();
-    }, [store?.id, customBranchId, branches, rentalPeriodKey, date, eventEndDate]);
+    }, [store?.id, customBranchId, branches, rentalPeriodKey, rentalFrom, rentalTo]);
 
     // Refresh today's availability preview before event dates are selected,
     // and the actual date-range availability once valid dates are selected.
@@ -1645,12 +1717,12 @@ export default function CustomerBookingPage() {
                     headers:{'Content-Type':'application/json'},
                     body:JSON.stringify({action:'get_public_rental_catalog',
                         storeId:store.id,branchId:customBranchId,
-                        ...(rentalPeriodKey ? {startDate:date,endDate:eventEndDate} : {})})
+                        ...(rentalPeriodKey ? {startDate:rentalFrom,endDate:rentalTo} : {})})
                 });
                 const data=await response.json();
                 if(!response.ok || Number(data.branchId)!==customBranchId ||
                     Boolean(data.availabilityForDates)!==Boolean(rentalPeriodKey) ||
-                    (rentalPeriodKey && (data.startDate!==date || data.endDate!==eventEndDate)))
+                    (rentalPeriodKey && (data.startDate!==rentalFrom || data.endDate!==rentalTo)))
                     throw new Error(data.error||'Unable to verify current rental availability.');
                 if(!controller.signal.aborted){
                     setRentalCatalog(Array.isArray(data.equipment)?data.equipment:[]);
@@ -1671,7 +1743,7 @@ export default function CustomerBookingPage() {
         window.addEventListener('focus',onFocus);
         document.addEventListener('visibilitychange',onFocus);
         return ()=>{controller.abort();window.clearInterval(interval);window.removeEventListener('focus',onFocus);document.removeEventListener('visibilitychange',onFocus);};
-    },[store?.id,customBranchId,branches,rentalPeriodKey,date,eventEndDate]);
+    },[store?.id,customBranchId,branches,rentalPeriodKey,rentalFrom,rentalTo]);
 
     function warnRentalAvailability(item: RentalCatalogItem, requested: number) {
         setRentalAvailabilityWarning({equipmentId: item.id, name: item.name,
@@ -1783,6 +1855,7 @@ export default function CustomerBookingPage() {
     function handleSelectPackage(pkg: PackageItem) {
         if (!availablePackages.some(item => item.id === pkg.id)) return;
         setBookingType("package");
+        setSelectedRentalItems([]);
         setSelectedPackage(String(pkg.id));
         clearError("selection");
         // Preserve the normal four-step flow even when a package is chosen from the catalog.
@@ -1794,12 +1867,12 @@ export default function CustomerBookingPage() {
 
     function resetForm() {
         setBookingStep(1);
-        setShowRentalAddons(false);
         setShowOptionalNotes(false);
         setBookingType("package");
         setSelectedPackage(""); setCustomOrder(""); setSelectedCustomItems([]);
         setSelectedRentalItems([]); setRentalEndDate(""); setEventDurationType("single"); setName(""); setFacebookName("");
-        setPhone(""); setEmail(""); setDate(""); setEventTime("");
+        setPhone(""); setEmail(""); setDate("");
+        setHandoverMethod("pickup"); setHandoverDate(""); setHandoverTime(""); setReturnDate(""); setReturnTime("");
         setEventType(""); setTheme(""); setVenue(""); setNotes("");
     }
 
@@ -1809,8 +1882,8 @@ export default function CustomerBookingPage() {
         } else if (bookingStep === 2 || bookingStep === 3) {
             const errors = validateForm();
             const keys = bookingStep === 2
-                ? ["date", "rentalEndDate", "eventTime", "venue"]
-                : ["selection", "eventType", "theme"];
+                ? ["date", "rentalEndDate", "handoverDate", "handoverTime", "venue"]
+                : ["selection", "eventType", "theme", "returnDate", "returnTime"];
             const activeErrors = Object.fromEntries(keys.filter(key => errors[key]).map(key => [key, errors[key]]));
             // The branch comes from the link; validate it against this store's public branches.
             if (bookingStep === 2) {
@@ -1825,6 +1898,8 @@ export default function CustomerBookingPage() {
             }
             if (Object.keys(activeErrors).length) {
                 setFieldErrors(previous => ({ ...previous, ...activeErrors }));
+                // Event Type is entered on step 2, so send the customer back there to fill it in.
+                if (bookingStep === 3 && activeErrors.eventType && !activeErrors.selection && !activeErrors.theme) setBookingStep(2);
                 formRef.current?.scrollIntoView({ behavior: "smooth" });
                 return;
             }
@@ -1840,8 +1915,8 @@ export default function CustomerBookingPage() {
         const errors = validateForm();
         setFieldErrors(errors);
         if (Object.keys(errors).length > 0) {
-            if (errors.date || errors.rentalEndDate || errors.eventTime || errors.venue) setBookingStep(2);
-            else if (errors.selection || errors.eventType || errors.theme) setBookingStep(3);
+            if (errors.date || errors.rentalEndDate || errors.handoverDate || errors.handoverTime || errors.venue || errors.eventType) setBookingStep(2);
+            else if (errors.selection || errors.theme || errors.returnDate || errors.returnTime) setBookingStep(3);
             else setBookingStep(4);
             formRef.current?.scrollIntoView({ behavior: "smooth" });
             return;
@@ -1863,10 +1938,13 @@ export default function CustomerBookingPage() {
             phone: phone.trim(),
             email: email.trim(),
             date,
-            eventTime,
-            eventType: bookingType === "package" ? "Based on selected package" : bookingType === "rental" ? "Equipment Rental" : eventType.trim(),
+            handoverMethod,
+            handoverDate: rentalFrom,
+            handoverTime,
+            ...(needsReturn ? { returnDate: rentalTo, returnTime } : {}),
+            eventType: bookingType === "package" ? "Based on selected package" : eventType.trim() || (equipmentOnly ? "Equipment Rental" : ""),
             theme: theme.trim(),
-            venue: venue.trim(),
+            venue: handoverMethod === "delivery" ? venue.trim() : "",
             package: bookingType === "package" ? selectedPackageData?.name || "" : "",
             customOrder: bookingType === "custom" ? customOrderForSubmit : "",
             notes: notes.trim(),
@@ -1931,12 +2009,12 @@ export default function CustomerBookingPage() {
                     method: 'POST', headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({action: 'get_public_rental_catalog',
                         storeId: store.id, branchId: selectedBranchId,
-                        startDate: date, endDate: eventEndDate})
+                        startDate: rentalFrom, endDate: rentalTo})
                 });
                 const checkedData = await check.json();
                 if (!check.ok || !checkedData.availabilityForDates ||
-                    checkedData.startDate !== date || checkedData.endDate !== eventEndDate) {
-                    setRentalCatalogError(checkedData.error || 'Unable to verify rental availability. Please try again.');
+                    checkedData.startDate !== rentalFrom || checkedData.endDate !== rentalTo) {
+                    setRentalCatalogError(checkedData.error || 'Could not check rental availability. Please try again.');
                     return;
                 }
                 const liveCatalog = Array.isArray(checkedData.equipment) ? checkedData.equipment as RentalCatalogItem[] : [];
@@ -1971,7 +2049,6 @@ export default function CustomerBookingPage() {
                     ...(bookingType === 'package' ? {packageId:Number(selectedPackageData?.id)} : {}),
                     rentalItems: selectedRentalItems.map(item => ({equipmentId:item.id,quantity:item.quantity,expectedDailyRate:item.dailyRate})),
                     eventEndDate: eventEndDate || undefined,
-                    rentalEndDate: selectedRentalItems.length ? eventEndDate : undefined,
                     requestedServices:{delivery:serviceDelivery,setup:serviceSetup},
                     expectedFeePolicy:feePolicy,
                     expectedPackagePrice:bookingType==='package'?Number(selectedPackageData?.package_price||0):undefined,
@@ -2114,7 +2191,7 @@ export default function CustomerBookingPage() {
         );
     }
 
-    function renderRentalPicker(isPackageExtra = false) {
+    function renderRentalPicker() {
         const matching = rentalCatalog.filter(item =>
             (rentalCategory === "All" || (item.category || "Other") === rentalCategory) &&
             item.name.toLowerCase().includes(rentalSearch.toLowerCase())
@@ -2122,15 +2199,15 @@ export default function CustomerBookingPage() {
         return (
             <div className="min-w-0">
                 <div className="mb-3">
-                    <h4 className="text-sm font-bold text-[#2B174C]">{isPackageExtra ? "Additional Rental Goods (optional)" : "Rental Goods"}</h4>
+                    <h4 className="text-sm font-bold text-[#2B174C]">Rental Goods</h4>
                     <p className="mt-1 text-xs leading-5 text-[#806A8C]">
-                        {isPackageExtra ? "Add equipment beyond the items already included in your package. " : "Choose rental equipment for your event. "}
+                        Choose rental equipment for your event.
                         Rates are per item, per day. Items are only reserved after confirmation.
                     </p>
                     <p className="mt-2 text-xs font-medium text-[#5A35A5]" aria-live="polite">
                         {!date ? `Showing today's available units (${rentalPreviewTodayLabel}). Choose event dates above for the quantity available on your event date.`
                             : eventDurationType === "multiple" && !rentalEndDate ? `Showing today's available units (${rentalPreviewTodayLabel}). Choose your event end date above.`
-                                : rentalDuration > 0 ? `Availability for ${formatRentalCalendarDate(date)}${date !== eventEndDate ? ` – ${formatRentalCalendarDate(eventEndDate)}` : ""} · ${rentalDuration} ${rentalDuration === 1 ? "day" : "days"}.` : "Choose valid event dates above."}
+                                : rentalDuration > 0 ? `Availability for ${formatRentalCalendarDate(rentalFrom)}${rentalFrom !== rentalTo ? ` – ${formatRentalCalendarDate(rentalTo)}` : ""} (${handoverWord.toLowerCase()} to return) · ${rentalDuration} ${rentalDuration === 1 ? "day" : "days"}.` : "Check your pickup and return dates."}
                     </p>
                 </div>
                 {rentalSelectionConflict && <p role="alert" className="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800">
@@ -2144,8 +2221,8 @@ export default function CustomerBookingPage() {
                                placeholder="Search rental goods..." className="h-11 w-full rounded-xl border border-[#E6DDF0] bg-white pl-9 pr-3 text-sm outline-none focus:border-[#2B174C]" />
                     </label>
                     <div className="flex items-center gap-2">
-                        <label className="sr-only" htmlFor={isPackageExtra ? "package-rental-category" : "rental-category"}>Rental category</label>
-                        <select id={isPackageExtra ? "package-rental-category" : "rental-category"} value={rentalCategory}
+                        <label className="sr-only" htmlFor="rental-category">Rental category</label>
+                        <select id="rental-category" value={rentalCategory}
                                 onChange={event => setRentalCategory(event.target.value)}
                                 className="h-11 min-w-0 flex-1 rounded-xl border border-[#E6DDF0] bg-white px-3 text-xs text-[#2B174C] sm:w-48">
                             <option value="All">Filter by category</option>
@@ -2377,7 +2454,7 @@ export default function CustomerBookingPage() {
                                 </div>
                                 <h3 className="text-base font-bold text-[#1A1220]">No matching packages</h3>
                                 <p className="mt-1 max-w-sm text-xs leading-5 text-[#806A8C]">
-                                    No packages with sufficient verified consumable stock are currently available for this branch and event date. Try another date, or contact the store.
+                                    No packages are available for this date. Try another date or contact the store.
                                 </p>
                             </div>
                         ) : (
@@ -2582,61 +2659,44 @@ export default function CustomerBookingPage() {
                                 {/* 2. Booking type and branch */}
                                 <section className="rounded-xl bg-white py-3" aria-labelledby="booking-type-heading">
                                     <h3 id="booking-type-heading" className="mb-4 text-base font-bold text-[#2B174C]">Choose your booking type</h3>
-                                    {/* Three real-world choices, with rental add-ons inside Package and Custom. */}
+                                    {/* Two familiar choices: a ready-made set (Package) or build your own (Custom). Rentals fit in both. */}
                                     <div>
                                         <p className="mb-3 text-sm font-semibold text-[#1A1220]" id="booking-type-prompt">
                                             What would you like to book?
                                         </p>
-                                        <div className="grid grid-cols-1 gap-3 md:grid-cols-3" role="group" aria-labelledby="booking-type-prompt">
+                                        <div className="grid grid-cols-1 gap-3 md:grid-cols-2" role="group" aria-labelledby="booking-type-prompt">
                                             <button
                                                 type="button"
                                                 aria-pressed={bookingType === "package"}
-                                                onClick={() => { setBookingType("package"); setSelectedCustomItems([]); setSelectedRentalItems([]); setShowRentalAddons(false); clearError("selection"); }}
-                                                className={`rounded-xl border p-4 text-left transition ${
+                                                onClick={() => { setBookingType("package"); setSelectedCustomItems([]); setSelectedRentalItems([]); clearError("selection"); }}
+                                                className={`rounded-xl border p-4 text-left transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5B2FC6] ${
                                                     bookingType === "package"
                                                         ? "border-[#2B174C] bg-[#F7F1FF] shadow-sm"
                                                         : "border-[#E6DDF0] bg-white hover:bg-[#FFFDF8]"
                                                 }`}
                                             >
-                                                <div className="text-sm font-semibold text-[#1A1220]">
-                                                    Package booking
+                                                <div className="flex items-center gap-2 text-sm font-semibold text-[#1A1220]">
+                                                    <Package2 size={16} aria-hidden="true" /> Choose a Package
                                                 </div>
                                                 <div className="mt-1 text-xs leading-5 text-[#7A6A84]">
-                                                    Select from available packages
+                                                    Ready-made sets with a fixed price. Some include rental equipment.
                                                 </div>
                                             </button>
                                             <button
                                                 type="button"
                                                 aria-pressed={bookingType === "custom"}
-                                                onClick={() => { setBookingType("custom"); setSelectedRentalItems([]); setShowRentalAddons(false); clearError("selection"); }}
-                                                className={`rounded-xl border p-4 text-left transition ${
+                                                onClick={() => { setBookingType("custom"); clearError("selection"); }}
+                                                className={`rounded-xl border p-4 text-left transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5B2FC6] ${
                                                     bookingType === "custom"
                                                         ? "border-[#2B174C] bg-[#F7F1FF] shadow-sm"
                                                         : "border-[#E6DDF0] bg-white hover:bg-[#FFFDF8]"
                                                 }`}
                                             >
-                                                <div className="text-sm font-semibold text-[#1A1220]">
-                                                    Custom booking
-                                                </div>
-                                                <div className="mt-1 text-xs leading-5 text-[#7A6A84]">
-                                                    Personalized event setup
-                                                </div>
-                                            </button>
-                                            <button
-                                                type="button"
-                                                aria-pressed={bookingType === "rental"}
-                                                onClick={() => { setBookingType("rental"); setSelectedCustomItems([]); setSelectedRentalItems([]); setCustomOrder(""); clearError("selection"); }}
-                                                className={`rounded-xl border p-4 text-left transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#5B2FC6] ${
-                                                    bookingType === "rental"
-                                                        ? "border-[#2B174C] bg-[#F7F1FF] shadow-sm"
-                                                        : "border-[#E6DDF0] bg-white hover:bg-[#FFFDF8]"
-                                                }`}
-                                            >
                                                 <div className="flex items-center gap-2 text-sm font-semibold text-[#1A1220]">
-                                                    <Truck size={16} aria-hidden="true" /> Rental booking
+                                                    <Truck size={16} aria-hidden="true" /> Build Your Own
                                                 </div>
                                                 <div className="mt-1 text-xs leading-5 text-[#7A6A84]">
-                                                    Rent equipment without a package
+                                                    Pick consumable goods, rent equipment, or both. The store confirms the final price.
                                                 </div>
                                             </button>
                                         </div>
@@ -2648,7 +2708,7 @@ export default function CustomerBookingPage() {
                                             </div>
                                         )}
                                         <p className="mt-3 text-xs leading-5 text-[#806A8C]">
-                                            Package and custom bookings can include optional rental equipment. Rental booking is equipment only.
+                                            Only renting equipment, like chairs or tables? Choose <strong>Build Your Own</strong> and pick from the Rental Goods tab.
                                         </p>
                                     </div>
                                 </section>
@@ -2674,17 +2734,17 @@ export default function CustomerBookingPage() {
                                                 <CalendarDays size={18} className="text-[#4E2C66]" />
                                                 <div>
                                                     <h3 className="text-sm font-bold text-[#2B174C]">Event schedule</h3>
-                                                    <p className="mt-1 text-xs text-[#806A8C]">Select your event dates. Rental equipment uses these dates to calculate the estimated charge.</p>
+                                                    <p className="mt-1 text-xs text-[#806A8C]">When is your event?</p>
                                                 </div>
                                             </div>
                                             <div className="mb-4 flex flex-wrap gap-2" role="group" aria-label="Event duration">
                                                 <button type="button" aria-pressed={eventDurationType === "single"}
-                                                        onClick={() => { setEventDurationType("single"); setRentalEndDate(""); clearError("rentalEndDate"); }}
+                                                        onClick={() => { setEventDurationType("single"); setRentalEndDate(""); setReturnDate(""); clearError("rentalEndDate"); }}
                                                         className={`rounded-xl border px-4 py-2.5 text-sm font-semibold transition ${eventDurationType === "single" ? "border-[#2B174C] bg-[#2B174C] text-white" : "border-[#D8CBE7] bg-white text-[#2B174C] hover:bg-[#F7F1FF]"}`}>
                                                     One-day event
                                                 </button>
                                                 <button type="button" aria-pressed={eventDurationType === "multiple"}
-                                                        onClick={() => { setEventDurationType("multiple"); setRentalEndDate(prev => prev > date ? prev : ""); clearError("rentalEndDate"); }}
+                                                        onClick={() => { setEventDurationType("multiple"); setRentalEndDate(prev => prev > date ? prev : ""); setReturnDate(""); clearError("rentalEndDate"); }}
                                                         className={`rounded-xl border px-4 py-2.5 text-sm font-semibold transition ${eventDurationType === "multiple" ? "border-[#2B174C] bg-[#2B174C] text-white" : "border-[#D8CBE7] bg-white text-[#2B174C] hover:bg-[#F7F1FF]"}`}>
                                                     Multi-day event
                                                 </button>
@@ -2693,7 +2753,7 @@ export default function CustomerBookingPage() {
                                                 <div>
                                                     <label htmlFor="event-start-date" className="mb-2 block text-xs font-semibold text-[#2B174C]">{eventDurationType === "multiple" ? "Event start date" : "Event date"}</label>
                                                     <input id="event-start-date" type="date" min={todayForPicker} value={date}
-                                                           onChange={e => { const next = e.target.value; setDate(next); if (rentalEndDate && rentalEndDate <= next) setRentalEndDate(""); clearError("date"); clearError("rentalEndDate"); }}
+                                                           onChange={e => { const next = e.target.value; setDate(next); if (rentalEndDate && rentalEndDate <= next) setRentalEndDate(""); setHandoverDate(""); setReturnDate(""); clearError("date"); clearError("rentalEndDate"); clearError("handoverDate"); clearError("returnDate"); }}
                                                            className={`h-12 w-full rounded-xl border bg-white px-3 text-sm text-[#1A1220] outline-none focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 ${fieldErrors.date ? "border-[#F2C4C4]" : "border-[#E6DDF0]"}`} />
                                                     {fieldErrors.date && <p className="mt-1 text-xs text-red-600">{fieldErrors.date}</p>}
                                                 </div>
@@ -2703,47 +2763,83 @@ export default function CustomerBookingPage() {
                                                         <input id="event-end-date" type="date" min={date ? new Date(Date.parse(`${date}T00:00:00Z`) + 86400000).toISOString().slice(0, 10) : todayForPicker}
                                                                value={rentalEndDate}
                                                                max={date ? new Date(Date.parse(`${date}T00:00:00Z`) + 29 * 86400000).toISOString().slice(0, 10) : undefined}
-                                                               onChange={e => { setRentalEndDate(e.target.value); clearError("rentalEndDate"); }}
+                                                               onChange={e => { setRentalEndDate(e.target.value); setReturnDate(""); clearError("rentalEndDate"); clearError("returnDate"); }}
                                                                className={`h-12 w-full rounded-xl border bg-white px-3 text-sm text-[#1A1220] outline-none focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 ${fieldErrors.rentalEndDate ? "border-[#F2C4C4]" : "border-[#E6DDF0]"}`} />
                                                         {fieldErrors.rentalEndDate && <p className="mt-1 text-xs text-red-600">{fieldErrors.rentalEndDate}</p>}
                                                     </div>
                                                 )}
-                                                <div>
-                                                    <label htmlFor="event-start-time" className="mb-2 block text-xs font-semibold text-[#2B174C]">Event time</label>
-                                                    <input id="event-start-time" type="time" value={eventTime}
-                                                           onChange={e => { setEventTime(e.target.value); clearError("eventTime"); }}
-                                                           className={`h-12 w-full rounded-xl border bg-white px-3 text-sm text-[#1A1220] outline-none focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 ${fieldErrors.eventTime ? "border-[#F2C4C4]" : "border-[#E6DDF0]"}`} />
-                                                    {fieldErrors.eventTime && <p className="mt-1 text-xs text-red-600">{fieldErrors.eventTime}</p>}
-                                                </div>
                                             </div>
                                             <p aria-live="polite" className="mt-3 text-xs font-medium text-[#5F4E75]">
-                                                {!date ? "Choose your event date to calculate the rental duration." : eventDurationType === "multiple" && !rentalEndDate
+                                                {!date ? "Choose your event date." : eventDurationType === "multiple" && !rentalEndDate
                                                     ? "Choose the end date for your multi-day event."
                                                     : requestedEventDays > 30 ? "The maximum event period is 30 days."
-                                                        : rentalDuration > 0 ? `${rentalDuration} ${rentalDuration === 1 ? "day" : "days"} selected for the event and rental estimate.`
+                                                        : requestedEventDays > 0 ? `${requestedEventDays}-day event.`
                                                             : "Choose valid event dates."}
                                             </p>
                                         </div>
 
+                                        {/* How and when the customer gets the items (replaces "event time"). */}
+                                        <div className="rounded-2xl border border-[#E6DDF0] bg-[#FFFDF8] p-4" role="group" aria-labelledby="handover-heading">
+                                            <div className="mb-3 flex items-center gap-2">
+                                                {handoverMethod === "delivery" ? <Truck size={18} className="text-[#4E2C66]" /> : <StoreIcon size={18} className="text-[#4E2C66]" />}
+                                                <div>
+                                                    <h3 id="handover-heading" className="text-sm font-bold text-[#2B174C]">Pickup or delivery</h3>
+                                                    <p className="mt-1 text-xs text-[#806A8C]">How and when will you get your items?</p>
+                                                </div>
+                                            </div>
+                                            <div className="mb-4 flex flex-wrap gap-2" role="radiogroup" aria-label="Pickup or delivery">
+                                                {(["pickup", "delivery"] as const).map(method => (
+                                                    <button key={method} type="button" role="radio" aria-checked={handoverMethod === method}
+                                                            onClick={() => { setHandoverMethod(method); clearError("handoverDate"); clearError("handoverTime"); clearError("venue"); }}
+                                                            className={`inline-flex items-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-semibold transition ${handoverMethod === method ? "border-[#2B174C] bg-[#2B174C] text-white" : "border-[#D8CBE7] bg-white text-[#2B174C] hover:bg-[#F7F1FF]"}`}>
+                                                        {method === "pickup" ? <><StoreIcon size={15} /> I'll pick up at the store</> : <><Truck size={15} /> Deliver to my venue</>}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                            <div className="grid gap-4 sm:grid-cols-2">
+                                                <div>
+                                                    <label htmlFor="handover-date" className="mb-2 block text-xs font-semibold text-[#2B174C]">{handoverWord} date</label>
+                                                    <input id="handover-date" type="date" value={rentalFrom} disabled={!date}
+                                                           min={date ? [shiftIsoDate(date, -HANDOVER_LEAD_DAYS), todayForPicker].sort()[1] : todayForPicker}
+                                                           max={date || undefined}
+                                                           onChange={e => { setHandoverDate(e.target.value); clearError("handoverDate"); clearError("returnTime"); }}
+                                                           aria-describedby="handover-date-help"
+                                                           className={`h-12 w-full rounded-xl border bg-white px-3 text-sm text-[#1A1220] outline-none focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:bg-[#F7F4FA] ${fieldErrors.handoverDate ? "border-[#F2C4C4]" : "border-[#E6DDF0]"}`} />
+                                                    {fieldErrors.handoverDate
+                                                        ? <p className="mt-1 text-xs text-red-600">{fieldErrors.handoverDate}</p>
+                                                        : <p id="handover-date-help" className="mt-1 text-xs text-[#806A8C]">{date ? "Same day as the event, or up to 7 days before." : "Choose your event date first."}</p>}
+                                                </div>
+                                                <div>
+                                                    <label htmlFor="handover-time" className="mb-2 block text-xs font-semibold text-[#2B174C]">{handoverWord} time</label>
+                                                    <input id="handover-time" type="time" value={handoverTime}
+                                                           onChange={e => { setHandoverTime(e.target.value); clearError("handoverTime"); clearError("returnTime"); }}
+                                                           className={`h-12 w-full rounded-xl border bg-white px-3 text-sm text-[#1A1220] outline-none focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 ${fieldErrors.handoverTime ? "border-[#F2C4C4]" : "border-[#E6DDF0]"}`} />
+                                                    {fieldErrors.handoverTime && <p className="mt-1 text-xs text-red-600">{fieldErrors.handoverTime}</p>}
+                                                </div>
+                                            </div>
+                                            {/* The address is only needed for delivery. Pickup at the store needs no venue. */}
+                                            {handoverMethod === "delivery" && <div className="mt-4">
+                                                <Input
+                                                    label="Delivery address"
+                                                    value={venue}
+                                                    onChange={(v) => { setVenue(v); clearError("venue"); }}
+                                                    placeholder="House no., street, barangay, city"
+                                                    error={fieldErrors.venue}
+                                                />
+                                                <p className="text-xs text-[#5F4E75]">The store will message you to confirm the delivery.</p>
+                                            </div>}
+                                        </div>
+
                                     </div>
-                                    <div className="mt-6 grid gap-5 md:grid-cols-2">
-                                        {bookingType === "custom" && (
-                                            <Input
-                                                label="Event Type"
-                                                value={eventType}
-                                                onChange={(v) => { setEventType(v); clearError("eventType"); }}
-                                                placeholder="Birthday, Wedding, Corporate..."
-                                                error={fieldErrors.eventType}
-                                            />
-                                        )}
+                                    {bookingType === "custom" && <div className="mt-6 grid gap-5 md:grid-cols-2">
                                         <Input
-                                            label="Venue / Location"
-                                            value={venue}
-                                            onChange={(v) => { setVenue(v); clearError("venue"); }}
-                                            placeholder="Home, restaurant, event hall..."
-                                            error={fieldErrors.venue}
+                                            label="Event Type"
+                                            value={eventType}
+                                            onChange={(v) => { setEventType(v); clearError("eventType"); }}
+                                            placeholder="Birthday, Wedding, Corporate... (optional if only renting equipment)"
+                                            error={fieldErrors.eventType}
                                         />
-                                    </div>
+                                    </div>}
                                 </section>
 
                             </div>}
@@ -2762,21 +2858,22 @@ export default function CustomerBookingPage() {
                                                     {availablePackages.filter(pkg => effectivePackageBranchFilter === "all" ||
                                                         Number(pkg.branch_id ?? pkg.branchId) === Number(effectivePackageBranchFilter)).map(pkg => (
                                                         <option key={pkg.id} value={String(pkg.id)}>
-                                                            {pkg.name} - {peso(pkg.package_price)} · {branches.find(b => b.id === Number(pkg.branch_id ?? pkg.branchId))?.name || `Branch #${pkg.branch_id ?? pkg.branchId}`}
+                                                            {pkg.name} - {peso(pkg.package_price)}{packageContentsLabel(pkg) ? ` · ${packageContentsLabel(pkg)}` : ""} · {branches.find(b => b.id === Number(pkg.branch_id ?? pkg.branchId))?.name || `Branch #${pkg.branch_id ?? pkg.branchId}`}
                                                         </option>
                                                     ))}
                                                 </select>
                                                 {selectedPackageData && <p className="mt-2 text-xs text-[#806A8C]">Handled by: <strong>{selectedBranchName || `Branch #${packageBranchId}`}</strong></p>}
                                                 {selectedPackageData && !selectedPackageStockAvailable &&
-                                                    <p role="alert" className="mt-2 text-xs text-red-700">This package is unavailable or its stock cannot be verified for the selected branch and event date. Please choose another package.</p>}
+                                                    <p role="alert" className="mt-2 text-xs text-red-700">This package isn't available for your date. Please choose another package.</p>}
                                                 {packageRentalIssues.length > 0 &&
                                                     <p role="status" className="mt-2 rounded-lg bg-amber-50 p-2 text-xs text-amber-900">
-                                                        Your package rentals and extra rentals (if any) exceed availability for the chosen dates. Choose different dates or contact the branch.
+                                                        The rental equipment in this package isn't available for these dates. Choose different dates or contact the branch.
                                                     </p>}
                                                 {fieldErrors.selection && <p className="mt-2 text-xs text-red-600">{fieldErrors.selection}</p>}
                                             </div>
                                             {selectedPackageData && <div className="border-t border-[#E6DDF0] pt-4">
-                                                <h4 className="text-sm font-semibold text-[#24153B]">Included in your package</h4>
+                                                <h4 className="flex flex-wrap items-center gap-2 text-sm font-semibold text-[#24153B]">Included in your package
+                                                    {packageContentsLabel(selectedPackageData) && <span className="rounded-full bg-[#F1EBFF] px-2.5 py-0.5 text-[11px] font-semibold text-[#5330B6]">{packageContentsLabel(selectedPackageData)}</span>}</h4>
                                                 <p className="mt-1 text-xs text-[#75657E]">These are covered by the fixed package price. You don't need to add them again.</p>
                                                 <div className="mt-3 space-y-2">
                                                     {(selectedPackageData.inclusions || []).length === 0
@@ -2787,40 +2884,74 @@ export default function CustomerBookingPage() {
                                                         </div>)}
                                                 </div>
                                             </div>}
-                                            <p className="text-xs text-[#75657E]">Need equipment beyond what's included? Add it separately below.</p>
-                                            <button type="button" onClick={() => setShowRentalAddons(value => !value)}
-                                                    aria-expanded={showRentalAddons}
-                                                    className="inline-flex items-center gap-2 rounded-lg border border-[#D8CBE7] px-4 py-2.5 text-sm font-semibold text-[#4E2C66] hover:bg-[#F7F1FF]">
-                                                {showRentalAddons ? "Hide additional rentals" : "+ Add extra rental equipment"}
-                                            </button>
-                                            {(showRentalAddons || selectedRentalItems.length > 0) && renderRentalPicker(true)}
+                                            {/* Packages are fixed sets (no extra rental add-ons). Changes go through the store. */}
+                                            <p className="rounded-xl bg-[#F7F1FF] px-4 py-3 text-xs leading-5 text-[#4E2C66]">
+                                                Packages are fixed sets. Want something added or changed? Write it in your special requests or message the store.
+                                            </p>
                                         </div>
                                     ) : (
                                         <div>
-                                            <p className="mb-4 text-sm text-[#806A8C]">{bookingType === "rental" ? "Choose rental equipment for your event dates. Quantities are subject to availability and Manager approval." : "Choose consumable goods, rental goods, or both for your custom event request."}</p>
-                                            {bookingType === "custom" && <div className="mb-4 grid grid-cols-2 gap-2 rounded-xl bg-[#F7F1FF] p-1.5" role="tablist" aria-label="Choose inventory type">
+                                            <p className="mb-4 text-sm text-[#806A8C]">Choose consumable goods, rental goods, or both. Switching tabs keeps everything you picked.</p>
+                                            <div className="mb-4 grid grid-cols-2 gap-2 rounded-xl bg-[#F7F1FF] p-1.5" role="tablist" aria-label="Choose inventory type">
                                                 <button type="button" role="tab" aria-selected={activeGoodsTab === "consumable"}
                                                         onClick={() => setActiveGoodsTab("consumable")}
                                                         className={`min-h-10 rounded-lg px-3 py-2 text-sm font-semibold transition ${activeGoodsTab === "consumable" ? "bg-[#2B174C] text-white shadow-sm" : "text-[#5F4E75] hover:bg-white"}`}>
-                                                    Consumable Goods
+                                                    Consumable Goods{selectedCustomItems.length > 0 ? ` (${selectedCustomItems.length})` : ""}
                                                 </button>
                                                 <button type="button" role="tab" aria-selected={activeGoodsTab === "rental"}
                                                         onClick={() => setActiveGoodsTab("rental")}
                                                         className={`min-h-10 rounded-lg px-3 py-2 text-sm font-semibold transition ${activeGoodsTab === "rental" ? "bg-[#2B174C] text-white shadow-sm" : "text-[#5F4E75] hover:bg-white"}`}>
-                                                    Rental Goods
+                                                    Rental Goods{selectedRentalItems.length > 0 ? ` (${selectedRentalItems.length})` : ""}
                                                 </button>
-                                            </div>}
-                                            <div role="region" aria-label={bookingType === "rental" ? "Rental equipment selection" : "Custom items selection"}>
-                                                {bookingType === "rental" ? renderRentalPicker() : activeGoodsTab === "consumable" ? renderConsumablePicker() : renderRentalPicker()}
                                             </div>
-                                            <p className="mt-4 text-xs text-[#806A8C]">{bookingType === "rental" ? "Your equipment selection appears in the review step." : "Items from both tabs are included in the review step."}</p>
+                                            <div role="region" aria-label="Custom items selection">
+                                                {activeGoodsTab === "consumable" ? renderConsumablePicker() : renderRentalPicker()}
+                                            </div>
+                                            <p className="mt-4 text-xs text-[#806A8C]">Items from both tabs are included in the review step.</p>
                                         </div>
                                     )}
                                 </section>
 
+                                {/* Return of rental equipment: only when the booking has rentals. */}
+                                {needsReturn && <section className="rounded-2xl border border-[#E6DDF0] bg-[#FFFDF8] p-4" aria-labelledby="return-heading">
+                                    <div className="mb-3 flex items-center gap-2">
+                                        <RotateCcw size={18} className="text-[#4E2C66]" />
+                                        <div>
+                                            <h3 id="return-heading" className="text-sm font-bold text-[#2B174C]">Return of rental equipment</h3>
+                                            <p className="mt-1 text-xs text-[#806A8C]">{handoverMethod === "delivery"
+                                                ? "When can the store collect the equipment?"
+                                                : "When will you bring the equipment back?"}</p>
+                                        </div>
+                                    </div>
+                                    <div className="grid gap-4 sm:grid-cols-2">
+                                        <div>
+                                            <label htmlFor="return-date" className="mb-2 block text-xs font-semibold text-[#2B174C]">Return date</label>
+                                            <input id="return-date" type="date" value={rentalTo} disabled={!eventEndDate}
+                                                   min={eventEndDate || undefined} max={eventEndDate ? shiftIsoDate(eventEndDate, RETURN_GRACE_DAYS) : undefined}
+                                                   onChange={e => { setReturnDate(e.target.value); clearError("returnDate"); clearError("returnTime"); }}
+                                                   aria-describedby="return-date-help"
+                                                   className={`h-12 w-full rounded-xl border bg-white px-3 text-sm text-[#1A1220] outline-none focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:bg-[#F7F4FA] ${fieldErrors.returnDate ? "border-[#F2C4C4]" : "border-[#E6DDF0]"}`} />
+                                            {fieldErrors.returnDate
+                                                ? <p className="mt-1 text-xs text-red-600">{fieldErrors.returnDate}</p>
+                                                : <p id="return-date-help" className="mt-1 text-xs text-[#806A8C]">Last day of the event, or up to 7 days after.</p>}
+                                        </div>
+                                        <div>
+                                            <label htmlFor="return-time" className="mb-2 block text-xs font-semibold text-[#2B174C]">Return time</label>
+                                            <input id="return-time" type="time" value={returnTime}
+                                                   onChange={e => { setReturnTime(e.target.value); clearError("returnTime"); }}
+                                                   className={`h-12 w-full rounded-xl border bg-white px-3 text-sm text-[#1A1220] outline-none focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 ${fieldErrors.returnTime ? "border-[#F2C4C4]" : "border-[#E6DDF0]"}`} />
+                                            {fieldErrors.returnTime && <p className="mt-1 text-xs text-red-600">{fieldErrors.returnTime}</p>}
+                                        </div>
+                                    </div>
+                                    {rentalDuration > 0 && <p aria-live="polite" className="mt-3 text-xs font-medium text-[#5F4E75]">
+                                        Rental period: {formatRentalCalendarDate(rentalFrom)} ({handoverWord.toLowerCase()}) to {formatRentalCalendarDate(rentalTo)} (return) · {rentalDuration} {rentalDuration === 1 ? "day" : "days"}.
+                                        {selectedRentalItems.length > 0 ? " Rental rates are charged per day." : ""}
+                                    </p>}
+                                </section>}
+
                                 {/* 6. Customization & requests */}
                                 <section className="rounded-xl bg-white py-3" aria-labelledby="requests-heading">
-                                    <h3 id="requests-heading" className="mb-4 text-base font-bold text-[#2B174C]">{bookingType === "rental" ? "Optional rental instructions" : "Preferences & special requests"}</h3>
+                                    <h3 id="requests-heading" className="mb-4 text-base font-bold text-[#2B174C]">{equipmentOnly ? "Optional rental instructions" : "Preferences & special requests"}</h3>
                                     {bookingType === "custom" && <div className="mb-4">
                                         <div className="mt-5">
                                             <label className="mb-3 block text-sm font-semibold text-[#1A1220]">
@@ -2837,9 +2968,9 @@ export default function CustomerBookingPage() {
                                             />
                                         </div>
                                     </div>}
-                                    {bookingType !== "rental" && <div className="mt-6">
+                                    {<div className="mt-6">
                                         <label className="mb-3 block text-sm font-semibold text-[#1A1220]">
-                                            Theme / motif request
+                                            Theme / motif request{equipmentOnly ? " (optional)" : ""}
                                         </label>
                                         <textarea
                                             maxLength={150}
@@ -2925,15 +3056,19 @@ export default function CustomerBookingPage() {
                                         <h3 className="text-base font-bold text-[#2B174C]">Review your request</h3>
                                         <p className="mt-1 text-xs text-[#75657E]">Nothing is reserved yet. The store reviews your request before confirming payment and availability.</p>
                                         <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
-                                            <SummaryItem label="Booking type" value={bookingType === "package" ? "Package" : bookingType === "custom" ? "Custom" : "Rental only"} />
+                                            <SummaryItem label="Booking type" value={bookingType === "package"
+                                                ? `Package${packageContentsLabel(selectedPackageData) ? ` · ${packageContentsLabel(selectedPackageData)}` : ""}`
+                                                : `Custom · ${selectedCustomItems.length && selectedRentalItems.length ? "Consumables + Rentals" : selectedRentalItems.length ? "Rentals only" : "Consumables only"}`} />
                                             <SummaryItem label="Branch" value={selectedBranchName || "Choose a branch"} />
                                             <SummaryItem label="Event date" value={date ? (eventDurationType === "multiple" ? `${date} to ${eventEndDate}` : date) : "Choose a date"} />
-                                            <SummaryItem label="Time & venue" value={`${eventTime || "—"} · ${venue || "Not entered"}`} />
+                                            <SummaryItem label={handoverWord} value={formatSchedule(rentalFrom, handoverTime) || "Not set"} />
+                                            {needsReturn && <SummaryItem label="Return" value={formatSchedule(rentalTo, returnTime) || "Not set"} />}
+                                            {handoverMethod === "delivery" && <SummaryItem label="Delivery address" value={venue || "Not entered"} />}
                                             {bookingType === "package" && <SummaryItem label="Package" value={selectedPackageData?.name || "Not selected"} />}
                                             {bookingType === "custom" && <SummaryItem label="Custom items" value={`${selectedCustomItems.length} product(s) selected`} />}
                                             {(bookingType === "package" && packageHasIncludedRentals) && <SummaryItem label="Rentals included in package" value={`${[...includedRentalQuantities.values()].reduce((a,b)=>a+b,0)} unit(s) included`} />}
-                                            <SummaryItem label={bookingType === "package" ? "Extra rental items" : "Rental items"} value={`${selectedRentalItems.length} type(s) selected`} />
-                                            {bookingType !== "rental" && <SummaryItem label="Theme" value={theme || "Not specified"} />}
+                                            {bookingType === "custom" && <SummaryItem label="Rental items" value={`${selectedRentalItems.length} type(s) selected`} />}
+                                            <SummaryItem label="Theme" value={theme || "Not specified"} />
                                         </div>
                                         {(selectedRentalItems.length > 0 || selectedCustomItems.length > 0 || (bookingType === "package" && !!selectedPackageData?.inclusions?.length)) &&
                                             <div className="mt-4 space-y-2 border-t border-[#E3D8ED] pt-4">
@@ -2943,14 +3078,14 @@ export default function CustomerBookingPage() {
                                                 {bookingType === "custom" && selectedCustomItems.map(item =>
                                                     <p key={item.key} className="text-xs text-[#5F4E75]">{item.displayName} × {item.quantity}</p>)}
                                                 {selectedRentalItems.map(item =>
-                                                    <p key={item.id} className="text-xs text-[#5F4E75]">{item.name} × {item.quantity} · {rentalDuration} day(s) {bookingType === "package" ? "(extra rental)" : ""}</p>)}
+                                                    <p key={item.id} className="text-xs text-[#5F4E75]">{item.name} × {item.quantity} · {rentalDuration} day(s)</p>)}
                                             </div>}
                                         <div className="mt-4 border-t border-[#E3D8ED] pt-4">
                                             {bookingType === "package" && <div className="mb-2 flex justify-between gap-2 text-sm"><span>Package price</span><strong>{peso(estimatedBase)}</strong></div>}
                                             {bookingType === "custom" && <div className="mb-2 flex justify-between gap-2 text-sm"><span>Estimated consumables</span><strong>{peso(selectedCustomTotal)}</strong></div>}
-                                            {selectedRentalItems.length > 0 && <div className="mb-2 flex justify-between gap-2 text-sm"><span>{bookingType === "package" ? "Additional rentals" : "Estimated rentals"}</span><strong>{peso(selectedRentalTotal)}</strong></div>}
+                                            {selectedRentalItems.length > 0 && <div className="mb-2 flex justify-between gap-2 text-sm"><span>Estimated rentals</span><strong>{peso(selectedRentalTotal)}</strong></div>}
                                             <div className="flex justify-between gap-3 text-base font-bold text-[#2B174C]"><span>Estimated total</span><span>{peso(estimatedBase + (bookingType === "custom" ? selectedCustomTotal : 0) + selectedRentalTotal + estimatedDelivery + estimatedSetup)}</span></div>
-                                            <p className="mt-2 text-xs leading-5 text-[#75657E]">Included rental equipment is already covered by the package price. Extra rentals are priced separately. Any refundable rental security deposit is handled separately after Manager review.</p>
+                                            <p className="mt-2 text-xs leading-5 text-[#75657E]">Rental equipment in the package is already included in the price. The store will tell you if a refundable security deposit is needed.</p>
                                             {bookingType === "package" && selectedPackageData && <p className="mt-2 text-xs text-[#75657E]">Configured package down payment: {peso(Number(selectedPackageData.down_payment_amount || 0))}. Payment is requested only after approval.</p>}
                                         </div>
                                     </div>
@@ -3210,10 +3345,10 @@ export default function CustomerBookingPage() {
                         <div className="flex items-center gap-2 text-amber-700"><AlertCircle size={22}/>
                             <h2 id="rental-availability-warning-title" className="text-lg font-bold">Not enough rental equipment</h2>
                         </div>
-                        <p className="mt-3 text-sm text-[#2B174C]">For <strong>{date}{eventEndDate !== date ? ` to ${eventEndDate}` : ''}</strong>,
+                        <p className="mt-3 text-sm text-[#2B174C]">For <strong>{rentalFrom ? formatRentalCalendarDate(rentalFrom) : ""}{rentalTo && rentalTo !== rentalFrom ? ` to ${formatRentalCalendarDate(rentalTo)}` : ''}</strong>,
                             only <strong>{rentalAvailabilityWarning.available}</strong> {rentalAvailabilityWarning.name} unit(s) are available.
                             You requested <strong>{rentalAvailabilityWarning.requested}</strong>.</p>
-                        <p className="mt-2 text-xs text-[#806A8C]">Confirmed reservations affect these dates. Pending requests do not reserve stock. Select fewer units or choose another date.</p>
+                        <p className="mt-2 text-xs text-[#806A8C]">Confirmed reservations affect these dates. Pending requests do not reserve stock. Select fewer units or change your pickup or return date.</p>
                         <div className="mt-5 flex flex-wrap justify-end gap-2">
                             <button type="button" onClick={() => setRentalAvailabilityWarning(null)}
                                     className="rounded-xl border border-[#E6DDF0] px-4 py-2 text-sm font-semibold text-[#2B174C]">Choose another date</button>

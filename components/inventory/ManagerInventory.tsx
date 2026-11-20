@@ -329,13 +329,10 @@ type ActionCenterFilter = "All" | ActionCenterRow["issue"];
 // Inventory downloads reuse the same report format as StockNBook's management modules.
 async function downloadManagerInventoryReport(
     title: string, headers: string[], rows: string[][],
-    branchName: string, dateRange: string, filename: string
+    branchName: string, dateRange: string, filename: string, filters: string[] = []
 ) {
-    const { exportTableAsPdf } = await import("@/components/dashboard/_shared");
-    exportTableAsPdf({ title, headers, rows }, {
-        storeName: sessionStorage.getItem("store_name") || "StockNBook",
-        branch: branchName,
-        dateRange,
+    downloadInventoryPdf({ title, headers, rows }, {
+        storeName: sessionStorage.getItem("store_name") || "StockNBook", branch: branchName, dateRange, filters,
     }, filename);
 }
 
@@ -925,6 +922,11 @@ function getLineStatus(line: ManagerStockLine): ManagerInventoryStatus {
     return "In Stock";
 }
 
+function toSellableProduct(product: Product): Product {
+    return { ...product, stock: product.sellableStock ?? product.stock,
+        variants: (product.variants || []).map(variant => ({ ...variant, stock: variant.sellableStock ?? variant.stock })) };
+}
+
 function getProductStatus(product: Product): ManagerInventoryStatus {
     const lines = getProductStockLines(product);
     const statuses = lines.map(getLineStatus);
@@ -1497,8 +1499,8 @@ function productMatchesInventorySearch(product: Product, rawSearch: string) {
     );
 }
 
-// Export the same filtered product rows and columns currently shown in the
-// Branch Inventory List. Keep the product/stock-in/status calculations unchanged.
+// Export the same filtered parent products and their expandable variant rows.
+// Expansion state is presentation-only: all listed variants are included in the PDF.
 function getManagerInventoryExportRows(
     products: Product[]
 ): Array<Array<string | number>> {
@@ -1512,265 +1514,37 @@ function getManagerInventoryExportRows(
             "Expiration",
             "Status",
         ],
-        ...products.map((product) => [
-            getProductNumber(product),
-            product.name,
-            product.category,
-            getProductTotalStock(product),
-            getProductReorderLevel(product),
-            getProductExpiration(product)
-                ? formatDate(getProductExpiration(product)!.toISOString())
-                : "—",
-            getProductStatus(product),
-        ]),
-    ];
-}
-
-type ManagerInventoryExportDetails = {
-    storeName: string;
-    branchName: string;
-    categoryFilter: string;
-    statusFilter: string;
-    generatedAt: Date;
-};
-
-function getManagerInventoryReportFilename(
-    extension: "xlsx" | "pdf",
-    details: ManagerInventoryExportDetails
-) {
-    const slug = (value: string) => String(value || "Unknown")
-        .replace(/[^a-zA-Z0-9_-]+/g, "-")
-        .replace(/^-+|-+$/g, "")
-        .slice(0, 35) || "Unknown";
-    const date = details.generatedAt;
-    const stamp = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-    return `StockNBook_Inventory_${slug(details.storeName)}_${slug(details.branchName)}_${stamp}.${extension}`;
-}
-
-function getManagerInventoryReportDate(date: Date) {
-    return date.toLocaleString("en-PH", {
-        month: "short", day: "numeric", year: "numeric",
-        hour: "numeric", minute: "2-digit", hour12: true,
-    });
-}
-
-function exportManagerInventoryExcel(
-    products: Product[],
-    details: ManagerInventoryExportDetails
-) {
-    const reportRows: Array<Array<string | number>> = [
-        ["StockNBook - Branch Inventory List"],
-        ["Store", details.storeName],
-        ["Branch", details.branchName],
-        ["Report Date", getManagerInventoryReportDate(details.generatedAt)],
-        ["Category Filter", details.categoryFilter === "All" ? "All Categories" : details.categoryFilter],
-        ["Status Filter", details.statusFilter],
-        ["Total Products", products.length],
-        [],
-        ...getManagerInventoryExportRows(products),
-    ];
-    const sheet = XLSX.utils.aoa_to_sheet(reportRows);
-    sheet["!cols"] = [
-        { wch: 19 }, { wch: 42 }, { wch: 25 }, { wch: 18 },
-        { wch: 17 }, { wch: 20 }, { wch: 18 },
-    ];
-    sheet["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 6 } }];
-    // Row 9 contains the actual product headings, below the report information.
-    sheet["!autofilter"] = { ref: `A9:G${Math.max(9, 9 + products.length)}` };
-
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, sheet, "Branch Inventory");
-    XLSX.writeFile(workbook, getManagerInventoryReportFilename("xlsx", details), {
-        bookType: "xlsx",
-    });
-}
-
-// Download a real PDF directly (not via a print dialog or a pop-up window).
-// The canvas renderer and minimal PDF image wrapper use browser APIs already
-// available in Next.js; no new packages or unrelated backend changes are needed.
-function exportManagerInventoryPdf(
-    products: Product[],
-    details: ManagerInventoryExportDetails
-) {
-    const [headers, ...rows] = getManagerInventoryExportRows(products);
-    const pageWidth = 841.89; // A4 landscape, in PDF points
-    const pageHeight = 595.28;
-    const scale = 2; // keep text readable even with hundreds of products
-    const widths = [102, 175, 123, 71, 80, 87, 62];
-    const tableWidth = widths.reduce((sum, value) => sum + value, 0);
-    const tableLeft = (pageWidth - tableWidth) / 2;
-    const tableTop = 139;
-    const tableHeaderHeight = 31;
-    const footerTop = 561;
-    const rowLineHeight = 11;
-    const paddingX = 5;
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.round(pageWidth * scale);
-    canvas.height = Math.round(pageHeight * scale);
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("Your browser cannot create the PDF canvas.");
-    ctx.setTransform(scale, 0, 0, scale, 0, 0);
-
-    const textLines = (rawValue: string | number, maxWidth: number) => {
-        const value = String(rawValue ?? "").replace(/\s+/g, " ").trim() || "—";
-        const lines: string[] = [];
-        let line = "";
-        for (const word of value.split(" ")) {
-            const next = line ? `${line} ${word}` : word;
-            if (ctx.measureText(next).width <= maxWidth) {
-                line = next;
-                continue;
+        ...products.flatMap((product) => {
+            const sellableProduct = toSellableProduct(product);
+            const expiration = getProductExpiration(product);
+            const parentRow = [
+                getProductNumber(product) || "—",
+                product.name,
+                product.category || "—",
+                getProductTotalStock(sellableProduct),
+                getProductReorderLevel(product),
+                expiration ? formatDate(expiration.toISOString()) : "—",
+                getProductStatus(sellableProduct),
+            ];
+            if (!product.hasVariants || !sellableProduct.variants?.length) {
+                return [parentRow];
             }
-            if (line) lines.push(line);
-            line = "";
-            // Long product references must not overflow the next column.
-            for (const character of word) {
-                if (ctx.measureText(line + character).width > maxWidth && line) {
-                    lines.push(line);
-                    line = "";
-                }
-                line += character;
-            }
-        }
-        if (line) lines.push(line);
-        return lines.length ? lines : ["—"];
-    };
-
-    const makeRow = (row: Array<string | number>) => {
-        ctx.font = "8.2px Arial, sans-serif";
-        const wrapped = row.map((cell, col) => textLines(cell, widths[col] - paddingX * 2));
-        return {
-            wrapped,
-            height: Math.max(21, Math.max(...wrapped.map((lines) => lines.length)) * rowLineHeight + 9),
-        };
-    };
-    const rowModels = rows.map(makeRow);
-    // Determine page boundaries before drawing so the PDF can show page counts.
-    const pages: Array<Array<{ wrapped: string[][]; height: number }>> = [[]];
-    let usedHeight = tableTop + tableHeaderHeight;
-    for (const row of rowModels) {
-        if (usedHeight + row.height > footerTop - 4 && pages[pages.length - 1].length) {
-            pages.push([]);
-            usedHeight = tableTop + tableHeaderHeight;
-        }
-        pages[pages.length - 1].push(row);
-        usedHeight += row.height;
-    }
-
-    const drawGridRow = (wrapped: string[][], y: number, height: number, header = false, alt = false) => {
-        ctx.fillStyle = header ? "#F1EBFF" : alt ? "#FAF8FD" : "#FFFFFF";
-        ctx.fillRect(tableLeft, y, tableWidth, height);
-        let x = tableLeft;
-        wrapped.forEach((lines, index) => {
-            ctx.strokeStyle = "#E3D8EA";
-            ctx.lineWidth = 0.5;
-            ctx.strokeRect(x, y, widths[index], height);
-            ctx.fillStyle = header ? "#4E2C66" : "#21132E";
-            ctx.font = header ? "bold 8px Arial, sans-serif" : "8.2px Arial, sans-serif";
-            lines.forEach((line, lineIndex) => {
-                ctx.fillText(line, x + paddingX, y + 12 + lineIndex * rowLineHeight);
+            const lines = getProductStockLines(sellableProduct);
+            const variantRows = sellableProduct.variants.map((variant, index) => {
+                const line = lines[index];
+                return [
+                    variant.variantNumber || "—",
+                    `${product.name} - ${getVariantName(variant)}`,
+                    product.category || "—",
+                    line.stock,
+                    line.alertLevel,
+                    formatDate(variant.expirationDate),
+                    getLineStatus(line),
+                ];
             });
-            x += widths[index];
-        });
-    };
-
-    const imageBytes: Uint8Array[] = [];
-    pages.forEach((pageRows, pageIndex) => {
-        ctx.fillStyle = "#FFFFFF";
-        ctx.fillRect(0, 0, pageWidth, pageHeight);
-        ctx.fillStyle = "#2B174C";
-        ctx.font = "bold 17px Arial, sans-serif";
-        ctx.fillText("StockNBook - Branch Inventory List", tableLeft, 33);
-        ctx.font = "10px Arial, sans-serif";
-        ctx.fillText(`Store: ${details.storeName}`, tableLeft, 57);
-        ctx.fillText(`Branch: ${details.branchName}`, tableLeft, 73);
-        ctx.fillText(`Report Date: ${getManagerInventoryReportDate(details.generatedAt)}`, tableLeft, 89);
-        ctx.fillStyle = "#5A476A";
-        ctx.font = "9px Arial, sans-serif";
-        ctx.fillText(
-            `Category: ${details.categoryFilter === "All" ? "All Categories" : details.categoryFilter}  |  Status: ${details.statusFilter}  |  Products: ${products.length}`,
-            tableLeft, 111
-        );
-        ctx.strokeStyle = "#D9CDF0";
-        ctx.beginPath();
-        ctx.moveTo(tableLeft, 119);
-        ctx.lineTo(tableLeft + tableWidth, 119);
-        ctx.stroke();
-        ctx.font = "bold 8px Arial, sans-serif";
-        const wrappedHeaders = headers.map((label, index) => textLines(label, widths[index] - 10));
-        drawGridRow(wrappedHeaders, tableTop, tableHeaderHeight, true);
-        let y = tableTop + tableHeaderHeight;
-        pageRows.forEach((row, index) => {
-            drawGridRow(row.wrapped, y, row.height, false, index % 2 === 1);
-            y += row.height;
-        });
-        ctx.fillStyle = "#806A8C";
-        ctx.font = "9px Arial, sans-serif";
-        ctx.fillText("StockNBook  |  Branch Inventory", tableLeft, pageHeight - 20);
-        ctx.textAlign = "right";
-        ctx.fillText(`Page ${pageIndex + 1} of ${pages.length}`, tableLeft + tableWidth, pageHeight - 20);
-        ctx.textAlign = "left";
-        const base64 = canvas.toDataURL("image/jpeg", 0.86).split(",")[1];
-        const binary = atob(base64);
-        const jpeg = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i += 1) jpeg[i] = binary.charCodeAt(i);
-        imageBytes.push(jpeg);
-    });
-
-    // Place each JPEG page in a standards-compliant PDF without printing.
-    const encoder = new TextEncoder();
-    const chunks: BlobPart[] = [];
-    let bytePosition = 0;
-    const write = (value: string | Uint8Array) => {
-        const chunk = typeof value === "string" ? encoder.encode(value) : value;
-        chunks.push(chunk as BlobPart);
-        bytePosition += chunk.byteLength;
-    };
-    const objectOffsets: number[] = [];
-    const writeObject = (id: number, content: () => void) => {
-        objectOffsets[id] = bytePosition;
-        write(`${id} 0 obj\n`);
-        content();
-        write("\nendobj\n");
-    };
-    write("%PDF-1.4\n%StockNBook\n");
-    writeObject(1, () => write("<< /Type /Catalog /Pages 2 0 R >>"));
-    const pageRefs = imageBytes.map((_, index) => `${3 + index * 3} 0 R`).join(" ");
-    writeObject(2, () => write(`<< /Type /Pages /Kids [${pageRefs}] /Count ${imageBytes.length} >>`));
-    imageBytes.forEach((jpeg, index) => {
-        const pageId = 3 + index * 3;
-        const imageId = pageId + 1;
-        const streamId = pageId + 2;
-        writeObject(pageId, () => write(
-            `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] ` +
-            `/Resources << /XObject << /PageImage ${imageId} 0 R >> >> /Contents ${streamId} 0 R >>`
-        ));
-        writeObject(imageId, () => {
-            write(`<< /Type /XObject /Subtype /Image /Width ${canvas.width} /Height ${canvas.height} ` +
-                `/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`);
-            write(jpeg);
-            write("\nendstream");
-        });
-        const stream = `q\n${pageWidth} 0 0 ${pageHeight} 0 0 cm\n/PageImage Do\nQ\n`;
-        writeObject(streamId, () => write(`<< /Length ${encoder.encode(stream).length} >>\nstream\n${stream}endstream`));
-    });
-    const startXref = bytePosition;
-    const objectCount = 2 + imageBytes.length * 3;
-    write(`xref\n0 ${objectCount + 1}\n0000000000 65535 f \n`);
-    for (let id = 1; id <= objectCount; id += 1) {
-        write(`${String(objectOffsets[id]).padStart(10, "0")} 00000 n \n`);
-    }
-    write(`trailer\n<< /Size ${objectCount + 1} /Root 1 0 R >>\nstartxref\n${startXref}\n%%EOF`);
-
-    const file = new Blob(chunks, { type: "application/pdf" });
-    const url = URL.createObjectURL(file);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = getManagerInventoryReportFilename("pdf", details);
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+            return [parentRow, ...variantRows];
+        }),
+    ];
 }
 
 type InventoryPricingMethod = "markup" | "manual";
@@ -2393,6 +2167,7 @@ export default function ManagerInventory() {
         [managerProducts, trailingTwelveMonthSales]
     );
 
+
     const actionRows = React.useMemo(
         () => getActionCenterRows(allStockLines, productVelocityMap),
         [allStockLines, productVelocityMap]
@@ -2414,7 +2189,7 @@ export default function ManagerInventory() {
 
         if (statusFilter !== "All Status") {
             base = base.filter(
-                (product) => getProductStatus(product) === statusFilter
+                (product) => getProductStatus(toSellableProduct(product)) === statusFilter
             );
         }
 
@@ -2546,6 +2321,7 @@ export default function ManagerInventory() {
 
                         <div className="grid items-stretch gap-4 xl:grid-cols-[1.15fr_1fr]">
                             <StockActionCenter
+
                                 search={inv.search}
                                 rows={actionRows}
                                 branchName={branchBadge}
@@ -2564,6 +2340,7 @@ export default function ManagerInventory() {
                             />
 
                             <RecentStockActivity
+
                                 movements={recentStockMovements}
                                 search={inv.search}
                                 branchName={branchBadge}
@@ -2572,6 +2349,7 @@ export default function ManagerInventory() {
                         </div>
 
                         <ManagerInventoryTable
+
                             inv={inv}
                             products={tableProducts}
                             storeName={inv.storeName}
@@ -2640,26 +2418,26 @@ function ManagerMetricCard({label, value, helper, icon, tone, loading = false}: 
     loading?: boolean;
 }) {
     const iconClassName = {
-        amber: "bg-[#FFF3DE] text-[#E68A00]",
-        red: "bg-[#FFE8E8] text-[#E23B4A]",
-        purple: "bg-[#F1ECFF] text-[#5F35D8]",
-        blue: "bg-[#E9F2FF] text-[#1E6FE8]",
+        amber: "bg-[#FFF7E9] text-[#B7832E]",
+        red: "bg-[#FFE7EB] text-[#CF3348]",
+        purple: "bg-[#F3EBFF] text-[#6C3AD6]",
+        blue: "bg-[#E8F1FF] text-[#2169CF]",
     }[tone];
     return (
-        <section aria-busy={loading} className="flex min-h-[146px] min-w-0 w-full items-center gap-4 rounded-[16px] border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm">
+        <section aria-busy={loading} className="flex min-h-[108px] min-w-0 w-full items-center gap-3 rounded-[16px] border border-[#E6DDF0] bg-white px-3.5 py-3 text-left shadow-sm">
             {loading ? <>
-                <span className="h-14 w-14 shrink-0 animate-pulse rounded-full bg-[#EEE8F3]" aria-hidden="true"/>
-                <span className="min-w-0 flex-1 space-y-2.5" role="status" aria-label={`Loading ${label}`}>
+                <span className="h-12 w-12 shrink-0 animate-pulse rounded-xl bg-[#EEE8F3]" aria-hidden="true"/>
+                <span className="min-w-0 flex-1 space-y-2" role="status" aria-label={`Loading ${label}`}>
                     <span className="block h-3.5 w-32 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
-                    <span className="block h-7 w-24 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
+                    <span className="block h-6 w-24 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
                     <span className="block h-2.5 w-40 max-w-full animate-pulse rounded-lg bg-[#EEE8F3]"/>
                 </span>
             </> : <>
-                <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${iconClassName}`} aria-hidden="true">{icon}</span>
+                <span className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl ${iconClassName}`} aria-hidden="true">{icon}</span>
                 <span className="min-w-0 flex-1">
-                    <span className="block text-[14px] font-semibold leading-5 text-[#4B3E55]">{label}</span>
-                    <span className="mt-1 block break-words text-[28px] font-bold leading-tight tracking-[-0.03em] text-[#1A1220] tabular-nums">{formatNumber(value)}</span>
-                    <span className="mt-2 block text-[11px] leading-4 text-[#8A7D92]">{helper}</span>
+                    <span className="block text-[12px] font-semibold leading-4 text-[#25153D]">{label}</span>
+                    <span className="mt-1 block break-words text-[24px] font-bold leading-none text-[#25153D] tabular-nums">{formatNumber(value)}</span>
+                    <span className="mt-1 block text-[11px] leading-4 text-[#806A8C]">{helper}</span>
                 </span>
             </>}
         </section>
@@ -3001,9 +2779,7 @@ function ReceiveStockDialog({ product, onClose, onSaved }: {
                                 <div><div className="text-xs text-[#806A8C]">Available After Receiving</div>
                                     <div className="mt-1 text-xl font-bold text-[#2B174C]">{loading || inventoryNeedsReconciliation ? "—" : formatNumber(availableBefore + totalQuantity)}</div></div>
                             </div>
-                            {!loading && inventoryNeedsReconciliation && <p role="alert" className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
-                                The catalog records {formatNumber(catalogStockBefore)} units, but only {formatNumber(availableBefore)} are currently sellable in this branch. This difference may reflect old stock records, expired batches, or missing batch balances. Reconcile the affected stock before recording another receipt; no new availability is projected until the records agree.
-                            </p>}
+
                         </div>
                         {loading ? <p className="text-sm text-[#806A8C]">Loading receiving details...</p> : (
                             <>
@@ -3053,6 +2829,7 @@ function ReceiveStockDialog({ product, onClose, onSaved }: {
 }
 
 function StockActionCenter({
+
                                rows,
                                search,
                                branchName,
@@ -3062,6 +2839,7 @@ function StockActionCenter({
                                onDelete,
                                onVariantRemoved,
                            }: {
+
     rows: ActionCenterRow[];
     search: string;
     branchName: string;
@@ -3080,8 +2858,8 @@ function StockActionCenter({
     ), [filter, rows, search]);
 
     return (
-        <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
-            <div className="flex flex-col gap-3 border-b border-[#E9E1EE] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
+        <section className="flex h-[320px] min-h-0 flex-col overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
+            <div className="flex shrink-0 flex-col gap-3 border-b border-[#E9E1EE] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex items-start gap-3">
                     <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]">
                         <ClipboardList size={18} />
@@ -3115,7 +2893,7 @@ function StockActionCenter({
                             onClick={() => void downloadManagerInventoryReport("Stock Action Center",
                                 ["Product", "Current Stock", "Reorder Point", "Sales Velocity", "Status", "Action"],
                                 visibleRows.map(row => [row.productName, String(row.currentStock), String(row.reorderPoint), row.salesVelocity, row.issue, row.action]),
-                                branchName, `${filter === "All" ? "All Status" : filter}${search.trim() ? ` · Search: “${search.trim()}”` : ""}`, "stocknbook_stock_action_center")
+                                branchName, inventoryTodayLabel(), "stocknbook_stock_action_center", [`Status: ${filter === "All" ? "All Status" : filter}`])
                                 .then(() => setExportError(""))
                                 .catch(() => setExportError("Unable to download stock action report."))}
                             className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#D9CDF0] bg-white text-[#5A35A5] hover:bg-[#F7F1FF]">
@@ -3454,11 +3232,13 @@ function ActionIssueBadge({ issue }: { issue: ActionCenterRow["issue"] }) {
 }
 
 function RecentStockActivity({
+
                                  movements,
                                  branchName,
                                  loading,
                                  search,
                              }: {
+
     movements: RecentStockMovement[];
     branchName: string;
     loading: boolean;
@@ -3492,13 +3272,13 @@ function RecentStockActivity({
             m.source === "POS Sale" && !m.hasRecordedTime ? "Not recorded" : formatStockActivityTime(m.date),
             m.productName, m.movement, String(m.movement === "Stock In" ? m.quantity : -m.quantity),
             m.referenceNumber || "—"]), branchName,
-        `${activityDateFilter === "all" ? "All loaded dates" : activityDateFilter === "today" ? "Today" : rangeValid ? `${startDate} to ${endDate}` : "Choose a date range"} · ${movementFilter === "all" ? "All activity" : movementFilter === "in" ? "Stock In" : "Stock Out"}${search.trim() ? ` · Search: “${search.trim()}”` : ""}`,
-        "stocknbook_consumable_stock_activity")
+        activityDateFilter === "all" ? "All loaded dates" : activityDateFilter === "today" ? inventoryTodayLabel() : `${startDate} to ${endDate}`,
+        "stocknbook_consumable_stock_activity", [`Activity: ${movementFilter === "all" ? "All Activity" : movementFilter === "in" ? "Stock In" : "Stock Out"}`])
         .then(() => setExportError(""))
         .catch(() => setExportError("Unable to download the activity report."));
     return (
-        <section className="flex h-[470px] min-h-0 flex-col overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
-            <div className="flex min-w-0 flex-col gap-2 border-b border-[#E9E1EE] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
+        <section className="flex h-[320px] min-h-0 flex-col overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm">
+            <div className="flex min-w-0 shrink-0 flex-col gap-2 border-b border-[#E9E1EE] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex min-w-0 flex-1 items-start gap-3">
                 <span className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-[#F1EBFF] text-[#5A35A5]">
                     <CalendarClock size={18} />
@@ -3694,6 +3474,7 @@ function ManagerSearchActions({ inv }: { inv: InventoryController }) {
 }
 
 function ManagerInventoryTable({
+
                                    inv,
                                    products,
                                    storeName,
@@ -3708,6 +3489,7 @@ function ManagerInventoryTable({
                                    onDispose,
                                    onDelete,
                                }: {
+
     inv: InventoryController;
     products: Product[];
     storeName: string;
@@ -3725,21 +3507,16 @@ function ManagerInventoryTable({
     const [expandedIds, setExpandedIds] = React.useState<Record<number, boolean>>(
         {}
     );
-    const [exportMenuOpen, setExportMenuOpen] = React.useState(false);
     const [exportToast, setExportToast] = React.useState<SuccessToastMessage | null>(null);
     const closeExportToast = React.useCallback(() => setExportToast(null), []);
-    const exportInventory = (format: "xlsx" | "pdf") => {
-        setExportMenuOpen(false);
-        const options = {
-            storeName, branchName,
-            categoryFilter: selectedCategory,
-            statusFilter,
-            generatedAt: new Date(),
-        };
+    const exportInventory = () => {
         try {
-            if (format === "xlsx") exportManagerInventoryExcel(products, options);
-            else exportManagerInventoryPdf(products, options);
-            setExportToast({title: "Inventory export started", message: `${format === "xlsx" ? "Excel" : "PDF"} report prepared. Check your browser downloads.`});
+            const [headers, ...rows] = getManagerInventoryExportRows(products);
+            downloadInventoryPdf({ title: "Branch Consumable Product List", headers: headers.map(String), rows: rows.map(row => row.map(String)) }, {
+                storeName, branch: branchName, dateRange: inventoryTodayLabel(),
+                filters: [`Category: ${selectedCategory === "All" ? "All Categories" : selectedCategory} | Status: ${statusFilter}`],
+            }, "stocknbook_branch_consumable_product_list");
+            setExportToast({title: "Inventory export started", message: "PDF report prepared. Check your browser downloads."});
         } catch (error) {
             setExportToast({title: "Unable to export inventory", message: error instanceof Error ? error.message : "Please try again.", tone: "error"});
         }
@@ -3788,40 +3565,11 @@ function ManagerInventoryTable({
                         <option>Expired</option>
                     </ManagerInventoryFilterSelect>
 
-                    <div className="relative">
-                        <button
-                            type="button"
-                            onClick={() => setExportMenuOpen((open) => !open)}
-                            disabled={products.length === 0}
-                            aria-haspopup="menu"
-                            aria-expanded={exportMenuOpen}
-                            aria-label="Download filtered inventory list"
-                            title="Download filtered inventory list"
-                            className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-[#D9CDF0] bg-white text-[#2B174C] hover:bg-[#F8F3FC] disabled:opacity-50"
-                        >
-                            <Download size={16} />
-                        </button>
-                        {exportMenuOpen && (
-                            <div role="menu" className="absolute right-0 top-full z-30 mt-2 w-48 overflow-hidden rounded-xl border border-[#D9CDF0] bg-white py-1 shadow-lg">
-                                <button
-                                    type="button"
-                                    role="menuitem"
-                                    onClick={() => exportInventory("xlsx")}
-                                    className="block w-full px-4 py-2 text-left text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC]"
-                                >
-                                    Excel (.xlsx)
-                                </button>
-                                <button
-                                    type="button"
-                                    role="menuitem"
-                                    onClick={() => exportInventory("pdf")}
-                                    className="block w-full px-4 py-2 text-left text-xs font-semibold text-[#2B174C] hover:bg-[#F8F3FC]"
-                                >
-                                    PDF (.pdf)
-                                </button>
-                            </div>
-                        )}
-                    </div>
+                    <button type="button" onClick={exportInventory} disabled={inv.productsLoading}
+                            aria-label="Download filtered inventory PDF" title="Download PDF"
+                            className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-[#D9CDF0] bg-white text-[#2B174C] hover:bg-[#F8F3FC] disabled:opacity-50">
+                        <Download size={16}/>
+                    </button>
                 </div>
             </div>
 
@@ -3868,11 +3616,7 @@ function ManagerInventoryTable({
                             const expiration = getProductExpiration(product);
                             // The column is "Available Stock", so display eligible batch
                             // stock, not legacy catalog stock used for receiving accounting.
-                            const sellableProduct = {
-                                ...product,
-                                stock: product.sellableStock ?? product.stock,
-                                variants: variants.map(v=>({...v,stock:v.sellableStock ?? v.stock})),
-                            };
+                            const sellableProduct = toSellableProduct(product);
                             const status = getProductStatus(sellableProduct);
 
                             return (
@@ -4017,7 +3761,7 @@ function ManagerInventoryTable({
                                                         ↳ {getVariantName(variant)}
                                                     </td>
                                                     <td className="px-2 py-2 text-[#8A7D90]">
-                                                        Variant
+                                                        {product.category || "—"}
                                                     </td>
                                                     <td className="px-2 py-2 text-center font-semibold text-[#2B174C]">
                                                         {formatNumber(variant.sellableStock ?? variant.stock)}
@@ -6618,4 +6362,575 @@ function VariantEditor({
         </div>
     );
 
+}
+
+// Inventory-only copy of the existing Dashboard PDF layout; dashboard source remains unchanged.
+function normalizePdfText(value: string) {
+    return String(value)
+        .replace(/₱/g, "PHP ")
+        .replace(/[–—−]/g, "-").replace(/×/g, "x").replace(/·/g, " | ")
+        .replace(/•/g, "-")
+        .replace(/↳/g, "-")
+        .replace(/[“”]/g, '"')
+        .replace(/[‘’]/g, "'")
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/[^\x20-\x7E]/g, "");
+}
+
+function escapePdf(value: string) {
+    return normalizePdfText(value)
+        .replace(/\\/g, "\\\\")
+        .replace(/\(/g, "\\(")
+        .replace(/\)/g, "\\)");
+}
+
+function downloadFile(filename: string, mimeType: string, content: string) {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+}
+
+function getPdfColumnWeight(header: string) {
+    const key = header.toLowerCase();
+
+    if (
+        key.includes("product") ||
+        key.includes("package") ||
+        key.includes("customer") ||
+        key.includes("details") ||
+        key.includes("inclusion")
+    ) {
+        return 1.7;
+    }
+
+    if (
+        key.includes("reference") ||
+        key.includes("branch") ||
+        key.includes("category") ||
+        key.includes("suggested")
+    ) {
+        return 1.35;
+    }
+
+    if (key.includes("equipment no.")) return 1.45;
+    if (key.includes("cost / rate")) return 1.3;
+    if (key.includes("date") || key.includes("schedule")) return 1.15;
+    if (key.includes("current") || key.includes("forecast")) return 1.1;
+    if (key.includes("status") || key.includes("risk")) return 0.95;
+
+    return 1;
+}
+
+function isPdfNumericColumn(header: string) {
+    const key = header.toLowerCase();
+
+    return [
+        "stock",
+        "level",
+        "quantity",
+        "sales",
+        "revenue",
+        "price",
+        "value",
+        "count",
+        "added",
+        "amount",
+        "bookings",
+        "downpayment",
+        "discount",
+    ].some((word) => key.includes(word));
+}
+
+function wrapPdfText(value: string, maxCharacters: number, maxLines = 3) {
+    const text = normalizePdfText(value) || "-";
+    const words = text.split(" ");
+    const lines: string[] = [];
+    let currentLine = "";
+
+    for (let word of words) {
+        while (word.length > maxCharacters) {
+            if (currentLine) {
+                lines.push(currentLine);
+                currentLine = "";
+            }
+
+            lines.push(word.slice(0, maxCharacters));
+            word = word.slice(maxCharacters);
+
+            if (lines.length >= maxLines) break;
+        }
+
+        if (lines.length >= maxLines) break;
+
+        const candidate = currentLine ? `${currentLine} ${word}` : word;
+
+        if (candidate.length <= maxCharacters) {
+            currentLine = candidate;
+        } else {
+            if (currentLine) lines.push(currentLine);
+            currentLine = word;
+        }
+
+        if (lines.length >= maxLines) break;
+    }
+
+    if (currentLine && lines.length < maxLines) {
+        lines.push(currentLine);
+    }
+
+    const result = lines.length ? lines.slice(0, maxLines) : ["-"];
+
+    if (
+        lines.length > maxLines ||
+        result.join(" ").length < text.length
+    ) {
+        const finalIndex = result.length - 1;
+        result[finalIndex] =
+            result[finalIndex].slice(0, Math.max(1, maxCharacters - 3)) + "...";
+    }
+
+    return result;
+}
+
+function formatDashboardPdfTitle(title: string) {
+    const cleaned = normalizePdfText(title)
+        .replace(/[_-]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    if (!cleaned) return "Dashboard Report";
+
+    return cleaned
+        .split(" ")
+        .map((word) => {
+            if (!word) return word;
+            return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+        })
+        .join(" ");
+}
+
+/** Opt-in report layout; default dashboard/report exports retain their existing styling. */
+type DashboardPdfOptions = {
+    filters?: string[];
+    summary?: string[];
+    centerColumns?: boolean;
+    totalRow?: string[];
+    currencyNote?: boolean;
+};
+
+function createTablePdf({
+                            title,
+                            storeName,
+                            branch,
+                            dateRange,
+                            headers,
+                            rows,
+                            options,
+                        }: {
+    title: string;
+    storeName: string;
+    branch: string;
+    dateRange: string;
+    headers: string[];
+    rows: string[][];
+    options?: DashboardPdfOptions;
+}) {
+    const pageWidth = 595.28;
+    const pageHeight = 841.89;
+    const outerMargin = 25;
+    const pageInset = 24;
+    const marginX = 42;
+    const marginBottom = 54;
+    const contentWidth = pageWidth - marginX * 2;
+    const regularFont = "F1";
+    const boldFont = "F2";
+    const titleText = formatDashboardPdfTitle(title);
+    const fontSize = headers.length >= 6 ? 7 : headers.length >= 5 ? 7.6 : 8.2;
+    const headerFontSize = Math.max(7, fontSize - 0.1);
+    const metaFontSize = 10.2;
+    const lineHeight = fontSize + 2.8;
+    const cellPaddingX = 5;
+    const cellPaddingY = 5;
+
+    const cream: [number, number, number] = [0.992, 0.98, 0.956];
+    const white: [number, number, number] = [1, 1, 1];
+    const purple: [number, number, number] = [0.169, 0.09, 0.298];
+    const purpleText: [number, number, number] = [0.169, 0.09, 0.298];
+    const ink: [number, number, number] = [0.102, 0.071, 0.125];
+    const muted: [number, number, number] = [0.373, 0.306, 0.459];
+    const border: [number, number, number] = [0.902, 0.866, 0.941];
+    const tint: [number, number, number] = [0.976, 0.965, 0.992];
+    const divider: [number, number, number] = [0.9, 0.86, 0.94];
+    const altRow: [number, number, number] = [0.989, 0.984, 0.995];
+
+    const centered = options?.centerColumns === true;
+    const weights = headers.map(header => centered && header === "Weeks" ? 2.1 : centered && header === "Rank" ? 0.65 : getPdfColumnWeight(header));
+    const totalWeight = weights.reduce((total, weight) => total + weight, 0);
+
+    let runningX = marginX;
+    const columns = headers.map((header, index) => {
+        const width = (contentWidth * weights[index]) / totalWeight;
+        const column = {
+            header,
+            x: runningX,
+            width,
+            numeric: isPdfNumericColumn(header),
+        };
+
+        runningX += width;
+        return column;
+    });
+
+    const point = (value: number) => Number(value.toFixed(2));
+    const pages: string[] = [];
+    let commands: string[] = [];
+    let cursorY = 0;
+
+    // Helvetica ASCII glyph widths, for exact centered alignment and wrapping.
+    const regularWidths = [278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,278,278,584,584,584,556,1015,667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,611,722,667,944,667,667,611,278,278,278,469,556,333,556,556,500,556,556,278,556,556,222,222,500,222,833,556,556,556,556,333,500,278,556,500,722,500,500,500,334,260,334,584];
+    const boldWidths = [278,333,474,556,556,889,722,238,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,333,333,584,584,584,611,975,722,722,722,722,667,611,778,722,278,556,722,611,833,722,778,667,778,722,667,611,722,667,944,667,667,611,333,278,333,584,556,333,556,611,556,611,556,333,611,611,278,278,556,278,889,611,611,611,611,389,556,333,611,556,778,556,556,500,389,280,389,584];
+    function measure(value: string, size: number, font: string) {
+        const text = normalizePdfText(value);
+        if (!centered) return text.length * size * 0.52;
+        const widths = font === boldFont ? boldWidths : regularWidths;
+        return Array.from(text).reduce((n,c)=>n+(widths[c.charCodeAt(0)-32] ?? 600),0)*size/1000;
+    }
+    function wrapCentered(value: string, width: number, size: number, font: string) {
+        const text = normalizePdfText(value);
+        if (!text) return [""];
+        const lines: string[] = [];
+        let line = "";
+        for(const word of text.split(" ")) {
+            if(line && measure(`${line} ${word}`,size,font)>width) {lines.push(line);line="";}
+            if(measure(word,size,font)>width) {
+                for(const char of word) {
+                    if(line && measure(line+char,size,font)>width) {lines.push(line);line="";}
+                    line+=char;
+                }
+            } else line=line ? `${line} ${word}` : word;
+        }
+        if(line) lines.push(line);
+        return lines.length?lines:[""];
+    }
+
+    function addText(
+        value: string,
+        x: number,
+        y: number,
+        size: number,
+        font: string,
+        color: [number, number, number],
+        align: "left" | "center" | "right" = "left"
+    ) {
+        const normalized = normalizePdfText(value);
+        if (centered && !normalized) return;
+        const text = normalized || "-";
+        const textWidth = measure(text, size, font);
+        const adjustedX =
+            align === "center" ? x - textWidth / 2 : align === "right" ? x - textWidth : x;
+
+        commands.push(
+            `q ${color.join(" ")} rg BT /${font} ${point(size)} Tf 1 0 0 1 ${point(
+                adjustedX
+            )} ${point(y)} Tm (${escapePdf(text)}) Tj ET Q`
+        );
+    }
+
+    function fillRect(
+        x: number,
+        y: number,
+        width: number,
+        height: number,
+        color: [number, number, number]
+    ) {
+        commands.push(
+            `q ${color.join(" ")} rg ${point(x)} ${point(y)} ${point(width)} ${point(
+                height
+            )} re f Q`
+        );
+    }
+
+    function strokeRect(
+        x: number,
+        y: number,
+        width: number,
+        height: number,
+        color: [number, number, number],
+        lineWidth = 0.7
+    ) {
+        commands.push(
+            `q ${color.join(" ")} RG ${point(lineWidth)} w ${point(x)} ${point(y)} ${point(
+                width
+            )} ${point(height)} re S Q`
+        );
+    }
+
+    function drawDivider(y: number, color: [number, number, number] = divider, lineWidth = 0.7) {
+        commands.push(
+            `q ${color.join(" ")} RG ${point(lineWidth)} w ${point(marginX)} ${point(y)} m ${point(
+                pageWidth - marginX
+            )} ${point(y)} l S Q`
+        );
+    }
+
+    function wrapCellText(value: string, columnWidth: number, linesLimit = 4) {
+        const headerTightness = headers.length >= 6 ? 0.94 : 1;
+        const maxCharacters = Math.max(
+            4,
+            Math.floor(((columnWidth - cellPaddingX * 2) / (fontSize * 0.52)) * headerTightness)
+        );
+        return wrapPdfText(value, maxCharacters, linesLimit);
+    }
+
+    function drawTableHeader() {
+        const headerLines = headers.map((header, index) => {
+            const limit = Math.max(
+                4,
+                Math.floor((columns[index].width - cellPaddingX * 2) / (headerFontSize * 0.52))
+            );
+            return centered ? wrapCentered(header, columns[index].width - cellPaddingX * 2, headerFontSize, boldFont) : wrapPdfText(header, limit, 3);
+        });
+        const headerLineCount = Math.max(...headerLines.map((lines) => lines.length));
+        const headerHeight = Math.max(26, headerLineCount * (headerFontSize + 2) + cellPaddingY * 2);
+        const bottomY = cursorY - headerHeight;
+
+        fillRect(marginX, bottomY, contentWidth, headerHeight, tint);
+        strokeRect(marginX, bottomY, contentWidth, headerHeight, border, 0.75);
+
+        columns.forEach((column, index) => {
+            if (index > 0) {
+                commands.push(
+                    `q ${border.join(" ")} RG 0.45 w ${point(column.x)} ${point(bottomY)} m ${point(
+                        column.x
+                    )} ${point(cursorY)} l S Q`
+                );
+            }
+
+            const lines = headerLines[index];
+            lines.forEach((line, lineIndex) => {
+                const textWidth = line.length * headerFontSize * 0.52;
+                const textX = centered ? column.x + column.width / 2 : column.numeric
+                    ? column.x + column.width - cellPaddingX - textWidth
+                    : column.x + cellPaddingX;
+                const baseline = centered ? cursorY - (headerHeight - lines.length*(headerFontSize+2))/2 - headerFontSize : cursorY - cellPaddingY - headerFontSize;
+                addText(line, textX, baseline - lineIndex*(headerFontSize+2), headerFontSize, boldFont, purpleText, centered ? "center" : "left");
+            });
+        });
+
+        cursorY = bottomY;
+    }
+
+    function drawPageTitle(continued: boolean) {
+        const cardX = outerMargin;
+        const cardY = pageInset;
+        const cardWidth = pageWidth - outerMargin * 2;
+        const cardHeight = pageHeight - pageInset * 2;
+
+        fillRect(0, 0, pageWidth, pageHeight, cream);
+        fillRect(cardX, cardY, cardWidth, cardHeight, white);
+        fillRect(cardX, pageHeight - pageInset - 6, cardWidth, 6, purple);
+
+        let topY = pageHeight - 58;
+        addText(storeName || "Store", pageWidth / 2, topY, 21, boldFont, purpleText, "center");
+        topY -= 17;
+
+        if (branch) {
+            addText(`Branch: ${branch}`, pageWidth / 2, topY, 11.5, boldFont, purpleText, "center");
+            topY -= 16;
+        }
+
+        for (const line of wrapCentered(`Date range: ${dateRange}`, contentWidth, metaFontSize, regularFont)) {
+            addText(line, pageWidth / 2, topY, metaFontSize, regularFont, muted, "center"); topY -= 12;
+        }
+        for (const filter of options?.filters || []) {
+            for (const line of wrapCentered(filter, contentWidth, 9, regularFont)) {
+                addText(line, pageWidth / 2, topY, 9, regularFont, muted, "center"); topY -= 11;
+            }
+        }
+        drawDivider(topY, border, 0.7);
+
+        topY -= continued ? 24 : 28;
+        addText(
+            continued ? `${titleText} (continued)` : titleText,
+            pageWidth / 2,
+            topY,
+            continued ? 16 : 18,
+            boldFont,
+            purpleText,
+            "center"
+        );
+
+        topY -= 16;
+        addText(
+            rows.length
+                ? `${rows.length.toLocaleString("en-PH")} row(s) exported${options?.currencyNote ? " | Amounts in Philippine pesos" : ""}`
+                : "No records available for the selected period",
+            pageWidth / 2,
+            topY,
+            9,
+            regularFont,
+            muted,
+            "center"
+        );
+
+        for (const summary of options?.summary || []) {
+            topY -= 12;
+            const lines = wrapCentered(summary, contentWidth, 8.5, regularFont);
+            for (const [index, line] of lines.entries()) {
+                addText(line, pageWidth / 2, topY, 8.5, regularFont, muted, "center");
+                if (index < lines.length - 1) topY -= 10;
+            }
+        }
+        cursorY = topY - 18;
+        drawTableHeader();
+    }
+
+    function finishPage() {
+        if (commands.length > 0) {
+            pages.push(commands.join("\n"));
+            commands = [];
+        }
+    }
+
+    function startPage(continued: boolean) {
+        if (commands.length > 0) finishPage();
+        drawPageTitle(continued);
+    }
+
+    function drawTableRow(row: string[], rowIndex: number, isTotal = false) {
+        const rowFont = isTotal ? boldFont : regularFont;
+        const cellLines = columns.map((column, index) => centered
+            ? wrapCentered(row[index] ?? "-", column.width - cellPaddingX * 2, fontSize, rowFont)
+            : wrapCellText(row[index] ?? "-", column.width, headers.length >= 6 ? 5 : 4)
+        );
+        const maxLines = Math.max(...cellLines.map((lines) => lines.length));
+        const rowHeight = Math.max(24, maxLines * lineHeight + cellPaddingY * 2);
+
+        if (cursorY - rowHeight < marginBottom + 30) {
+            startPage(true);
+        }
+
+        const rowBottom = cursorY - rowHeight;
+        fillRect(marginX, rowBottom, contentWidth, rowHeight, isTotal ? tint : rowIndex % 2 === 0 ? white : altRow);
+        strokeRect(marginX, rowBottom, contentWidth, rowHeight, border, 0.45);
+
+        columns.forEach((column, index) => {
+            if (index > 0) {
+                commands.push(
+                    `q ${border.join(" ")} RG 0.3 w ${point(column.x)} ${point(rowBottom)} m ${point(
+                        column.x
+                    )} ${point(cursorY)} l S Q`
+                );
+            }
+
+            cellLines[index].forEach((line, lineIndex) => {
+                const textWidth = line.length * fontSize * 0.52;
+                const textX = centered ? column.x + column.width / 2 : column.numeric
+                    ? column.x + column.width - cellPaddingX - textWidth
+                    : column.x + cellPaddingX;
+                const baseline = centered ? cursorY - (rowHeight - cellLines[index].length*lineHeight)/2 - fontSize : cursorY - cellPaddingY - fontSize;
+                addText(line, textX, baseline - lineIndex*lineHeight, fontSize, rowFont, isTotal ? purpleText : ink, centered ? "center" : "left");
+            });
+        });
+
+        cursorY = rowBottom;
+    }
+
+    startPage(false);
+
+    if (rows.length === 0) {
+        addText(
+            "No records found for the selected report period.",
+            pageWidth / 2,
+            cursorY - 26,
+            10,
+            regularFont,
+            muted,
+            "center"
+        );
+    } else {
+        rows.forEach((row, index) => drawTableRow(row, index));
+        if (options?.totalRow) drawTableRow(options.totalRow, rows.length, true);
+    }
+
+    finishPage();
+
+    const pageStreams = pages.map((stream, index) => {
+        const footerText = `Powered by StockNBook | Page ${index + 1} of ${pages.length}`;
+        return `${stream}
+q ${divider.join(" ")} RG 0.6 w ${point(marginX)} 42 m ${point(
+            pageWidth - marginX
+        )} 42 l S Q
+q ${muted.join(" ")} rg BT /F1 8 Tf 1 0 0 1 ${point(
+            pageWidth / 2 - footerText.length * 2.05
+        )} 26 Tm (${escapePdf(footerText)}) Tj ET Q`;
+    });
+
+    const pageObjectIds = pageStreams.map((_, index) => 5 + index * 2);
+    const contentObjectIds = pageStreams.map((_, index) => 6 + index * 2);
+
+    const objects: Record<number, string> = {
+        1: "<< /Type /Catalog /Pages 2 0 R >>",
+        2: `<< /Type /Pages /Kids [${pageObjectIds
+            .map((id) => `${id} 0 R`)
+            .join(" ")}] /Count ${pageObjectIds.length} >>`,
+        3: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        4: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
+    };
+
+    pageStreams.forEach((stream, index) => {
+        const pageId = pageObjectIds[index];
+        const contentId = contentObjectIds[index];
+
+        objects[pageId] =
+            `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] ` +
+            `/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${contentId} 0 R >>`;
+
+        objects[contentId] = `<< /Length ${stream.length} >>
+stream
+${stream}
+endstream`;
+    });
+
+    const maxObjectId = Math.max(...Object.keys(objects).map(Number));
+    let pdf = "%PDF-1.4\n";
+    const offsets: number[] = [0];
+
+    for (let id = 1; id <= maxObjectId; id += 1) {
+        offsets[id] = pdf.length;
+        pdf += `${id} 0 obj\n${objects[id]}\nendobj\n`;
+    }
+
+    const xrefOffset = pdf.length;
+    pdf += `xref\n0 ${maxObjectId + 1}\n`;
+    pdf += "0000000000 65535 f \n";
+
+    for (let id = 1; id <= maxObjectId; id += 1) {
+        pdf += `${String(offsets[id]).padStart(10, "0")} 00000 n \n`;
+    }
+
+    pdf += `trailer\n<< /Size ${maxObjectId + 1} /Root 1 0 R >>\n`;
+    pdf += `startxref\n${xrefOffset}\n%%EOF`;
+
+    return pdf;
+}
+
+
+function downloadInventoryPdf(table: { title: string; headers: string[]; rows: string[][] }, context: {
+    storeName: string; branch: string; dateRange: string; filters?: string[]; summary?: string[];
+}, filename: string) {
+    const pdf = createTablePdf({ ...table, storeName: context.storeName, branch: context.branch,
+        dateRange: context.dateRange, options: { centerColumns: true, filters: context.filters, summary: context.summary } });
+    downloadFile(`${filename.replace(/\.pdf$/i, "")}.pdf`, "application/pdf", pdf);
+}
+function inventoryTodayLabel() {
+    return `Today (${new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Manila" })})`;
 }

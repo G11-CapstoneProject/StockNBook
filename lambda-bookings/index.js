@@ -74,13 +74,20 @@ const ITEM_STATUS = {
     RETURNED: "returned",   // rental equipment received back (set by the rental-return workflow)
     CANCELLED: "cancelled",
 };
+// The Rental Inventory Lambda (Staff return form) finishes a return as 'returned' (waiting for
+// inspection), 'cleaning', 'damaged' or 'cleared'. For Bookings, all four mean "received back".
+const RETURNED_STATUSES = new Set([ITEM_STATUS.RETURNED, "cleaning", "damaged", "cleared"]);
+const isReturned = (item) => RETURNED_STATUSES.has(String(item?.item_status ?? "").trim().toLowerCase());
+// Rental line status in the words the Manager screens use.
+const allocationLabel = (item) => item.item_status === ITEM_STATUS.RELEASED ? "checked_out"
+    : item.item_status === ITEM_STATUS.PENDING ? "pending_review" : isReturned(item) ? "returned" : item.item_status;
 const PAYMENT = {
     BOOKING: "booking_payment",      // counts toward the agreed booking price
     DEPOSIT: "security_deposit",     // refundable liability, NOT revenue
     CHARGE: "additional_charge",     // damage / missing-item charge payments
     RECORDED: "recorded",
 };
-const REFUND = { DEPOSIT: "deposit_refund", DONE: "completed" };
+const REFUND = { DEPOSIT: "deposit_refund", BOOKING: "booking_refund", DONE: "completed" };
 const MOVE = {
     RESERVE: "BOOKING_RESERVE",
     UNRESERVE: "BOOKING_RESERVATION_RELEASE",
@@ -223,7 +230,7 @@ function financePositive(value, label = "Amount") {
 }
 
 // v2 stores event_time as TIME. Accept "14:30", "14:30:00" or "2:30 PM".
-function normalizeEventTime(value) {
+function normalizeEventTime(value, label = "Event time") {
     const raw = String(value ?? "").trim();
     if (!raw) return null;
     let m = raw.match(/^([01]?\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?$/);
@@ -234,7 +241,49 @@ function normalizeEventTime(value) {
         if (/p/i.test(m[3])) hour += 12;
         return `${String(hour).padStart(2, "0")}:${m[2]}:00`;
     }
-    throw rentalError("Event time must be a valid time, for example 14:30.");
+    throw rentalError(`${label} must be a valid time, for example 14:30.`);
+}
+
+// ─── Pickup / delivery and return schedule ───────────────────────────────────
+// bookings.handover_method / handover_date / handover_time say when the customer gets the items.
+// For rentals the rental period is handover date → return date (rental_start_date / rental_end_date),
+// so availability and rental days cover the real time the equipment is out.
+const HANDOVER_METHODS = new Set(["pickup", "delivery"]);
+const HANDOVER_LEAD_DAYS = 7;   // pickup/delivery at most 7 days before the event
+const RETURN_GRACE_DAYS = 7;    // return at most 7 days after the event ends
+const addDays = (date, n) => new Date(Date.parse(`${date}T00:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+const handoverLabel = (method) => (method === "delivery" ? "Delivery" : "Pickup");
+const scheduleFields = (r) => ({
+    handoverMethod: r.handoverMethod === "delivery" ? "delivery" : "pickup",
+    handoverDate: String(r.handoverDate || r.eventDate || ""), handoverTime: String(r.handoverTime || ""),
+    returnDate: Number(r.rentalLines || 0) > 0 ? String(r.returnDate || "") : "",
+    returnTime: Number(r.rentalLines || 0) > 0 ? String(r.returnTime || "") : "",
+    deliveryAddress: r.handoverMethod === "delivery" ? String(r.venue || "") : "",
+});
+
+// Missing fields fall back to the old behaviour (pickup on the event date, return on the event end date).
+function parseBookingSchedule(body, { startDate, endDate, hasRentals }) {
+    const method = lower(body.handoverMethod || body.handover_method || "pickup");
+    if (!HANDOVER_METHODS.has(method)) throw rentalError("Choose Pickup or Delivery.");
+    const label = handoverLabel(method);
+    const handoverInput = body.handoverDate || body.handover_date;
+    const handoverDate = handoverInput ? rentalDate(handoverInput, `${label} date`) : startDate;
+    const handoverTime = normalizeEventTime(body.handoverTime || body.handover_time || body.eventTime || body.event_time, `${label} time`);
+    if (handoverDate > startDate) throw rentalError(`${label} date must be on or before the event date.`);
+    if (handoverDate < addDays(startDate, -HANDOVER_LEAD_DAYS))
+        throw rentalError(`${label} date can be at most ${HANDOVER_LEAD_DAYS} days before the event.`);
+    if (handoverInput && handoverDate < rentalTodayManila()) throw rentalError(`${label} date cannot be in the past.`);
+    if (!hasRentals) return { method, handoverDate, handoverTime, returnDate: null, returnTime: null };
+    const returnInput = body.returnDate || body.return_date || body.rentalEndDate || body.rental_end_date;
+    const returnDate = returnInput ? rentalDate(returnInput, "Return date") : endDate;
+    const returnTime = normalizeEventTime(body.returnTime || body.return_time, "Return time");
+    if (returnDate < endDate) throw rentalError("Return date must be on or after the event end date.");
+    if (returnDate > addDays(endDate, RETURN_GRACE_DAYS))
+        throw rentalError(`Return date can be at most ${RETURN_GRACE_DAYS} days after the event.`);
+    if (returnDate === handoverDate && handoverTime && returnTime && returnTime <= handoverTime)
+        throw rentalError(`Return time must be later than the ${label.toLowerCase()} time.`);
+    rentalDays(handoverDate, returnDate);
+    return { method, handoverDate, handoverTime, returnDate, returnTime };
 }
 
 function limitText(value, max, label) {
@@ -257,6 +306,9 @@ function normalizeBookingStatus(value) {
     return null;
 }
 
+// Cancelled / rejected bookings owe nothing more.
+const closedStatus = (status) => ["Cancelled", "Rejected"].includes(normalizeBookingStatus(status));
+
 function paymentStatusLabel(total, downPayment, paid) {
     if (total > 0 && paid + 0.005 >= total) return "Fully Paid";
     if (downPayment > 0 && paid + 0.005 >= downPayment) return "Down Payment Paid";
@@ -269,6 +321,35 @@ function bookingTotal(b) {
     const agreed = Number(b.agreed_price);
     if (Number.isFinite(agreed) && agreed > 0) return agreed;
     return Number(b.package_price_snapshot || 0);
+}
+
+// ─── VAT (reuses the POS store setting stores.tax_registration) ──────────────
+// Booking prices are VAT-inclusive and never change because of VAT. For a VAT-registered store,
+// the VAT already inside the agreed booking price is saved on bookings.vat_amount, and
+// VATable sales = agreed price − VAT. Non-VAT stores save 0. The refundable security deposit is
+// not a sale and is never part of the agreed price, so it is never taxed.
+// The saved figure is refreshed whenever the agreed price is saved and once more when the Manager
+// approves the booking (the price is locked from then on). After approval it never changes,
+// so cancelled bookings keep their original tax record; refunds are recorded separately.
+const VAT_RATE_PERCENT = 12;
+const VAT_REGISTERED_VALUES = new Set(["vat", "vat_registered", "vat-registered", "registered"]);
+const isVatRegistered = (value) => VAT_REGISTERED_VALUES.has(lower(value));
+function inclusiveVat(total) {
+    const totalCents = Math.max(0, cents(total));
+    const vatCents = Math.round(totalCents * VAT_RATE_PERCENT / (100 + VAT_RATE_PERCENT));
+    return { vatAmount: vatCents / 100, vatableSales: (totalCents - vatCents) / 100 };
+}
+async function saveBookingVat(db, { bookingId, storeId }) {
+    const [rows] = await db.execute(
+        `SELECT b.agreed_price, s.tax_registration FROM bookings b JOIN stores s ON s.id=b.store_id
+         WHERE b.id=? AND b.store_id=?`, [Number(bookingId), Number(storeId)]);
+    if (!rows.length) return 0;
+    const agreed = Number(rows[0].agreed_price);
+    // Only the agreed (taxable) booking price is used; no price yet means no VAT yet.
+    const vat = isVatRegistered(rows[0].tax_registration) && Number.isFinite(agreed) && agreed > 0
+        ? inclusiveVat(agreed).vatAmount : 0;
+    await db.execute(`UPDATE bookings SET vat_amount=? WHERE id=? AND store_id=?`, [vat, Number(bookingId), Number(storeId)]);
+    return vat;
 }
 
 function buildBookingReference(row, id) {
@@ -413,7 +494,7 @@ async function requestKeyUsed(db, storeId, key) {
 const BOOKING_CORE_FIELDS = `
     b.id, b.store_id, b.branch_id, b.booking_reference, b.booking_type, b.customer_id, b.package_id,
     b.status, b.agreed_price, b.package_price_snapshot, b.required_down_payment, b.refundable_deposit_required,
-    b.final_additional_charges, b.deposit_applied_amount, b.approved_refund_amount, b.settlement_status,
+    b.vat_amount, b.final_additional_charges, b.deposit_applied_amount, b.approved_refund_amount, b.settlement_status,
     b.settlement_notes, b.settlement_reviewed_at, b.approved_by, b.approved_at, b.custom_order,
     b.cancellation_reason,
     DATE_FORMAT(b.event_date,'%Y-%m-%d') AS eventDate,
@@ -421,6 +502,10 @@ const BOOKING_CORE_FIELDS = `
     DATE_FORMAT(COALESCE(b.rental_start_date,b.event_date),'%Y-%m-%d') AS rentalStart,
     DATE_FORMAT(COALESCE(b.rental_end_date,b.event_end_date,b.event_date),'%Y-%m-%d') AS rentalEnd,
     DATE_FORMAT(b.down_payment_deadline,'%Y-%m-%d %H:%i:%s') AS dpDeadline,
+    b.handover_method AS handoverMethod,
+    DATE_FORMAT(COALESCE(b.handover_date,b.rental_start_date,b.event_date),'%Y-%m-%d') AS handoverDate,
+    TIME_FORMAT(COALESCE(b.handover_time,b.event_time),'%H:%i') AS handoverTime,
+    TIME_FORMAT(b.return_time,'%H:%i') AS returnTime,
     c.full_name AS customer_name, c.phone AS customer_phone, c.email AS customer_email,
     c.facebook_name AS customer_facebook`;
 
@@ -448,7 +533,9 @@ async function loadItems(db, bookingId, storeId, lock = false) {
                   LEFT JOIN product_variants pv ON pv.id=bi.variant_id AND pv.store_id=bi.store_id
                   LEFT JOIN products p ON p.id=pv.product_id AND p.store_id=pv.store_id
                   LEFT JOIN categories cat ON cat.id=p.category_id AND cat.store_id=p.store_id
-         WHERE bi.booking_id=? AND bi.store_id=? ORDER BY bi.id ${lock ? "FOR UPDATE OF bi" : ""}`,
+         WHERE bi.booking_id=? AND bi.store_id=?
+           AND bi.item_status NOT LIKE 'claim%' -- charge rows some modules keep in booking_items are not booking lines
+         ORDER BY bi.id ${lock ? "FOR UPDATE OF bi" : ""}`,
         [Number(bookingId), Number(storeId)]);
     return rows;
 }
@@ -485,15 +572,17 @@ async function getBookingMoney(db, bookingId, storeId) {
          FROM payments WHERE booking_id=? AND store_id=? AND status=?`,
         [PAYMENT.BOOKING, PAYMENT.DEPOSIT, PAYMENT.CHARGE, Number(bookingId), Number(storeId), PAYMENT.RECORDED]);
     const [ref] = await db.execute(
-        `SELECT COALESCE(SUM(r.amount),0) AS depositRefunded
+        `SELECT COALESCE(SUM(CASE WHEN r.refund_type=? THEN r.amount ELSE 0 END),0) AS depositRefunded,
+                COALESCE(SUM(CASE WHEN r.refund_type=? THEN r.amount ELSE 0 END),0) AS bookingRefunded
          FROM refunds r JOIN payments p ON p.id=r.payment_id AND p.store_id=r.store_id
-         WHERE p.booking_id=? AND r.store_id=? AND r.refund_type=? AND LOWER(r.status) IN ('completed','processed')`,
-        [Number(bookingId), Number(storeId), REFUND.DEPOSIT]);
+         WHERE p.booking_id=? AND r.store_id=? AND LOWER(r.status) IN ('completed','processed')`,
+        [REFUND.DEPOSIT, REFUND.BOOKING, Number(bookingId), Number(storeId)]);
     return {
         bookingPaid: money2(pay[0].bookingPaid),
         depositCollected: money2(pay[0].depositCollected),
         chargePaid: money2(pay[0].chargePaid),
         depositRefunded: money2(ref[0].depositRefunded),
+        bookingRefunded: money2(ref[0].bookingRefunded), // booking payments given back on cancellation
     };
 }
 
@@ -552,13 +641,47 @@ async function getBookingStatement(db, bookingId, storeId) {
     if (!b) throw rentalError("Booking not found in assigned branch.");
     const items = await loadItems(db, bookingId, storeId);
     const m = await getBookingMoney(db, bookingId, storeId);
-    const q = quoteFromItems(items);
-    const { packageRow, customConsumables, rentals } = splitItems(items);
+    // A cancelled/rejected booking still shows what was booked (its lines were cancelled with it).
+    const viewItems = closedStatus(b.status)
+        ? items.map((i) => (i.item_status === ITEM_STATUS.CANCELLED ? { ...i, item_status: "booked" } : i)) : items;
+    const q = quoteFromItems(viewItems);
+    const { packageRow, customConsumables, rentals } = splitItems(viewItems);
     const d = depositFigures(b, m);
     const total = bookingTotal(b);
+    // Cancelled / rejected bookings: when, why, and how the money was handed back (for the Billing tab).
+    let cancellation = null;
+    if (closedStatus(b.status)) {
+        const [logRows] = await db.execute(
+            `SELECT DATE_FORMAT(MAX(created_at),'%Y-%m-%d %H:%i:%s') AS at FROM employee_actions
+             WHERE store_id=? AND entity_id=? AND entity_type='booking' AND action IN ('Cancelled booking','Rejected booking request')`,
+            [Number(storeId), Number(bookingId)]);
+        const [updRows] = await db.execute(`SELECT DATE_FORMAT(updated_at,'%Y-%m-%d %H:%i:%s') AS at FROM bookings WHERE id=?`, [Number(bookingId)]);
+        const [refRows] = await db.execute(
+            `SELECT GROUP_CONCAT(DISTINCT r.refund_method ORDER BY r.refund_method) AS methods
+             FROM refunds r JOIN payments p ON p.id=r.payment_id AND p.store_id=r.store_id
+             WHERE p.booking_id=? AND r.store_id=? AND LOWER(r.status) IN ('completed','processed')`,
+            [Number(bookingId), Number(storeId)]);
+        const status = normalizeBookingStatus(b.status);
+        cancellation = {
+            status,
+            reason: String(b.cancellation_reason || "").replace(/^Rejected:\s*/i, "").trim() || null,
+            closedAt: logRows[0]?.at || updRows[0]?.at || null,
+            refundMethod: refRows[0]?.methods || null,
+            bookingPayments: m.bookingPaid,
+            bookingRefunded: m.bookingRefunded,
+            amountKept: Math.max(0, money2(m.bookingPaid - m.bookingRefunded)),
+            depositRefunded: m.depositRefunded,
+        };
+    }
     const [names] = await db.execute(
         `SELECT s.store_name AS storeName, br.branch_name AS branchName FROM stores s
                                                                                  LEFT JOIN branches br ON br.id=? AND br.store_id=s.id WHERE s.id=? LIMIT 1`, [Number(b.branch_id), Number(storeId)]);
+    // VAT rows use the SAVED figure only (shown when the booking was saved as a VAT sale).
+    const savedVat = money2(b.vat_amount);
+    const agreedForVat = Number(b.agreed_price) > 0 ? money2(b.agreed_price) : 0;
+    const vat = savedVat > 0 && agreedForVat > 0
+        ? { rate: VAT_RATE_PERCENT, taxableCharges: agreedForVat, vatableSales: money2(agreedForVat - savedVat), vatAmount: savedVat }
+        : null;
     return {
         booking: {
             id: Number(b.id), reference: b.booking_reference, name: b.customer_name, eventDate: b.eventDate,
@@ -566,7 +689,8 @@ async function getBookingStatement(db, bookingId, storeId) {
             status: b.status, bookingType: b.booking_type, packageName: packageRow?.item_name_snapshot || "",
             agreedPrice: b.agreed_price == null ? null : Number(b.agreed_price),
             downPayment: Number(b.required_down_payment || 0), dpDeadline: b.dpDeadline || null,
-            bookingPayments: m.bookingPaid, balance: Math.max(0, money2(total - m.bookingPaid)),
+            bookingPayments: m.bookingPaid, bookingRefunded: m.bookingRefunded,
+            balance: closedStatus(b.status) ? 0 : Math.max(0, money2(total - m.bookingPaid)),
         },
         packageBase: q.packageBase, rentalSubtotal: q.rentalSubtotal, deliveryFee: 0, setupFee: 0,
         depositRequired: d.depositRequired, depositCollected: m.depositCollected,
@@ -582,6 +706,8 @@ async function getBookingStatement(db, bookingId, storeId) {
             dailyRate: Number(i.unit_price_snapshot), amount: Number(i.line_total),
         })),
         claims: synthesizeClaims(b, items, m),
+        cancellation,
+        vat,
     };
 }
 
@@ -593,6 +719,11 @@ function bookingListSql(whereSql) {
                DATE_FORMAT(b.event_date,'%Y-%m-%d') AS event_date,
                DATE_FORMAT(b.event_end_date,'%Y-%m-%d') AS event_end_date,
                TIME_FORMAT(b.event_time,'%H:%i') AS event_time,
+               b.handover_method,
+               DATE_FORMAT(COALESCE(b.handover_date,b.rental_start_date,b.event_date),'%Y-%m-%d') AS handover_date,
+               TIME_FORMAT(COALESCE(b.handover_time,b.event_time),'%H:%i') AS handover_time,
+               DATE_FORMAT(b.rental_end_date,'%Y-%m-%d') AS return_date,
+               TIME_FORMAT(b.return_time,'%H:%i') AS return_time,
                b.event_type, b.theme, b.venue, b.custom_order, b.notes, b.status,
                b.agreed_price, b.package_price_snapshot, b.required_down_payment, b.refundable_deposit_required,
                b.approved_at, b.cancellation_reason,
@@ -602,7 +733,8 @@ function bookingListSql(whereSql) {
                COALESCE(it.custom_lines,0) AS custom_lines,
                COALESCE(it.consumable_lines,0) AS consumable_lines,
                COALESCE(pay.booking_paid,0) AS booking_paid,
-               COALESCE(pay.deposit_collected,0) AS deposit_collected
+               COALESCE(pay.deposit_collected,0) AS deposit_collected,
+               COALESCE(rf.booking_refunded,0) AS booking_refunded
         FROM bookings b
                  JOIN customers c ON c.id=b.customer_id AND c.store_id=b.store_id
                  LEFT JOIN branches br ON br.id=b.branch_id AND br.store_id=b.store_id
@@ -610,9 +742,10 @@ function bookingListSql(whereSql) {
                  LEFT JOIN (
             SELECT booking_id,
                    MAX(CASE WHEN item_type='${ITEM.PACKAGE}' THEN item_name_snapshot END) AS package_name,
-                   SUM(item_type='${ITEM.RENTAL}' AND item_status<>'${ITEM_STATUS.CANCELLED}') AS rental_lines,
-                   SUM(item_type='${ITEM.CONSUMABLE}' AND parent_item_id IS NULL AND item_status<>'${ITEM_STATUS.CANCELLED}') AS custom_lines,
-                   SUM(item_type='${ITEM.CONSUMABLE}' AND item_status<>'${ITEM_STATUS.CANCELLED}') AS consumable_lines
+                   -- Composition counts include cancelled lines, so a cancelled booking keeps its real type.
+                   SUM(item_type='${ITEM.RENTAL}' AND item_status NOT LIKE 'claim%') AS rental_lines,
+                   SUM(item_type='${ITEM.CONSUMABLE}' AND parent_item_id IS NULL AND item_status NOT LIKE 'claim%') AS custom_lines,
+                   SUM(item_type='${ITEM.CONSUMABLE}' AND item_status NOT LIKE 'claim%') AS consumable_lines
             FROM booking_items WHERE store_id=? GROUP BY booking_id
         ) it ON it.booking_id=b.id
                  LEFT JOIN (
@@ -622,6 +755,12 @@ function bookingListSql(whereSql) {
             FROM payments WHERE store_id=? AND booking_id IS NOT NULL AND status='${PAYMENT.RECORDED}'
             GROUP BY booking_id
         ) pay ON pay.booking_id=b.id
+                 LEFT JOIN (
+            SELECT p.booking_id, SUM(r.amount) AS booking_refunded
+            FROM refunds r JOIN payments p ON p.id=r.payment_id AND p.store_id=r.store_id
+            WHERE r.refund_type='${REFUND.BOOKING}' AND LOWER(r.status) IN ('completed','processed') AND p.booking_id IS NOT NULL
+            GROUP BY p.booking_id
+        ) rf ON rf.booking_id=b.id
         WHERE ${whereSql}`;
 }
 
@@ -632,7 +771,7 @@ function mapBookingRow(r) {
     const dp = Number(r.required_down_payment || 0);
     const agreed = r.agreed_price == null ? null : Number(r.agreed_price);
     const packagePrice = Number(r.package_price_snapshot || 0);
-    const balance = Math.max(0, money2(total - paid));
+    const balance = closedStatus(r.status) ? 0 : Math.max(0, money2(total - paid));
     const paymentStatus = paymentStatusLabel(total, dp, paid);
     const deposit = Number(r.refundable_deposit_required || 0);
     return {
@@ -643,6 +782,10 @@ function mapBookingRow(r) {
         consumableItemCount: Number(r.consumable_lines),
         name: r.full_name, facebookName: r.facebook_name || "", phone: r.phone || "", email: r.email || "",
         date: r.event_date, eventEndDate: r.event_end_date, eventTime: r.event_time || "",
+        handoverMethod: r.handover_method === "delivery" ? "delivery" : "pickup",
+        handoverDate: r.handover_date || r.event_date, handoverTime: r.handover_time || "",
+        returnDate: Number(r.rental_lines) > 0 ? (r.return_date || r.event_end_date || r.event_date) : "",
+        returnTime: Number(r.rental_lines) > 0 ? (r.return_time || "") : "",
         eventType: r.event_type || "", eventName: r.event_type || "",
         package: r.package_name, packageName: r.package_name,
         customOrder: r.custom_order || "", theme: r.theme || "", venue: r.venue || "", notes: r.notes || "",
@@ -651,6 +794,7 @@ function mapBookingRow(r) {
         package_price: packagePrice, packagePrice,
         required_down_payment: dp, requiredDownPayment: dp,
         amount_paid: paid, amountPaid: paid, balance,
+        amount_refunded: money2(r.booking_refunded), amountRefunded: money2(r.booking_refunded),
         payment_status: paymentStatus, paymentStatus,
         refundable_deposit: deposit, refundableDeposit: deposit,
         securityDepositRequired: deposit, securityDepositCollected: money2(r.deposit_collected),
@@ -882,8 +1026,9 @@ async function confirmRentalAllocations(db, { booking, storeId, branchId, price 
          WHERE booking_id=? AND store_id=? AND item_type=? AND item_status=? ORDER BY equipment_id FOR UPDATE`,
         [Number(booking.id), Number(storeId), ITEM.RENTAL, ITEM_STATUS.PENDING]);
     if (!lines.length) return;
+    // Only older Rental bookings have a price fixed by the daily rates; Custom prices may include a discount.
     const minimum = lines.reduce((s, l) => s + cents(l.line_total), 0) / 100;
-    if (!Number.isFinite(Number(price)) || Number(price) < minimum - 0.005)
+    if (lower(booking.booking_type) === "rental" && (!Number.isFinite(Number(price)) || Number(price) < minimum - 0.005))
         throw rentalError(`Set an agreed booking price of at least ₱${minimum.toFixed(2)} before confirming this rental.`);
     // Locking the branch_inventory rows serializes confirmations of the same equipment.
     await requireRentalCapacity(db, { storeId, branchId, needs: rentalNeeds(lines), from: booking.rentalStart,
@@ -905,15 +1050,49 @@ function usedQuantityFor(itemId, usedItems) {
     return Math.max(0, Math.floor(toNumber(match.used_quantity ?? match.usedQuantity ?? match.quantityUsed ?? 0)));
 }
 
+// ─── Product prices for cancellation refunds ─────────────────────────────────
+// A package (or a custom quote) can cost less than its products at normal prices: a discount.
+// For refunds, each consumable is valued at its share of the agreed deal:
+//   Package: ratio = (package price) ÷ (normal value of consumables + rentals included in the package)
+//            (older package bookings with extra rentals: those extras were charged at full price, so they are left out)
+//   Custom:  ratio = (agreed price) ÷ (normal value of consumables + rental equipment), because a Custom
+//            discount covers everything in the booking.
+// No discount → ratio 1 (normal price). Never above 1, so a product is never valued above its normal price.
+function consumablePriceRatio(booking, items) {
+    const consumables = items.filter((i) => i.item_type === ITEM.CONSUMABLE);
+    const rentals = items.filter((i) => i.item_type === ITEM.RENTAL);
+    const custom = lower(booking.booking_type) === "custom";
+    const includedRentalCents = rentals.filter((r) => r.parent_item_id).reduce((sum, r) =>
+        sum + cents(r.unit_price_snapshot) * Number(r.quantity || 0) * Math.max(1, Number(r.rental_days || 1)), 0);
+    const separateRentalCents = rentals.filter((r) => !r.parent_item_id).reduce((sum, r) => sum + cents(r.line_total), 0);
+    const normalCents = consumables.reduce((sum, i) => sum + cents(i.unit_price_snapshot) * Number(i.quantity || 0), 0) +
+        includedRentalCents + (custom ? separateRentalCents : 0);
+    const agreedCents = cents(bookingTotal(booking)) - (custom ? 0 : separateRentalCents);
+    if (!(normalCents > 0) || !(agreedCents > 0)) return 1;
+    return Math.min(1, Math.max(0, agreedCents / normalCents));
+}
+const refundUnitPrice = (item, ratio) => money2(Number(item.unit_price_snapshot || 0) * ratio);
+// Value of used products at the deal price: used quantity × the (rounded) price shown to the Manager,
+// so the math on screen adds up. When EVERYTHING is used it is exactly the deal price (no ₱0.01 left over),
+// and it is never more than the deal price.
+function usedValueAtDealPrice(lines, ratio) {
+    const shown = lines.reduce((sum, l) => sum + cents(Number(l.used || 0) * refundUnitPrice(l.item, ratio)), 0) / 100;
+    const dealTotal = money2(ratio * lines.reduce((sum, l) => sum + Number(l.item.quantity || 0) * Number(l.item.unit_price_snapshot || 0), 0));
+    const allUsed = lines.length > 0 && lines.every((l) => Number(l.used || 0) >= Number(l.item.quantity || 0));
+    return allUsed ? dealTotal : Math.min(money2(shown), dealTotal);
+}
+
 // Cancellation: un-reserve unused consumables; units already used leave on_hand.
 async function restoreBookingInventoryOnCancel(db, { booking, storeId, branchId, usedItems, actor }) {
     const items = await loadItems(db, booking.id, storeId, true);
+    const priceRatio = consumablePriceRatio(booking, items);   // discounted price when the booking has a discount
     const rentals = items.filter((i) => i.item_type === ITEM.RENTAL && i.item_status !== ITEM_STATUS.CANCELLED);
     if (rentals.some((r) => r.item_status === ITEM_STATUS.RELEASED))
         throw rentalError("Receive the checked-out rental equipment before cancelling this booking.");
-    if (rentals.some((r) => r.item_status === ITEM_STATUS.RETURNED))
+    if (rentals.some(isReturned))
         throw rentalError("Returned rentals already contain fulfilled charges; contact an administrator for refund adjustments.");
     let restoredCount = 0, restoredQuantity = 0, usedQuantity = 0;
+    const usedLines = [];
     for (const item of items) {
         if (item.item_type !== ITEM.CONSUMABLE || item.item_status !== ITEM_STATUS.RESERVED) continue;
         const qty = Number(item.quantity);
@@ -933,13 +1112,15 @@ async function restoreBookingInventoryOnCancel(db, { booking, storeId, branchId,
         restoredCount += 1;
         restoredQuantity += qty - used;
         usedQuantity += used;
+        usedLines.push({ item, used });
     }
+    const usedValue = usedValueAtDealPrice(usedLines, priceRatio);
     await db.execute(
         `UPDATE booking_items SET item_status=? WHERE booking_id=? AND store_id=? AND item_status IN (?,?)
                                                   AND (item_type<>? OR item_status=?)`,
         [ITEM_STATUS.CANCELLED, Number(booking.id), Number(storeId), ITEM_STATUS.PENDING, ITEM_STATUS.RESERVED,
             ITEM.CONSUMABLE, ITEM_STATUS.PENDING]);
-    return { ok: true, restoredCount, restoredQuantity, usedQuantity };
+    return { ok: true, restoredCount, restoredQuantity, usedQuantity, usedValue };
 }
 
 // ─── Confirmation checks ─────────────────────────────────────────────────────
@@ -1064,13 +1245,13 @@ async function confirmApprovedBookingAfterPayment(db, { bookingId, storeId, bran
 // ─── Completion / settlement checks ──────────────────────────────────────────
 function requireRentalReturnBeforeCompletion(items) {
     const rentals = splitItems(items).rentals;
-    if (rentals.some((r) => r.item_status !== ITEM_STATUS.RETURNED))
+    if (rentals.some((r) => !isReturned(r)))
         throw rentalError("Receive and account for rented equipment before completing the booking.");
 }
 
 function requireRentalIncidentSettlement(booking, items, money, allowOutstanding = false) {
     const rentals = splitItems(items).rentals;
-    if (rentals.some((r) => r.item_status === ITEM_STATUS.RETURNED && !r.inspected_at))
+    if (rentals.some((r) => isReturned(r) && !r.inspected_at))
         throw rentalError("Staff must inspect all physically returned rental equipment before completing the booking.");
     if (incidentsFromItems(items).length && !booking.settlement_reviewed_at)
         throw rentalError("Manager must approve or waive the booking-linked damage or missing-equipment charge.");
@@ -1128,6 +1309,53 @@ async function refundDeposit(db, { booking, storeId, amount, actor, reason, meth
     if (remaining > 0) throw rentalError("Refund amount exceeds the security deposit still held.");
     await db.execute(`UPDATE bookings SET approved_refund_amount=approved_refund_amount+? WHERE id=? AND store_id=?`,
         [cents(amount) / 100, Number(booking.id), Number(storeId)]);
+}
+
+// Refund part of the booking payments when a booking is cancelled (refunds.payment_id is required).
+async function refundBookingPayment(db, { booking, storeId, amount, actor, reason, method }) {
+    let remaining = cents(amount);
+    if (remaining <= 0) return;
+    const [payments] = await db.execute(
+        `SELECT p.id, p.amount,
+                COALESCE((SELECT SUM(r.amount) FROM refunds r WHERE r.payment_id=p.id AND r.store_id=p.store_id
+                                                                AND LOWER(r.status) IN ('completed','processed')),0) AS refunded
+         FROM payments p WHERE p.booking_id=? AND p.store_id=? AND p.payment_type=? AND p.status=?
+         ORDER BY p.id DESC FOR UPDATE`,
+        [Number(booking.id), Number(storeId), PAYMENT.BOOKING, PAYMENT.RECORDED]);
+    for (const p of payments) {
+        if (remaining <= 0) break;
+        const take = Math.min(remaining, cents(p.amount) - cents(p.refunded));
+        if (take <= 0) continue;
+        await db.execute(
+            `INSERT INTO refunds (store_id, payment_id, refund_type, amount, refund_reason, refund_method,
+                                  status, approved_by, processed_by, processed_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+            [Number(storeId), p.id, REFUND.BOOKING, take / 100, String(reason || "Booking cancelled").slice(0, 1000),
+                String(method || "cash").slice(0, 50), REFUND.DONE, actor?.id ?? null, actor?.id ?? null]);
+        remaining -= take;
+    }
+    if (remaining > 0) throw rentalError("The refund is more than the booking payments received.");
+}
+
+// Cancellation policy (suggestion only; the Manager may change it): the store keeps the LARGER of
+// the non-refundable down payment or the value of products already used; the rest is refunded.
+function suggestedCancellationRefund(netPaid, downPayment, usedValue) {
+    return Math.max(0, money2(Number(netPaid) - Math.max(Number(downPayment) || 0, Number(usedValue) || 0)));
+}
+
+// Validates the refund the Manager entered in the Cancel dialog against the locked booking figures.
+function cancellationRefundPlan(impact, input, verified) {
+    const paid = money2(impact.refundableBookingPayment);
+    const missing = input === undefined || input === null || String(input).trim() === "";
+    if (paid > 0.005 && missing)
+        throw rentalError(`Enter how much of the ₱${paid.toFixed(2)} booking payment is refunded (₱0 if none) before cancelling.`);
+    const bookingRefund = paid > 0.005 ? financeCurrency(input, "Booking payment refund") : 0;
+    if (bookingRefund > paid + 0.005)
+        throw rentalError(`The refund cannot be more than the ₱${paid.toFixed(2)} booking payment received.`);
+    const depositRefund = money2(impact.depositHeld);
+    if ((bookingRefund > 0 || depositRefund > 0) && !verified)
+        throw rentalError("Confirm that the refund was actually given back to the customer before cancelling.");
+    return { bookingRefund, depositRefund, retained: money2(paid - bookingRefund) };
 }
 
 async function insertPayment(db, { booking, storeId, type, amount, requestKey, actor, method, referenceNumber, notes }) {
@@ -1282,9 +1510,6 @@ const PUBLIC_ACTIONS = {
         const startDate = rentalDate(eventDate, "Event start date");
         const endDate = rentalDate(body.eventEndDate || body.event_end_date || body.rentalEndDate || startDate, "Event end date");
         rentalDays(startDate, endDate);
-        if (body.rentalEndDate && body.eventEndDate && body.rentalEndDate !== body.eventEndDate)
-            return response(400, { error: "Rental end date must match the selected event end date." });
-        const eventTime = normalizeEventTime(body.eventTime || body.event_time);
         const eventType = limitText(body.eventType || body.event_type || (isRental ? "Equipment Rental" : "Based on selected package"), 100, "Event type");
         const theme = limitText(body.theme, 150, "Theme / motif");
         const customOrder = String(body.customOrder || body.custom_order || "").trim();
@@ -1292,6 +1517,10 @@ const PUBLIC_ACTIONS = {
         if (isRental && !rentalSelections.length) return response(400, { error: "Select at least one rental equipment item." });
         if (isRental && (body.packageId || body.package_id)) return response(400, { error: "Rental-only bookings cannot include a package." });
         if (isRental && rawItems.length) return response(400, { error: "Rental-only bookings cannot contain consumable items." });
+        // Packages are fixed sets: their rental equipment comes from the package itself. Customers who want
+        // something different message the store, and the Manager adjusts or creates a package for them.
+        if (isPackage && rentalSelections.length)
+            return response(400, { error: "Packages are fixed sets. Extra rental equipment can't be added to a package; message the store to change your order." });
 
         const bookingLimit = await effectiveBookingLimit(db, storeId);
         if (bookingLimit !== null) {
@@ -1336,7 +1565,16 @@ const PUBLIC_ACTIONS = {
             rentalPlan.set(id, entry);
         }
         if (rentalPlan.size > 30) return response(409, { error: "Too many rental equipment types in this booking." });
-        if (rentalPlan.size && startDate < rentalTodayManila()) return response(400, { error: "Rental start date cannot be in the past." });
+        const schedule = parseBookingSchedule(body, { startDate, endDate, hasRentals: rentalPlan.size > 0 });
+        const venue = body.venue ? String(body.venue).trim() : "";
+        if (schedule.method === "delivery" && !venue)
+            return response(400, { error: "Enter the delivery address in Venue." });
+        if (rentalPlan.size && schedule.handoverDate < rentalTodayManila())
+            return response(400, { error: `${handoverLabel(schedule.method)} date cannot be in the past.` });
+        // Rental period = pickup/delivery date → return date.
+        const rentalStart = schedule.handoverDate, rentalEnd = schedule.returnDate || endDate;
+        // Old field kept for older screens: event_time now holds the pickup/delivery time.
+        const eventTime = schedule.handoverTime;
 
         let reference = String(body.bookingReference || body.booking_reference || "").trim() || generateBookingReference();
         if (reference.length > 80) return response(400, { error: "Booking reference must be at most 80 characters." });
@@ -1349,12 +1587,14 @@ const PUBLIC_ACTIONS = {
                 const [result] = await db.execute(
                     `INSERT INTO bookings
                      (store_id, branch_id, booking_reference, customer_id, package_id, booking_type, event_type, theme,
-                      event_date, event_end_date, event_time, venue, rental_start_date, rental_end_date, custom_order,
+                      event_date, event_end_date, event_time, venue, handover_method, handover_date, handover_time,
+                      rental_start_date, rental_end_date, return_time, custom_order,
                       notes, status, package_price_snapshot, agreed_price, required_down_payment, refundable_deposit_required)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending Review', ?, NULL, ?, 0)`,
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending Review', ?, NULL, ?, 0)`,
                     [storeId, branchId, reference, customerId, isPackage ? Number(pkg.id) : null, bookingType, eventType, theme,
-                        startDate, endDate, eventTime, body.venue ? String(body.venue).trim() : null,
-                        rentalPlan.size ? startDate : null, rentalPlan.size ? endDate : null,
+                        startDate, endDate, eventTime, venue || null, schedule.method, schedule.handoverDate, schedule.handoverTime,
+                        rentalPlan.size ? rentalStart : null, rentalPlan.size ? rentalEnd : null,
+                        rentalPlan.size ? schedule.returnTime : null,
                         customOrder || null, String(body.notes || "").trim() || null,
                         isPackage ? packagePrice : null, requiredDownPayment]);
                 const bookingId = result.insertId;
@@ -1395,9 +1635,9 @@ const PUBLIC_ACTIONS = {
                 let rentalTotal = 0;
                 const savedRentals = [];
                 if (rentalPlan.size) {
-                    const days = rentalDays(startDate, endDate);
+                    const days = rentalDays(rentalStart, rentalEnd);
                     const needs = new Map([...rentalPlan].map(([id, e]) => [id, e.extra + e.included]));
-                    const equipment = await requireRentalCapacity(db, { storeId, branchId, needs, from: startDate, to: endDate, lock: false });
+                    const equipment = await requireRentalCapacity(db, { storeId, branchId, needs, from: rentalStart, to: rentalEnd, lock: false });
                     for (const [equipmentId, entry] of [...rentalPlan].sort(([a], [b]) => a - b)) {
                         const e = equipment.get(equipmentId);
                         const rate = rentalMoneyCents(e.dailyRate);
@@ -1424,6 +1664,7 @@ const PUBLIC_ACTIONS = {
                 const catalogOnly = isPackage || isRental || catalogOnlyBookingText(customOrder, savedSales, savedRentals);
                 if (catalogOnly && authoritativeTotal > 0)
                     await db.execute(`UPDATE bookings SET agreed_price=? WHERE id=?`, [authoritativeTotal, bookingId]);
+                await saveBookingVat(db, { bookingId, storeId });
                 return response(201, {
                     success: true, id: bookingId, bookingReference: reference,
                     quoted_booking_charges: authoritativeTotal, refundable_deposit_required: 0,
@@ -1564,6 +1805,7 @@ const PROTECTED_ACTIONS = {
         const branchId = Number(b.branch_id);
         const consumables = items.filter((i) => i.item_type === ITEM.CONSUMABLE);
         const rentals = items.filter((i) => i.item_type === ITEM.RENTAL);
+        const priceRatio = consumablePriceRatio(b, items);
         const enrichedSales = [];
         for (const item of consumables) {
             let available = null, note = null;
@@ -1590,6 +1832,9 @@ const PROTECTED_ACTIONS = {
                 used_quantity: used,
                 restored_quantity: item.item_status === ITEM_STATUS.CANCELLED ? Math.max(0, qty - used) : 0,
                 unit_price: Number(item.unit_price_snapshot),
+                // Price used for cancellation refunds: the discounted price if the package / quote has a discount.
+                refund_unit_price: refundUnitPrice(item, priceRatio),
+                refund_price_ratio: priceRatio,
                 estimated_subtotal: item.parent_item_id ? money2(Number(item.unit_price_snapshot) * qty) : Number(item.line_total),
                 used_subtotal: money2(Number(item.unit_price_snapshot) * used),
                 inventory_status: item.item_status,
@@ -1607,8 +1852,7 @@ const PROTECTED_ACTIONS = {
             for (const item of rentals) {
                 const e = equipment.get(Number(item.equipment_id));
                 const available = e ? Math.max(0, equipmentCapacity(e) - rentalPeakReserved(allocations.get(Number(item.equipment_id)) || [], b.rentalStart, b.rentalEnd, today)) : null;
-                const status = item.item_status === ITEM_STATUS.PENDING ? "pending_review"
-                    : item.item_status === ITEM_STATUS.RELEASED ? "checked_out" : item.item_status;
+                const status = allocationLabel(item);
                 enrichedRentals.push({
                     id: Number(item.id), equipment_id: Number(item.equipment_id), equipment_name: item.item_name_snapshot,
                     quantity: Number(item.quantity), start_date: b.rentalStart, end_date: b.rentalEnd,
@@ -1627,6 +1871,8 @@ const PROTECTED_ACTIONS = {
             booking: { id: bookingId, status: b.status, store_id: ctx.storeId, branch_id: branchId,
                 booking_reference: b.booking_reference, event_date: b.eventDate },
             items: enrichedSales, rentalItems: enrichedRentals,
+            // 0 when there is no discount; e.g. 8.3 when the package costs 8.3% less than its products at normal prices.
+            consumableDiscountPercent: Math.round((1 - priceRatio) * 1000) / 10,
         });
     },
 
@@ -1648,11 +1894,21 @@ const PROTECTED_ACTIONS = {
         const items = await loadItems(ctx.db, bookingId, ctx.storeId);
         const decision = b.settlement_reviewed_at ? (Number(b.final_additional_charges) > 0 ? "approved" : "waived") : null;
         const incidents = incidentsFromItems(items);
+        // Equipment cost price = replacement value, shown to the Manager as a reference when deciding a charge.
+        const equipmentIds = [...new Set(incidents.map((x) => Number(x.item.equipment_id)).filter(isId))];
+        const costs = new Map();
+        if (equipmentIds.length) {
+            const [rows] = await ctx.db.execute(`SELECT id, cost_price FROM equipment WHERE store_id=? AND id IN (${equipmentIds.map(() => "?").join(",")})`,
+                [ctx.storeId, ...equipmentIds]);
+            for (const r of rows) costs.set(Number(r.id), r.cost_price == null ? null : money2(r.cost_price));
+        }
         const view = (x) => ({ id: Number(x.item.id), equipmentId: Number(x.item.equipment_id), equipmentName: x.item.item_name_snapshot,
-            quantity: x.quantity, reason: x.item.return_notes || "", decisionStatus: decision });
+            quantity: x.quantity, reason: x.item.return_notes || "", decisionStatus: decision,
+            unitValue: costs.get(Number(x.item.equipment_id)) ?? null });
         // Staff return + inspection records for the Manager's "Rental Return & Final Settlement" dialog.
         const [reports] = await ctx.db.execute(
             `SELECT bi.id, bi.item_name_snapshot, bi.quantity, bi.item_status, bi.returned_quantity, bi.return_notes,
+                    bi.damaged_quantity, bi.missing_quantity,
                     DATE_FORMAT(bi.inspected_at,'%Y-%m-%d %H:%i:%s') AS inspectedAt,
                     ins.full_name AS inspectedBy, rec.full_name AS receivedBy
              FROM booking_items bi
@@ -1666,12 +1922,12 @@ const PROTECTED_ACTIONS = {
             recoveryInspectionPending: false,
             returnReports: reports.map((r) => ({
                 allocationId: Number(r.id), equipmentName: r.item_name_snapshot, issuedQuantity: Number(r.quantity),
-                allocationStatus: r.item_status === ITEM_STATUS.RELEASED ? "checked_out"
-                    : r.item_status === ITEM_STATUS.PENDING ? "pending_review" : r.item_status,
-                returnedReceivedUnits: r.item_status === ITEM_STATUS.RETURNED ? Number(r.returned_quantity) : null,
-                inspectionStatus: r.inspectedAt ? "inspected" : r.item_status === ITEM_STATUS.RETURNED ? "pending" : null,
+                allocationStatus: allocationLabel(r),
+                returnedReceivedUnits: isReturned(r) ? Number(r.returned_quantity) : null,
+                inspectionStatus: r.inspectedAt ? "inspected" : isReturned(r) ? "pending" : null,
                 inspectedAt: r.inspectedAt || null, inspectedBy: r.inspectedBy || null,
                 receivedBy: r.receivedBy || null, notes: r.return_notes || null,
+                damagedUnits: Number(r.damaged_quantity || 0), missingUnits: Number(r.missing_quantity || 0),
             })),
         });
     },
@@ -1694,7 +1950,6 @@ const PROTECTED_ACTIONS = {
         if (mode === "refund" && receivedAmount > 0) return response(400, { error: "Additional claim payment requires a documented damage/missing incident." });
         if (receivedAmount > 0 && body.paymentVerified !== true) return response(400, { error: "Verify that the additional customer payment was actually received." });
         if (refundAmount > 0 && body.refundVerified !== true) return response(400, { error: "Confirm that the refund has actually been given to the customer." });
-        if (mode === "combined" && refundAmount > 0) return response(400, { error: "Finish the combined charge first; refund remaining deposits in a separate verified action." });
         const newCharge = mode === "refund" ? 0 : financeCurrency(body.chargeAmount ?? 0, "Approved customer charge");
         const reason = String(body.reason || "").trim().slice(0, 500);
 
@@ -1982,6 +2237,8 @@ const PROTECTED_ACTIONS = {
             return response(400, { error: "Invalid booking status" });
         const cancellationReason = String(body.cancel_reason ?? "").trim();
         const rejectionReason = String(body.rejection_reason ?? "").trim();
+        const refundInput = body.booking_refund_amount ?? body.bookingRefundAmount;
+        const refundMethod = String(body.refund_method || body.refundMethod || "cash").trim().slice(0, 50) || "cash";
         if (status === "Cancelled" && (cancellationReason.length < 5 || cancellationReason.length > 500))
             return response(400, { error: "Enter a cancellation reason (5–500 characters)." });
         if (status === "Rejected" && (rejectionReason.length < 5 || rejectionReason.length > 500))
@@ -2006,6 +2263,7 @@ const PROTECTED_ACTIONS = {
 
         let inventoryResult = { reservedCount: 0, restoredCount: 0, restoredQuantity: 0, usedQuantity: 0 };
         let impactForLog = null;
+        let cancelRefund = null;
         await withTransaction(db, async () => {
             if (status === "Cancelled" || status === "Rejected") {
                 const impact = await getBookingClosureImpact(db, { bookingId, storeId, branchId, lock: true });
@@ -2018,6 +2276,8 @@ const PROTECTED_ACTIONS = {
                         throw rentalError("This pending booking has financial or inventory activity. Resolve the discrepancy before rejecting.");
                 } else if (!impact.eligibleForCancel) {
                     throw rentalError("This booking cannot be routinely cancelled at its current stage.");
+                } else {
+                    cancelRefund = cancellationRefundPlan(impact, refundInput, body.refund_verified === true);
                 }
             }
             const booking = await loadBooking(db, { bookingId, storeId, branchId, lock: true });
@@ -2037,8 +2297,11 @@ const PROTECTED_ACTIONS = {
                         throw rentalError("Direct confirmation requires a zero DP and a Manager waiver reason (10+ characters).");
                     booking.approved_by = actor.id;
                 }
-                if (currentStatus === "Pending Review")
+                if (currentStatus === "Pending Review") {
                     await db.execute(`UPDATE bookings SET approved_by=?, approved_at=NOW() WHERE id=?`, [actor.id, bookingId]);
+                    // Price is locked from here on: save the final VAT record with the store's current registration.
+                    await saveBookingVat(db, { bookingId, storeId });
+                }
                 if (status === "Confirmed") {
                     requireBookingDeposit(booking, review.money);
                     await requireCustomerReviewClear(db, { booking, storeId });
@@ -2061,6 +2324,17 @@ const PROTECTED_ACTIONS = {
             if (status === "Cancelled") {
                 inventoryResult = { ...inventoryResult, ...(await restoreBookingInventoryOnCancel(db,
                         { booking, storeId, branchId, usedItems: getUsedItemsInput(body), actor })) };
+                // Money given back in the same transaction; the payment rows themselves are kept as history.
+                if (cancelRefund.bookingRefund > 0)
+                    await refundBookingPayment(db, { booking, storeId, amount: cancelRefund.bookingRefund, actor,
+                        method: refundMethod, reason: `Booking cancelled: ${cancellationReason}` });
+                if (cancelRefund.depositRefund > 0)
+                    await refundDeposit(db, { booking, storeId, amount: cancelRefund.depositRefund, actor, method: refundMethod,
+                        reason: `Booking cancelled before equipment release: ${cancellationReason}` });
+                await db.execute(`UPDATE bookings SET settlement_status='settled', settlement_notes=? WHERE id=? AND store_id=?`,
+                    [`Cancelled: refunded ₱${cancelRefund.bookingRefund.toFixed(2)} of booking payments (kept ₱${cancelRefund.retained.toFixed(2)})` +
+                    `${cancelRefund.depositRefund > 0 ? `; security deposit ₱${cancelRefund.depositRefund.toFixed(2)} refunded` : ""}.`,
+                        bookingId, storeId]);
             }
             if (status === "Rejected") {
                 await db.execute(`UPDATE booking_items SET item_status=? WHERE booking_id=? AND store_id=? AND item_status=?`,
@@ -2075,8 +2349,12 @@ const PROTECTED_ACTIONS = {
                     message: `${ref} (${booking.customer_name || "customer"}): ${currentStatus} → ${status}`,
                     ...(status === "Confirmed" && currentStatus === "Pending Review" ? { noDpReason: String(body.noDpReason || "").trim() } : {}),
                     ...(status === "Cancelled" ? { reason: cancellationReason, paymentStage: impactForLog?.paymentStage,
-                        bookingPaid: impactForLog?.paymentReceived, depositHeld: impactForLog?.depositHeld,
-                        note: "Financial review required; no automatic refund/forfeiture." } : {}),
+                        bookingPaid: impactForLog?.paymentReceived, bookingRefund: cancelRefund?.bookingRefund ?? 0,
+                        amountKept: cancelRefund?.retained ?? 0, depositRefunded: cancelRefund?.depositRefund ?? 0,
+                        usedItemsValue: inventoryResult.usedValue ?? 0,
+                        suggestedRefund: impactForLog ? suggestedCancellationRefund(impactForLog.refundableBookingPayment,
+                            impactForLog.requiredDownPayment, inventoryResult.usedValue ?? 0) : null,
+                        refundMethod } : {}),
                     ...(status === "Rejected" ? { reason: rejectionReason } : {}),
                 },
             });
@@ -2085,6 +2363,8 @@ const PROTECTED_ACTIONS = {
             success: true, status,
             reserved_items: inventoryResult.reservedCount || 0, restored_items: inventoryResult.restoredCount || 0,
             restored_quantity: inventoryResult.restoredQuantity || 0, used_quantity: inventoryResult.usedQuantity || 0,
+            ...(cancelRefund ? { booking_refunded: cancelRefund.bookingRefund, deposit_refunded: cancelRefund.depositRefund,
+                amount_kept: cancelRefund.retained, used_items_value: inventoryResult.usedValue ?? 0 } : {}),
         });
     },
 
@@ -2124,25 +2404,20 @@ const PROTECTED_ACTIONS = {
                 return response(400, { error: "Bookings containing rental equipment require a positive down payment toward the booking price. The refundable security deposit does not replace it." });
             if (type === "rental" && (q.packageBase !== 0 || requiredMinimum <= 0 || Math.abs(total - requiredMinimum) > 0.005))
                 return response(409, { error: "Rental-only booking prices are fixed by the selected equipment and services. Only DP and security deposit terms can be edited." });
-            const customMixed = type === "custom" && rentalCount > 0 && s.customConsumables.length > 0;
-            if (customMixed) {
-                const raw = body.custom_consumables_agreed;
-                if (raw === undefined || raw === null || String(raw).trim() === "")
-                    return response(400, { error: "Enter the agreed consumables price separately from fixed rental charges." });
-                const customAmount = financeCurrency(raw, "Agreed consumables price");
-                if (Math.abs(total - (customAmount + q.rentalSubtotal)) > 0.005)
-                    return response(409, { error: "Total must equal agreed consumables plus verified fixed rental and service charges. Refresh the quotation." });
-                const reason = String(body.pricing_adjustment_reason || "").trim();
-                const changed = Math.abs(customAmount - q.salesSubtotal) > 0.005;
-                if (changed && (reason.length < 5 || reason.length > 300))
-                    return response(400, { error: "Explain the discounted or negotiated Custom consumables price (5–300 characters)." });
-                if (!changed && reason.length > 300) return response(400, { error: "Pricing note exceeds 300 characters." });
-            }
+            // Custom: ONE agreed price for everything (consumables and rental equipment). It may be discounted;
+            // a price below the normal total needs a short reason, kept in the activity log.
+            const customType = type === "custom";
+            const normalCustomTotal = money2(q.salesSubtotal + q.rentalSubtotal);
+            const pricingReason = String(body.pricing_adjustment_reason || "").trim();
+            const customDiscount = customType && normalCustomTotal > 0 && total < normalCustomTotal - 0.005;
+            if (customDiscount && (pricingReason.length < 5 || pricingReason.length > 300))
+                return response(400, { error: "Add a short reason for the discount (5–300 characters)." });
+            if (pricingReason.length > 300) return response(400, { error: "The pricing note can be at most 300 characters." });
             if (depositSpecified && rentalCount === 0 && depositAmount > 0)
                 return response(400, { error: "Rental security deposits apply only to bookings containing rental equipment." });
-            const protectedMinimum = customMixed ? q.rentalSubtotal : requiredMinimum;
-            if (total < protectedMinimum - 0.005)
-                return response(400, { error: `Booking price cannot be below the protected fixed charges of ₱${protectedMinimum.toFixed(2)}.` });
+            // Packages and older Rental bookings keep their fixed price; Custom prices can go below the item total.
+            if (!customType && total < requiredMinimum - 0.005)
+                return response(400, { error: `The price can't be below the fixed charges of ₱${requiredMinimum.toFixed(2)}.` });
             if (depositSpecified) {
                 const money = await getBookingMoney(db, bookingId, storeId);
                 if (depositAmount + 0.005 < money.depositCollected)
@@ -2152,13 +2427,14 @@ const PROTECTED_ACTIONS = {
                 `UPDATE bookings SET agreed_price=?, required_down_payment=?${depositSpecified ? ", refundable_deposit_required=?" : ""}
                  WHERE id=? AND store_id=? AND branch_id=?`,
                 depositSpecified ? [total, requiredDp, depositAmount, bookingId, storeId, branchId] : [total, requiredDp, bookingId, storeId, branchId]);
+            await saveBookingVat(db, { bookingId, storeId });
             const ref = buildBookingReference(b, bookingId);
             await logEmployeeAction(db, { storeId, branchId, actor, entityId: bookingId, referenceNumber: ref,
                 action: "Updated booking payment terms",
                 details: `${ref} (${b.customer_name || "customer"}): price ₱${Number(b.agreed_price || 0).toLocaleString()} → ₱${total.toLocaleString()}, ` +
                     `down payment ₱${Number(b.required_down_payment || 0).toLocaleString()} → ₱${requiredDp.toLocaleString()}` +
                     (depositSpecified ? `, refundable deposit ₱${depositAmount.toLocaleString()}` : "") +
-                    (customMixed ? `, Custom consumables quote: ${String(body.pricing_adjustment_reason || "").trim()}` : "") });
+                    (pricingReason ? `, pricing note: ${pricingReason}` : "") });
             return response(200, { success: true, agreed_price: total, required_down_payment: requiredDp,
                 ...(depositSpecified ? { refundable_deposit: depositAmount } : {}) });
         });
@@ -2236,8 +2512,17 @@ const PROTECTED_ACTIONS = {
                                                                         AND p.item_type='${ITEM.PACKAGE}' LIMIT 1) AS packageName,
                     b.status AS bookingStatus, DATE_FORMAT(b.event_date,'%Y-%m-%d') AS eventDate,
                     TIME_FORMAT(b.event_time,'%H:%i') AS eventTime, b.agreed_price, b.package_price_snapshot,
+                    b.handover_method AS handoverMethod, b.venue AS venue,
+                    DATE_FORMAT(COALESCE(b.handover_date,b.rental_start_date,b.event_date),'%Y-%m-%d') AS handoverDate,
+                    TIME_FORMAT(COALESCE(b.handover_time,b.event_time),'%H:%i') AS handoverTime,
+                    DATE_FORMAT(b.rental_end_date,'%Y-%m-%d') AS returnDate, TIME_FORMAT(b.return_time,'%H:%i') AS returnTime,
                     COALESCE((SELECT SUM(amount) FROM payments pay WHERE pay.booking_id=b.id AND pay.store_id=b.store_id
                               AND pay.payment_type='${PAYMENT.BOOKING}' AND pay.status='${PAYMENT.RECORDED}'),0) AS amountPaid,
+                    COALESCE(b.refundable_deposit_required,0) AS depositRequired,
+                    COALESCE((SELECT SUM(amount) FROM payments dep WHERE dep.booking_id=b.id AND dep.store_id=b.store_id
+                              AND dep.payment_type='${PAYMENT.DEPOSIT}' AND dep.status='${PAYMENT.RECORDED}'),0) AS depositCollected,
+                    (SELECT COUNT(*) FROM booking_items r WHERE r.booking_id=b.id AND r.store_id=b.store_id AND r.item_type='${ITEM.RENTAL}'
+                       AND r.item_status<>'${ITEM_STATUS.CANCELLED}' AND r.item_status NOT LIKE 'claim%') AS rentalLines,
                     bi.id AS itemId, bi.item_name_snapshot AS productName, bi.variant_name_snapshot AS variantName,
                     bi.quantity, bi.prepared_at AS preparedAt, bi.released_at AS issuedAt
              FROM bookings b
@@ -2247,7 +2532,7 @@ const PROTECTED_ACTIONS = {
                AND LOWER(b.status) IN ('confirmed','preparing','released','return inspection','pending settlement')
                AND bi.item_type='${ITEM.CONSUMABLE}' AND bi.item_status='${ITEM_STATUS.RESERVED}'
                AND bi.used_quantity=0 AND bi.released_at IS NULL
-             ORDER BY b.event_date, b.id, bi.id LIMIT 1000`, [ctx.storeId, ctx.branchId]);
+             ORDER BY COALESCE(b.handover_date,b.rental_start_date,b.event_date), b.id, bi.id LIMIT 1000`, [ctx.storeId, ctx.branchId]);
         const groups = new Map();
         for (const row of rows) {
             let booking = groups.get(Number(row.bookingId));
@@ -2255,14 +2540,44 @@ const PROTECTED_ACTIONS = {
                 const total = bookingTotal(row);
                 booking = { bookingId: Number(row.bookingId), reference: String(row.reference || ""), clientName: String(row.clientName || "Customer"),
                     bookingType: String(row.bookingType || ""), packageName: String(row.packageName || ""), bookingStatus: String(row.bookingStatus || ""),
-                    eventDate: String(row.eventDate || ""), eventTime: String(row.eventTime || ""), bookingTotal: total,
-                    amountPaid: Number(row.amountPaid), balance: Math.max(0, money2(total - Number(row.amountPaid))), items: [] };
+                    eventDate: String(row.eventDate || ""), eventTime: String(row.eventTime || ""), ...scheduleFields(row), bookingTotal: total,
+                    amountPaid: Number(row.amountPaid), balance: Math.max(0, money2(total - Number(row.amountPaid))),
+                    // Mixed bookings: the equipment is released in the Rental queue, and the deposit must be paid first.
+                    rentalLines: Number(row.rentalLines || 0), depositRequired: money2(row.depositRequired),
+                    depositCollected: money2(row.depositCollected), items: [] };
                 groups.set(Number(row.bookingId), booking);
             }
             booking.items.push({ itemId: Number(row.itemId), productName: String(row.productName || "Product"),
                 variantName: String(row.variantName || ""), quantity: Number(row.quantity), prepared: !!row.preparedAt, issued: !!row.issuedAt });
         }
-        return response(200, { success: true, canOperateSalesQueue: ctx.salesAccess === "full", bookings: [...groups.values()] });
+        // Type + contents of every active booking in the branch, for the combined Staff queue
+        // (one row per booking, with consumables and rental equipment shown together).
+        const [contentRows] = await ctx.db.execute(
+            `SELECT b.id AS bookingId, b.booking_reference AS reference, b.booking_type AS bookingType, b.status AS bookingStatus,
+                    c.full_name AS clientName, DATE_FORMAT(b.event_date,'%Y-%m-%d') AS eventDate, TIME_FORMAT(b.event_time,'%H:%i') AS eventTime,
+                    b.handover_method AS handoverMethod, b.venue AS venue,
+                    DATE_FORMAT(COALESCE(b.handover_date,b.rental_start_date,b.event_date),'%Y-%m-%d') AS handoverDate,
+                    TIME_FORMAT(COALESCE(b.handover_time,b.event_time),'%H:%i') AS handoverTime,
+                    DATE_FORMAT(b.rental_end_date,'%Y-%m-%d') AS returnDate, TIME_FORMAT(b.return_time,'%H:%i') AS returnTime,
+                    (SELECT p.item_name_snapshot FROM booking_items p WHERE p.booking_id=b.id AND p.store_id=b.store_id
+                                                                        AND p.item_type='${ITEM.PACKAGE}' LIMIT 1) AS packageName,
+                    SUM(bi.item_type='${ITEM.CONSUMABLE}' AND bi.item_status<>'${ITEM_STATUS.CANCELLED}') AS consumableLines,
+                    SUM(bi.item_type='${ITEM.CONSUMABLE}' AND bi.item_status='${ITEM_STATUS.RELEASED}') AS consumablesHandedOver,
+                    SUM(bi.item_type='${ITEM.RENTAL}' AND bi.item_status<>'${ITEM_STATUS.CANCELLED}' AND bi.item_status NOT LIKE 'claim%') AS rentalLines
+             FROM bookings b
+                 JOIN customers c ON c.id=b.customer_id AND c.store_id=b.store_id
+                 JOIN booking_items bi ON bi.booking_id=b.id AND bi.store_id=b.store_id
+             WHERE b.store_id=? AND b.branch_id=?
+               AND LOWER(b.status) IN ('confirmed','preparing','released','return inspection','pending settlement')
+             GROUP BY b.id ORDER BY COALESCE(b.handover_date,b.rental_start_date,b.event_date), b.id LIMIT 1000`, [ctx.storeId, ctx.branchId]);
+        const bookingContents = contentRows.map((r) => ({
+            bookingId: Number(r.bookingId), reference: String(r.reference || ""), bookingType: String(r.bookingType || ""),
+            bookingStatus: String(r.bookingStatus || ""), clientName: String(r.clientName || "Customer"), packageName: String(r.packageName || ""),
+            eventDate: String(r.eventDate || ""), eventTime: String(r.eventTime || ""), ...scheduleFields(r),
+            consumableLines: Number(r.consumableLines || 0), consumablesHandedOver: Number(r.consumablesHandedOver || 0),
+            rentalLines: Number(r.rentalLines || 0),
+        }));
+        return response(200, { success: true, canOperateSalesQueue: ctx.salesAccess === "full", bookings: [...groups.values()], bookingContents });
     },
 
     async prepare_staff_sales_booking_item(ctx) { return staffSalesFulfilment(ctx, "prepare"); },
@@ -2291,7 +2606,7 @@ async function getBookingClosureImpact(db, { bookingId, storeId, branchId, lock 
     const rentals = items.filter((i) => i.item_type === ITEM.RENTAL);
     const allocationStatus = {};
     for (const r of rentals) {
-        const key = r.item_status === ITEM_STATUS.RELEASED ? "checked_out" : r.item_status === ITEM_STATUS.PENDING ? "pending_review" : r.item_status;
+        const key = allocationLabel(r);
         allocationStatus[key] = (allocationStatus[key] || 0) + 1;
     }
     const current = normalizeBookingStatus(booking.status);
@@ -2300,6 +2615,9 @@ async function getBookingClosureImpact(db, { bookingId, storeId, branchId, lock 
     const reservedUnits = consumables.filter((c) => c.item_status === ITEM_STATUS.RESERVED)
         .reduce((s, c) => s + Math.max(0, Number(c.quantity) - Number(c.used_quantity || 0)), 0);
     const usedUnits = consumables.reduce((s, c) => s + Number(c.used_quantity || 0), 0);
+    const netPaid = Math.max(0, money2(paid - money.bookingRefunded));
+    const priceRatio = consumablePriceRatio(booking, items);
+    const usedValue = usedValueAtDealPrice(consumables.map((c) => ({ item: c, used: Number(c.used_quantity || 0) })), priceRatio);
     return {
         bookingId, bookingReference: booking.booking_reference, status: current,
         eligibleForReject: current === "Pending Review",
@@ -2312,7 +2630,14 @@ async function getBookingClosureImpact(db, { bookingId, storeId, branchId, lock 
         rentalItemLines: rentals.length, rentalAllocations: allocationStatus, rentalCancellationBlocked: rentalAlreadyHandled,
         requiresFinancialReview: paid > 0 || money.depositCollected > 0,
         requiresInventoryReview: usedUnits > 0 || rentals.some((r) => r.item_status !== ITEM_STATUS.PENDING),
-        refundDecision: "Requires separate policy review; no automatic refund or forfeiture",
+        // Cancellation refund: suggested = booking payments minus the down payment (the Manager may change it).
+        // Equipment has not left yet, so the held security deposit is always refunded in full.
+        bookingRefunded: money.bookingRefunded,
+        refundableBookingPayment: netPaid,
+        usedItemsValue: usedValue,
+        suggestedRefund: suggestedCancellationRefund(netPaid, down, usedValue),
+        depositRefundOnCancel: d.depositHeld,
+        refundDecision: "Suggested refund = booking payment minus the larger of the down payment or the value of used items; the held security deposit is refunded in full.",
     };
 }
 
@@ -2377,7 +2702,8 @@ async function staffSalesFulfilment(ctx, step) {
         const rentals = splitItems(items).rentals;
         if (rentals.length && money.depositCollected + 0.005 < Number(b.refundable_deposit_required || 0))
             throw rentalError("Collect the full agreed refundable security deposit before releasing booking items.");
-        if (b.eventDate > rentalTodayManila()) throw rentalError("Sales products cannot be released before their scheduled event date.");
+        if (b.handoverDate > rentalTodayManila())
+            throw rentalError(`Products can be handed over from the ${handoverLabel(b.handoverMethod).toLowerCase()} date (${b.handoverDate}).`);
         if (lines.some((l) => !l.prepared_at || l.released_at))
             throw rentalError("Every Sales product inclusion must be prepared and not yet handed over.");
         for (const line of lines) {
@@ -2519,6 +2845,140 @@ const BOOKING_READ_ACTIONS = new Set([
 const SALES_QUEUE_ACTIONS = new Set(["get_staff_sales_booking_queue", "prepare_staff_sales_booking_item", "release_staff_sales_booking"]);
 const OWNER_FORBIDDEN = new Set(["update_status", "update_price", "update_payment"]);
 
+// STAFF DASHBOARD (from cm's version): read-only, authenticated branch-scoped operational summaries.
+// No changes to reservation, release, POS or maintenance write workflows.
+function staffDashboardAccess(raw) {
+    let p = raw;
+    if (typeof p === 'string') { try { p = JSON.parse(p); } catch { p = {}; } }
+    if (!p || typeof p !== 'object' || Array.isArray(p)) p = {};
+    const full = module => {
+        const value = p[`${module}_access`] === undefined ? p[module] : p[`${module}_access`];
+        return value === 'full' || value === true || value === 'true';
+    };
+    // Match the rental operational guard: legacy standard/boolean grants are not operational Bookings.
+    const bookings = p.bookings_access === 'full';
+    const inventory = full('inventory');
+    return { bookings, inventory, pos: !bookings && full('pos') };
+}
+function staffDashboardDay(now = new Date()) {
+    const parts = new Intl.DateTimeFormat('en-US', {timeZone:'Asia/Manila',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(now);
+    const get = name => parts.find(p=>p.type===name).value;
+    return `${get('year')}-${get('month')}-${get('day')}`;
+}
+function staffDashboardTasks(rows, today) {
+    const limit = new Date(`${today}T00:00:00Z`); limit.setUTCDate(limit.getUTCDate()+2);
+    const prepEnd = limit.toISOString().slice(0,10);
+    const groups = new Map();
+    for (const r of rows) {
+        const status = String(r.bookingStatus).toLowerCase();
+        if (!['confirmed','preparing','released','return inspection','pending settlement'].includes(status)) continue;
+        const id = String(r.bookingId);
+        let g = groups.get(id);
+        if (!g) { g = {reference:r.reference,customer:r.customer,prepare:[],release:[],returns:[]}; groups.set(id,g); }
+        if (r.itemStatus === 'reserved' && !r.releasedAt && ['confirmed','preparing'].includes(status)) {
+            if (r.preparedAt) g.release.push(r.releaseDate);
+            else g.prepare.push(r.releaseDate);
+        }
+        if (r.itemType === 'rental' && r.itemStatus === 'released' && !r.returnedAt && Number(r.quantity)>Number(r.returnedQuantity)) g.returns.push(r.returnDate);
+    }
+    const tasks = [];
+    for (const [id,g] of groups) {
+        const add = (dates, status, cutoff) => {
+            const date = dates.filter(d=>typeof d==='string' && /^\d{4}-\d{2}-\d{2}$/.test(d) && d<=cutoff).sort()[0];
+            if (date) tasks.push({key:`${id}:${status}`,reference:g.reference,customer:g.customer,scheduledDate:date,status});
+        };
+        // One task per booking/status; incomplete preparation blocks release for the same scheduled date.
+        add(g.prepare,'To Prepare',prepEnd);
+        add(g.release.filter(d=>!g.prepare.includes(d)),'For Release',today);
+        add(g.returns,'Expected Return',today);
+    }
+    const rank = {'Expected Return':0,'For Release':1,'To Prepare':2};
+    return tasks.sort((a,b)=>a.scheduledDate.localeCompare(b.scheduledDate)||rank[a.status]-rank[b.status]||a.reference.localeCompare(b.reference));
+}
+async function staffDashboardSummary(db, actor, auth) {
+    const storeId = Number(actor.store_id), branchId = Number(actor.branch_id);
+    if (auth.tokenRole !== 'staff' || Number(auth.storeId)!==storeId || !isId(branchId) || Number(auth.tokenBranchId)!==branchId || Number(auth.decoded.staff_id)!==Number(actor.id))
+        return response(403,{error:'Active Staff account and current assigned branch required.'});
+    const access = staffDashboardAccess(actor.permissions), today = staffDashboardDay();
+    const result = {success:true,access,today,branchId,staffId:String(actor.id),tasks:null,alerts:null,repair:null,condition:null,consumableHealth:null,inventoryAlertSummary:null,walkIn:null,errors:[]};
+    // One snapshot for all authorized sections; only SELECTs are executed.
+    await db.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');
+    try {
+        if (access.bookings) {
+            try {
+                // Release date = the pickup/delivery date (same rule as the Staff Booking Queue).
+                const [rows] = await db.execute(`SELECT b.id AS bookingId,b.booking_reference AS reference,c.full_name AS customer,
+                                                        b.status AS bookingStatus,bi.item_type AS itemType,bi.item_status AS itemStatus,bi.quantity,bi.returned_quantity AS returnedQuantity,
+                                                        bi.prepared_at AS preparedAt,bi.released_at AS releasedAt,bi.returned_at AS returnedAt,
+                                                        DATE_FORMAT(COALESCE(b.handover_date,b.rental_start_date,b.event_date),'%Y-%m-%d') AS releaseDate,
+                                                        DATE_FORMAT(COALESCE(b.rental_end_date,b.event_end_date,b.rental_start_date,b.event_date),'%Y-%m-%d') AS returnDate
+                                                 FROM bookings b JOIN booking_items bi ON bi.booking_id=b.id AND bi.store_id=b.store_id
+                                                                 JOIN customers c ON c.id=b.customer_id AND c.store_id=b.store_id
+                                                 WHERE b.store_id=? AND b.branch_id=? AND LOWER(b.status) IN ('confirmed','preparing','released','return inspection','pending settlement')
+                                                   AND bi.item_type IN ('consumable','rental') AND bi.item_status IN ('reserved','released')`,[storeId,branchId]);
+                result.tasks=staffDashboardTasks(rows,today);
+            } catch(e) { console.error('Staff dashboard tasks:',e.code); result.errors.push('Booking tasks unavailable.'); }
+        }
+        if (access.inventory) {
+            let stockAlertSummary = null;
+            try {
+                // Same v2 sellable-stock formula as getProducts: exclude reserved, unavailable and expired stock.
+                const [rows] = await db.execute(`SELECT bi.id AS stockId,p.product_name AS name,p.has_variants AS hasVariants,v.variant_name AS variantName,
+                                                        CASE WHEN bi.expiration_date IS NULL OR bi.expiration_date>=? THEN GREATEST(CAST(bi.on_hand_quantity AS SIGNED)-bi.reserved_quantity-bi.unavailable_quantity,0) ELSE 0 END AS available,
+                                                        bi.reorder_level AS threshold, DATE_FORMAT(bi.expiration_date,'%Y-%m-%d') AS expirationDate
+                                                 FROM branch_inventory bi JOIN product_variants v ON v.id=bi.variant_id AND v.store_id=bi.store_id
+                                                                          JOIN products p ON p.id=v.product_id AND p.store_id=bi.store_id
+                                                 WHERE bi.store_id=? AND bi.branch_id=? AND bi.status='active' AND v.status='active' AND p.status='active'
+                                                   AND p.deleted_at IS NULL AND v.deleted_at IS NULL
+                                                   AND ((p.has_variants=0 AND v.is_default=1) OR (p.has_variants=1 AND v.is_default=0))`,[today,storeId,branchId]);
+                result.alerts=rows.filter(r=>Number(r.available)===0||Number(r.available)<=Number(r.threshold)).map(r=>({key:String(r.stockId),product:Number(r.hasVariants)?`${r.name} (${r.variantName})`:r.name,available:Number(r.available),status:Number(r.available)===0?'Out of Stock':'Low Stock'})).sort((a,b)=>a.available-b.available||a.product.localeCompare(b.product));
+                const outOfStock = result.alerts.filter(r=>r.status==='Out of Stock').length;
+                const lowStock = result.alerts.length-outOfStock;
+                if (!access.bookings) {
+                    result.consumableHealth = {healthy:rows.length-result.alerts.length,lowStock,outOfStock};
+                    const cutoff = new Date(today+'T00:00:00Z');
+                    cutoff.setUTCDate(cutoff.getUTCDate()+30);
+                    const end = cutoff.toISOString().slice(0,10);
+                    const dates = rows.map(r=>r.expirationDate).filter(d=>typeof d==='string' && /^\d{4}-\d{2}-\d{2}$/.test(d));
+                    stockAlertSummary = {expiring:dates.filter(d=>d>=today && d<=end).length,expired:dates.filter(d=>d<today).length,lowStock,outOfStock};
+                }
+            } catch(e) { console.error('Staff dashboard stock:',e.code); result.errors.push('Stock alerts unavailable.'); }
+            try {
+                // Staff Rental Inventory groups non-routine maintenance cases (In Repair / For Inspection) as repairs.
+                const [rows] = await db.execute(`SELECT e.id,e.equipment_number AS equipmentNo,e.equipment_name AS product,
+                                                        bi.on_hand_quantity AS totalUnits,bi.unavailable_quantity AS unavailableUnits,
+                                                        COALESCE((SELECT SUM(si.quantity-si.quantity_resolved) FROM stock_issues si
+                                                                  WHERE si.store_id=bi.store_id AND si.branch_id=bi.branch_id AND si.branch_inventory_id=bi.id
+                                                                    AND si.issue_type='maintenance' AND si.status IN ('In Repair','For Inspection') AND si.quantity>si.quantity_resolved),0) AS repairUnits
+                                                 FROM branch_inventory bi JOIN equipment e ON e.id=bi.equipment_id AND e.store_id=bi.store_id
+                                                 WHERE bi.store_id=? AND bi.branch_id=? AND bi.status='active' AND e.status='active' AND e.deleted_at IS NULL`,[storeId,branchId]);
+                if (rows.some(r=>Number(r.repairUnits)>Number(r.unavailableUnits)||Number(r.unavailableUnits)>Number(r.totalUnits))) throw new Error('Inconsistent equipment condition');
+                result.repair=rows.filter(r=>Number(r.repairUnits)>0).map(r=>({key:String(r.id),equipmentNo:r.equipmentNo,product:r.product,units:Number(r.repairUnits),status:'Under Repair'})).sort((a,b)=>a.product.localeCompare(b.product));
+                if (!access.bookings && stockAlertSummary) {
+                    // Count equipment records, not units, so each slice represents alert occurrences.
+                    result.inventoryAlertSummary = {...stockAlertSummary,underRepair:result.repair.length};
+                }
+                if(!access.bookings) result.condition={serviceable:rows.reduce((n,r)=>n+Number(r.totalUnits)-Number(r.unavailableUnits),0),underRepair:result.repair.reduce((n,r)=>n+r.units,0),otherUnavailable:rows.reduce((n,r)=>n+Number(r.unavailableUnits)-Number(r.repairUnits),0)};
+            } catch(e) { console.error('Staff dashboard repair:',e.code); result.errors.push('Equipment condition unavailable.'); }
+        }
+        if (access.pos) {
+            try {
+                // order_date is a date-only checkout value; created_at is the actual checkout timestamp.
+                // Convert the DB session's wall-clock timestamps to Manila using its present UTC offset.
+                const [rows] = await db.execute(`SELECT HOUR(TIMESTAMPADD(SECOND,TIMESTAMPDIFF(SECOND,NOW(),UTC_TIMESTAMP())+28800,o.created_at)) AS hour,
+                                                     COUNT(*) AS transactions,COALESCE(SUM((SELECT COALESCE(SUM(oi.quantity),0) FROM order_items oi WHERE oi.order_id=o.order_id AND oi.store_id=o.store_id)),0) AS items
+                                                 FROM orders o WHERE o.store_id=? AND o.branch_id=? AND LOWER(o.status)='completed'
+                                                                 AND UPPER(COALESCE(o.payment_mode,'')) IN ('CASH','GCASH','BANK_TRANSFER')
+                                                                 AND DATE(TIMESTAMPADD(SECOND,TIMESTAMPDIFF(SECOND,NOW(),UTC_TIMESTAMP())+28800,o.created_at))=? GROUP BY hour`,[storeId,branchId,today]);
+                result.walkIn=Array.from({length:24},(_,hour)=>({hour,transactions:0,items:0}));
+                for(const row of rows) result.walkIn[Number(row.hour)]={hour:Number(row.hour),transactions:Number(row.transactions),items:Number(row.items)};
+            } catch(e) { console.error('Staff dashboard walk-in:',e.code); result.errors.push('Walk-in activity unavailable.'); }
+        }
+        await db.commit();
+        return response(200,result);
+    } catch(e) { await db.rollback(); throw e; }
+}
+
 exports.handler = async (event) => {
     const method = event.httpMethod || event.requestContext?.http?.method;
     if (method === "OPTIONS") return { statusCode: 200, headers, body: "" };
@@ -2540,6 +3000,11 @@ exports.handler = async (event) => {
 
         const actorRow = await resolveActor(connection, auth.decoded, storeId, role);
         if (!actorRow) return response(403, { error: "Your account was not found or is inactive in this store." });
+        // Staff Dashboard (cm): read-only summary for the Staff dashboard page.
+        if (action === "get_staff_operational_dashboard") {
+            if (role !== "staff") return response(403, { error: "Staff account required." });
+            return await staffDashboardSummary(connection, actorRow, auth);
+        }
         const actor = actorView(actorRow);
         const access = role === "owner" ? "full" : normalizeOperationalAccess(actorRow.permissions, "bookings", role);
         const salesAccess = role === "staff" && SALES_QUEUE_ACTIONS.has(action)

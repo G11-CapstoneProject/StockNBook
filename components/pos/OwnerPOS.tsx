@@ -203,18 +203,28 @@ export function createVatReportPdf(data: OwnerVatExport, store: string, branch: 
     return new Blob([contents], { type: "application/pdf" });
 }
 
-/** Itemized order detail returned by the existing owner-scoped POS Lambda. */
+/** Database-backed transaction detail. Missing historical values remain null. */
 export type OwnerOrderInvoice = {
     orderId: string;
     storeName: string;
     branchName: string;
+    storeAddress?: string | null;
+    branchAddress?: string | null;
+    businessName?: string | null;
+    tin?: string | null;
     salesSource: "WALK_IN" | "BOOKING";
     customerName: string;
+    cashierName?: string | null;
     date: string;
     createdAt: string;
     paymentMode: string;
     taxType: string | null;
     vatAmount: number | null;
+    vatableSales?: number | null;
+    subtotal?: number | null;
+    amountTendered?: number | null;
+    changeDue?: number | null;
+    paymentStatus?: string | null;
     total: number | null;
     items: Array<{ name: string; quantity: number; unitPrice: number | null; lineTotal: number | null }>;
     itemsAvailable: boolean;
@@ -222,138 +232,190 @@ export type OwnerOrderInvoice = {
     officialInvoiceNumber: null;
 };
 
-/** PDF produced in the existing OwnerPOS source, without extra dependencies. */
+/** Retrieve a fresh, role-scoped database record at download time. */
+export async function fetchOrderInvoiceDetail(orderId: string, salesSource: "WALK_IN" | "BOOKING"): Promise<OwnerOrderInvoice> {
+    const token = sessionStorage.getItem("token");
+    if (!token) throw new Error("Please log in again to download the transaction.");
+    const response = await fetch("/api/pos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: "get_pos_invoice_detail", order_id: orderId, sales_source: salesSource }),
+    });
+    const data = await response.json() as { success?: boolean; detail?: OwnerOrderInvoice; error?: string };
+    if (!response.ok || !data.success || !data.detail) {
+        throw new Error(data.error || "Unable to retrieve invoice information. Check the POS backend integration.");
+    }
+    if (data.detail.orderId !== orderId || data.detail.salesSource !== salesSource) {
+        throw new Error("The returned transaction does not match the requested order.");
+    }
+    return data.detail;
+}
+
+/** Shared printable invoice-style PDF. No new package dependency. */
 export function createOrderInvoicePdf(detail: OwnerOrderInvoice): Blob {
-    if (!detail.itemsAvailable || detail.total == null || detail.items.length === 0) {
+    const known = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n);
+    if (!detail.itemsAvailable || !known(detail.total) || !detail.items.length || !detail.items.every(item =>
+        item.name.trim() && known(item.quantity) && item.quantity > 0 && known(item.unitPrice) && known(item.lineTotal))) {
         throw new Error("Verified itemized information is required before exporting this order.");
     }
-    const ascii = (value: unknown) => String(value ?? "").normalize("NFKD")
-        .replace(/[^\x20-\x7E]/g, " ").replace(/\s+/g, " ").trim();
-    const escaped = (value: unknown) => ascii(value)
-        .replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
-    const currency = (value: number | null | undefined) => value == null || !Number.isFinite(value)
-        ? "Not recorded"
-        : `PHP ${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-    const W = 595.28, H = 841.89; // A4 portrait
-    const pages: string[][] = [];
-    let page: string[] = [];
-    let cursor = 0;
-    const push = (s: string) => { page.push(s); };
-    const rect = (x: number, y: number, width: number, height: number, rgb: string) =>
-        push(`${rgb} rg ${x} ${H - y - height} ${width} ${height} re f`);
-    const text = (v: unknown, x: number, y: number, size = 9, bold = false, rgb = "0.18 0.12 0.28") =>
-        push(`${rgb} rg BT /${bold ? "F2" : "F1"} ${size} Tf 1 0 0 1 ${x} ${(H - y).toFixed(2)} Tm (${escaped(v)}) Tj ET`);
-    const line = (y: number) => push(`0.86 0.82 0.91 RG 0.7 w 35 ${H - y} m 560 ${H - y} l S`);
-    const split = (value: unknown, max: number) => {
-        const words = ascii(value).split(" ");
-        const lines: string[] = [];
-        let current = "";
-        for (const word of words) {
-            if (current && `${current} ${word}`.length > max) { lines.push(current); current = ""; }
-            if (word.length > max) {
-                if (current) { lines.push(current); current = ""; }
-                for (let i = 0; i < word.length; i += max) lines.push(word.slice(i, i + max));
+    const clean = (v: unknown) => String(v ?? "").replace(/\s+/g, " ").trim()
+        .replace(/[\u2018\u2019]/g, "'").replace(/[\u2013\u2014]/g, "-")
+        .replace(/[^\x20-\x7E\xA0-\xFF]/g, ch => ch.normalize("NFKD").replace(/[^\x20-\x7E]/g, "") || "?");
+    const escape = (v: unknown) => clean(v).replace(/[\\()\xA0-\xFF]/g, ch =>
+        ch.charCodeAt(0) >= 160 ? `\\${ch.charCodeAt(0).toString(8).padStart(3, "0")}` : `\\${ch}`);
+    const display = (v: unknown) => clean(v) || "Not recorded";
+    const currency = (n: number | null | undefined) => known(n)
+        ? `PHP ${n.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "Not recorded";
+    // Standard PDF Helvetica metrics (WinAnsi), for accurate alignment and line wrapping.
+    const regularWidths = [278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,278,278,584,584,584,556,1015,667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,611,722,667,944,667,667,611,278,278,278,469,556,333,556,556,500,556,556,278,556,556,222,222,500,222,833,556,556,556,556,333,500,278,556,500,722,500,500,500,334,260,334,584,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,278,333,556,556,556,556,260,556,333,737,370,556,584,333,737,333,400,584,333,333,333,556,537,278,333,333,365,556,834,834,834,611,667,667,667,667,667,667,1000,722,667,667,667,667,278,278,278,278,722,722,778,778,778,778,778,584,778,722,722,722,722,667,667,611,556,556,556,556,556,556,889,500,556,556,556,556,278,278,278,278,556,556,556,556,556,556,556,584,611,556,556,556,556,500,556,500];
+    const boldWidths = [278,333,474,556,556,889,722,238,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,333,333,584,584,584,611,975,722,722,722,722,667,611,778,722,278,556,722,611,833,722,778,667,778,722,667,611,722,667,944,667,667,611,333,278,333,584,556,333,556,611,556,611,556,333,611,611,278,278,556,278,889,611,611,611,611,389,556,333,611,556,778,556,556,500,389,280,389,584,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,761,278,333,556,556,556,556,280,556,333,737,370,556,584,333,737,333,400,584,333,333,333,611,556,278,333,333,365,556,834,834,834,611,722,722,722,722,722,722,1000,722,667,667,667,667,278,278,278,278,722,722,778,778,778,778,778,584,778,722,722,722,722,667,667,611,556,556,556,556,556,556,889,556,556,556,556,556,278,278,278,278,611,611,611,611,611,611,611,584,611,611,611,611,611,556,611,556];
+    const width = (v: unknown, size: number, bold = false) => [...clean(v)].reduce((n, c) =>
+        n + ((bold ? boldWidths : regularWidths)[c.charCodeAt(0) - 32] ?? 600), 0) * size / 1000;
+    const wrap = (v: unknown, max: number, size: number, bold = false) => {
+        const out: string[] = []; let current = "";
+        for (const word of display(v).split(" ")) {
+            if (current && width(`${current} ${word}`, size, bold) > max) { out.push(current); current = ""; }
+            if (width(word, size, bold) > max) {
+                for (const ch of word) {
+                    if (current && width(current + ch, size, bold) > max) { out.push(current); current = ""; }
+                    current += ch;
+                }
             } else current = current ? `${current} ${word}` : word;
         }
-        if (current) lines.push(current);
-        return lines.length ? lines : ["--"];
+        if (current) out.push(current);
+        return out;
     };
-    const newPage = (first: boolean) => {
-        page = [];
-        pages.push(page);
-        rect(0, 0, W, 12, "0.17 0.09 0.30");
-        text("STOCKNBOOK", 35, 42, 15, true);
-        text("INVOICE-STYLE TRANSACTION COPY", 311, 42, 9, true, "0.40 0.30 0.51");
-        line(54);
+    const W = 595.28, H = 841.89, L = 48, R = W - L, inner = R - L;
+    const rgb = (hex: string) => [0, 2, 4].map(i => (parseInt(hex.slice(i, i + 2), 16) / 255).toFixed(4)).join(" ");
+    const ink = rgb("1A1220"), purple = rgb("2B174C"), muted = rgb("5F4E75"), border = rgb("E6DDF0"), tint = rgb("F9F6FD"), cream = rgb("FDFAF4"), green = rgb("168A48");
+    const pages: string[][] = []; let page: string[] = []; let y = 0;
+    const rect = (x: number, top: number, w: number, h: number, fill: string) => page.push(`${fill} rg ${x} ${H - top - h} ${w} ${h} re f`);
+    const text = (v: unknown, x: number, top: number, size = 11, bold = false, color = ink, align: "left" | "center" | "right" = "left") => {
+        const shift = align === "left" ? 0 : width(v, size, bold) / (align === "center" ? 2 : 1);
+        page.push(`${color} rg BT /${bold ? "F2" : "F1"} ${size} Tf 1 0 0 1 ${(x - shift).toFixed(2)} ${(H - top).toFixed(2)} Tm (${escape(v)}) Tj ET`);
+    };
+    const rule = (top: number) => page.push(`${border} RG 0.7 w ${L} ${H - top} m ${R} ${H - top} l S`);
+    const centered = (v: unknown, size: number, bold = false, color = ink) => {
+        for (const row of wrap(v, inner - 16, size, bold)) { text(row, W / 2, y, size, bold, color, "center"); y += size + 3; }
+    };
+    const formatDateTime = (raw: string) => {
+        const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::\d{2})?)?$/);
+        if (!match) return raw;
+        const [, year, month, day, hour, minute] = match;
+        const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        const date = `${months[Number(month) - 1] || month} ${Number(day)}, ${year}`;
+        return hour == null ? date : `${date} | ${Number(hour) % 12 || 12}:${minute} ${Number(hour) >= 12 ? "PM" : "AM"}`;
+    };
+    const tax = String(detail.taxType || "").toUpperCase().replace(/-/g, "_");
+    const isVat = ["VAT", "VAT_REGISTERED"].includes(tax);
+    const isNonVat = ["NON_VAT", "NON_VAT_REGISTERED"].includes(tax);
+    const payment = String(detail.paymentMode || "").toUpperCase();
+    const paymentName = ({ CASH: "Cash", GCASH: "GCash", BANK_TRANSFER: "Bank Transfer" } as Record<string, string>)[payment] || display(detail.paymentMode).replace(/_/g, " ");
+    const startPage = (first: boolean) => {
+        page = []; pages.push(page);
+        rect(0, 0, W, H, cream); rect(25, 24, W - 50, H - 48, "1 1 1"); rect(25, 24, W - 50, 6, purple);
+        y = 57;
         if (first) {
-            text(detail.storeName, 35, 80, 13, true);
-            text(`Branch: ${detail.branchName}`, 35, 98, 9);
-            text(`Order ID: ${detail.orderId}`, 35, 126, 10, true);
-            text(`Date / Time: ${detail.createdAt || detail.date}`, 35, 145, 9);
-            text(`Sales Source: ${detail.salesSource === "BOOKING" ? "Booking" : "Walk-in"}`, 35, 162, 9);
-            text(`Customer: ${detail.customerName || "Walk-in"}`, 310, 126, 9);
-            text(`Payment: ${detail.paymentMode || "Not recorded"}`, 310, 145, 9);
-            text(`Tax: ${detail.taxType || "Unverified"}`, 310, 162, 9);
-            cursor = 190;
+            centered(detail.storeName, 23, true, purple);
+            if (detail.businessName && detail.businessName !== detail.storeName) centered(detail.businessName, 11, false, muted);
+            centered(`Branch: ${display(detail.branchName)}`, 12, true, purple);
+            centered(detail.branchAddress || "Branch address not recorded", 11, false, muted);
+            if (detail.storeAddress && detail.storeAddress !== detail.branchAddress) centered(`Store address: ${detail.storeAddress}`, 10, false, muted);
+            centered(isVat ? "VAT Registered (recorded sale)" : isNonVat ? "Non-VAT Registered (recorded sale)" : "Tax classification not verified", 11, true, purple);
+            y += 1; rule(y); y += 25;
+            centered("SALES INVOICE", 24, true, purple);
+            centered(`Order ID: ${detail.orderId}`, 12, true);
+            centered("Internal transaction copy", 10, false, muted);
+            y += 5;
+            const fieldPair = (a: string, av: unknown, b: string, bv: unknown) => {
+                const x2 = W / 2 + 12, cell = inner / 2 - 18;
+                text(a, L, y, 9, true, muted); text(b, x2, y, 9, true, muted); y += 17;
+                const aa = wrap(av, cell, 11), bb = wrap(bv, cell, 11);
+                aa.forEach((s, i) => text(s, L, y + i * 15)); bb.forEach((s, i) => text(s, x2, y + i * 15));
+                y += Math.max(aa.length, bb.length) * 15 + 6;
+            };
+            fieldPair("Date & Time", formatDateTime(detail.createdAt || detail.date), detail.salesSource === "BOOKING" ? "Processed By" : "Cashier", detail.cashierName);
+            fieldPair("Customer", detail.customerName, "Payment Method", paymentName);
+            text(`Sales Source: ${detail.salesSource === "BOOKING" ? "Booking" : "Walk-in"}`, L, y, 10, false, muted); y += 16;
         } else {
-            text(`Order ID: ${detail.orderId}  |  Continued`, 35, 78, 9);
-            cursor = 98;
+            centered(detail.storeName, 17, true, purple);
+            centered(`Order ID: ${detail.orderId} (continued)`, 11, false, muted); y += 8;
         }
-        rect(35, cursor, 525, 26, "0.93 0.90 0.97");
-        text("DESCRIPTION", 43, cursor + 17, 9, true);
-        text("QTY", 339, cursor + 17, 9, true);
-        text("UNIT PRICE", 395, cursor + 17, 9, true);
-        text("AMOUNT", 487, cursor + 17, 9, true);
-        cursor += 26;
     };
-    newPage(true);
+    const tableHead = () => {
+        rect(L, y, inner, 29, tint);
+        text("Item", L + 8, y + 19, 11, true, purple);
+        text("Qty", 321, y + 19, 11, true, purple, "center");
+        text("Price", 426, y + 19, 11, true, purple, "right");
+        text("Total", R - 8, y + 19, 11, true, purple, "right"); y += 29; rule(y);
+    };
+    startPage(true);
+    if (y > 650) throw new Error("Store header is too long for the PDF. Please shorten the saved address or name.");
+    tableHead();
     for (const item of detail.items) {
-        const descriptions = split(item.name, 53);
-        const height = Math.max(28, 14 + descriptions.length * 12);
-        if (cursor + height > 708) newPage(false);
-        if (detail.items.indexOf(item) % 2 === 0) rect(35, cursor, 525, height, "0.985 0.980 0.994");
-        descriptions.forEach((part, index) => text(part, 43, cursor + 17 + index * 12, 8.5));
-        text(String(item.quantity), 344, cursor + 17, 8.5);
-        text(currency(item.unitPrice).replace("PHP ", ""), 391, cursor + 17, 8.1);
-        text(currency(item.lineTotal).replace("PHP ", ""), 480, cursor + 17, 8.1);
-        cursor += height;
-        line(cursor);
+        const lines = wrap(item.name, 240, 11); let offset = 0;
+        while (offset < lines.length) {
+            if (y + 34 > 725) { startPage(false); tableHead(); }
+            const count = Math.max(1, Math.floor((725 - y - 12) / 15));
+            const part = lines.slice(offset, offset + count), h = Math.max(29, part.length * 15 + 12);
+            part.forEach((s, i) => text(s, L + 8, y + 18 + i * 15));
+            if (offset === 0) {
+                text(item.quantity, 321, y + 18, 10, false, ink, "center");
+                text(currency(item.unitPrice), 426, y + 18, 10, false, ink, "right");
+                text(currency(item.lineTotal), R - 8, y + 18, 10, true, ink, "right");
+            }
+            y += h; rule(y); offset += part.length;
+        }
     }
-    // Grand total comes from the original order header; it is not reconstructed
-    // from item lines (discounts and adjustments may not be itemized).
-    if (cursor + 104 > 708) newPage(false);
-    cursor += 22;
-    const isVat = ["VAT", "VAT_REGISTERED"].includes(String(detail.taxType || "").toUpperCase());
-    if (isVat && detail.vatAmount != null) {
-        text("VATable amount (recorded)", 317, cursor, 9);
-        text(currency(Math.max(0, detail.total - detail.vatAmount)), 444, cursor, 9, true);
-        cursor += 20;
-        text("Output VAT (recorded)", 317, cursor, 9);
-        text(currency(detail.vatAmount), 444, cursor, 9, true);
-        cursor += 18;
+    const sum = (label: string, value: unknown) => { text(label, L + 4, y, 11, false, muted); text(value, R - 4, y, 11, true, ink, "right"); y += 22; };
+    const linesTotal = detail.items.reduce((n, item) => n + Number(item.lineTotal), 0);
+    const hasDifference = Math.abs(linesTotal - detail.total) > .02 || (known(detail.subtotal) && Math.abs(detail.subtotal - detail.total) > .02);
+    const status = String(detail.paymentStatus || "").trim().toUpperCase();
+    const statusLabel = status === "PAID" ? "PAID" : status === "UNPAID" ? "UNPAID" : status === "PARTIAL" ? "PARTIALLY PAID" : "Not verified";
+    // Keep the totals/payment block together; no fabricated historic amounts.
+    const blockHeight = 207 + (isVat ? 44 : 0) + (payment === "CASH" ? 22 : 0) + (hasDifference ? 15 : 0);
+    if (y + blockHeight > 746) startPage(false);
+    y += 23;
+    sum(known(detail.subtotal) ? "Subtotal" : "Itemized subtotal", currency(known(detail.subtotal) ? detail.subtotal : linesTotal));
+    if (isVat) {
+        sum("VATable Sales", currency(detail.vatableSales));
+        sum("VAT Amount (recorded)", currency(detail.vatAmount));
     }
-    line(cursor + 4);
-    cursor += 24;
-    text("RECORDED TOTAL", 313, cursor, 11, true);
-    text(currency(detail.total), 437, cursor, 11, true, "0.11 0.47 0.27");
-    const recordedLines = detail.items.reduce((total, line) => total + Number(line.lineTotal || 0), 0);
-    if (Math.abs(recordedLines - detail.total) > 0.02) {
-        cursor += 22;
-        text("Line items and order total differ; discounts/adjustments may apply.", 35, cursor, 8);
-    }
+    rect(L, y - 5, inner, 45, tint); rule(y - 5);
+    text("TOTAL AMOUNT", L + 8, y + 24, 15, true, purple);
+    text(currency(detail.total), R - 8, y + 24, 19, true, purple, "right"); y += 52;
+    if (hasDifference) { text("Itemized amounts and recorded total differ; review original transaction.", L + 4, y, 9, false, muted); y += 15; }
+    sum(payment === "CASH" ? "Cash Received" : "Amount Received", currency(detail.amountTendered));
+    if (payment === "CASH") sum("Change", currency(detail.changeDue));
+    text("Payment Status", L + 4, y, 11, true, purple);
+    text(statusLabel, R - 4, y, 11, true, status === "PAID" ? green : muted, "right"); y += 17;
+    rule(y); y += 24;
+    centered("Thank you for your purchase!", 14, true, purple);
+    centered("Powered by StockNBook", 10, false, muted);
+    // Page footer remains on every page. Order reference is not an official invoice serial.
     pages.forEach((commands, index) => {
-        // Each page is explicitly labelled to prevent an internal order copy from
-        // being mistaken for a BIR-issued sales invoice.
-        commands.push(`0.88 0.84 0.92 RG 0.7 w 35 65 m 560 65 l S`);
-        const footer = `INTERNAL TRANSACTION COPY - NOT A BIR-REGISTERED SALES INVOICE   |   Page ${index + 1} of ${pages.length}`;
-        commands.push(`0.43 0.34 0.50 rg BT /F1 7.2 Tf 1 0 0 1 35 48 Tm (${escaped(footer)}) Tj ET`);
-        commands.push(`0.43 0.34 0.50 rg BT /F1 7.2 Tf 1 0 0 1 35 33 Tm (${escaped("Original Order ID retained; no official invoice number has been issued by this report.")}) Tj ET`);
+        page = commands;
+        rule(758);
+        text("Internal transaction copy - not a BIR-registered sales invoice", W / 2, 773, 9, false, muted, "center");
+        text(`Page ${index + 1} of ${pages.length}`, W / 2, 788, 8, false, muted, "center");
     });
-    const objects: string[] = [
-        "<< /Type /Catalog /Pages 2 0 R >>", "",
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
-    ];
+    const objects = ["<< /Type /Catalog /Pages 2 0 R >>", "",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>"];
     const refs: string[] = [];
-    pages.forEach((commands) => {
-        const pageId = objects.length + 1;
-        const streamId = pageId + 1;
-        const stream = commands.join("\n") + "\n";
+    pages.forEach(commands => {
+        const pageId = objects.length + 1, streamId = pageId + 1, stream = commands.join("\n") + "\n";
         refs.push(`${pageId} 0 R`);
         objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${streamId} 0 R >>`);
         objects.push(`<< /Length ${stream.length} >>\nstream\n${stream}endstream`);
     });
-    objects[1] = `<< /Type /Pages /Kids [${refs.join(" ")}] /Count ${refs.length} >>`;
-    let result = "%PDF-1.4\n";
-    const offsets: number[] = [0];
-    objects.forEach((obj, index) => {
-        offsets.push(result.length);
-        result += `${index + 1} 0 obj\n${obj}\nendobj\n`;
-    });
-    const startXref = result.length;
+    objects[1] = `<< /Type /Pages /Kids [${refs.join(" ")}] /Count ${pages.length} >>`;
+    let result = "%PDF-1.4\n"; const offsets = [0];
+    objects.forEach((obj, index) => { offsets.push(result.length); result += `${index + 1} 0 obj\n${obj}\nendobj\n`; });
+    const xref = result.length;
     result += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
     for (let i = 1; i < offsets.length; i++) result += `${String(offsets[i]).padStart(10, "0")} 00000 n \n`;
-    result += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${startXref}\n%%EOF`;
+    result += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
     return new Blob([result], { type: "application/pdf" });
 }
 
@@ -412,7 +474,8 @@ function TransactionTable({ pos, orders, branchName }: {
         if (downloadingKey || !detail.itemsAvailable) return;
         setDownloadingKey(key);
         try {
-            const blob = createOrderInvoicePdf(detail);
+            const invoiceDetail = await fetchOrderInvoiceDetail(detail.orderId, detail.salesSource);
+            const blob = createOrderInvoicePdf(invoiceDetail);
             const url = URL.createObjectURL(blob);
             const link = document.createElement("a");
             link.href = url;

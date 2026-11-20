@@ -2,36 +2,34 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
-    BadgeCheck,
     CalendarDays,
-    CircleDollarSign,
     RefreshCw,
     Search,
-    Wallet,
 } from "lucide-react";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
-import { StaffSalesOperationsQueue } from "@/components/inventory/StaffInventory";
-import StaffRentalInventory from "@/components/inventory/StaffRentalInventory";
+import StaffBookingQueue from "./StaffBookingQueue";
 import {
     Booking,
     BookingAccess,
     CalendarDropdown,
     FilterType,
-    TABS,
     BookingWorkspace,
     PriceModal,
     dateKey,
     formatDate,
     getAmountPaid,
-    getBalance,
     getBranchGroupName,
     getRequiredDownPayment,
     getSavedBookingAccess,
     getTotalPrice,
     normalizeBooking,
-    peso,
+    normalizeBookingStatus,
 } from "./_shared";
+
+// Staff only work with confirmed bookings onward. Review, payment and settlement steps belong to the Manager.
+const STAFF_TABS: FilterType[] = ["All", "Confirmed", "Preparing", "Released", "Return Inspection", "Completed", "Cancelled"];
+const STAFF_STATUSES = new Set<string>(STAFF_TABS.filter((tab) => tab !== "All"));
 
 type BookingInventoryItem = {
     id: number;
@@ -653,10 +651,15 @@ export default function StaffBookings() {
         }
     }
 
+    const staffBookings = useMemo(
+        () => bookings.filter((b) => STAFF_STATUSES.has(String(normalizeBookingStatus(b.status) ?? b.status))),
+        [bookings]
+    );
+
     const bookingDateCounts = useMemo(() => {
         const map: Record<string, number> = {};
 
-        bookings.forEach((booking) => {
+        staffBookings.forEach((booking) => {
             const key = dateKey(booking.date);
             if (!key) return;
 
@@ -664,10 +667,10 @@ export default function StaffBookings() {
         });
 
         return map;
-    }, [bookings]);
+    }, [staffBookings]);
 
     const filtered = useMemo(() => {
-        return bookings
+        return staffBookings
             .filter((b) => filter === "All" || b.status === filter)
             .filter((b) => !selectedDate || dateKey(b.date) === selectedDate)
             .filter((b) => {
@@ -692,32 +695,16 @@ export default function StaffBookings() {
                     b.venue?.toLowerCase().includes(q)
                 );
             });
-    }, [bookings, filter, selectedDate, search]);
+    }, [staffBookings, filter, selectedDate, search]);
 
-    const counts = TABS.reduce((acc, tab) => {
+    const counts = STAFF_TABS.reduce((acc, tab) => {
         acc[tab] =
             tab === "All"
-                ? bookings.length
-                : bookings.filter((b) => b.status === tab).length;
+                ? staffBookings.length
+                : staffBookings.filter((b) => b.status === tab).length;
 
         return acc;
     }, {} as Record<string, number>);
-
-    const bookingSales = bookings
-        .filter((b) => b.status !== "Cancelled")
-        .reduce((sum, b) => sum + getTotalPrice(b), 0);
-
-    const bookingRevenue = bookings
-        .filter((b) => b.status !== "Cancelled")
-        .reduce((sum, b) => sum + getAmountPaid(b), 0);
-
-    const outstandingBalance = bookings
-        .filter((b) => b.status !== "Cancelled")
-        .reduce((sum, b) => sum + getBalance(b), 0);
-
-    const completedBookings = bookings.filter(
-        (b) => b.status === "Completed"
-    ).length;
 
     const selectedDateCount = selectedDate
         ? bookingDateCounts[selectedDate] || 0
@@ -739,7 +726,7 @@ export default function StaffBookings() {
                             {branchName}
                         </span>
 
-                        {canView && (
+                        {canView && !canSeeOperationsQueues && (
                             <span className="rounded-lg border border-[#E6DDF0] bg-white px-3.5 py-1.5 text-xs font-semibold text-[#5F4E75]">
                                 View only
                             </span>
@@ -747,7 +734,7 @@ export default function StaffBookings() {
                     </div>
 
                     <div className="flex items-center gap-2.5">
-                        <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
+                        <span className="inline-flex h-[42px] items-center whitespace-nowrap rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
                             {currentDateTime
                                 ? formatCurrentDateTime(currentDateTime)
                                 : "Loading date..."}
@@ -794,33 +781,6 @@ export default function StaffBookings() {
                     </div>
                 ) : (
                     <>
-                        <div className="mb-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                            <CompactMetricCard
-                                title="Booking Sales"
-                                value={peso(bookingSales)}
-                                subLabel="Revenue"
-                                subValue={peso(bookingRevenue)}
-                                icon={<CircleDollarSign size={18} strokeWidth={1.9} />}
-                                iconClassName="bg-[#F0E9FF] text-[#5A35A5]"
-                            />
-
-                            <CompactMetricCard
-                                title="Outstanding Balance"
-                                value={peso(outstandingBalance)}
-                                icon={<Wallet size={18} strokeWidth={1.9} />}
-                                iconClassName="bg-[#FFF3D8] text-[#9A6200]"
-                                valueClassName="text-[#A56607]"
-                            />
-
-                            <CompactMetricCard
-                                title="Completed Bookings"
-                                value={String(completedBookings)}
-                                icon={<BadgeCheck size={18} strokeWidth={1.9} />}
-                                iconClassName="bg-[#EAF8EF] text-[#168A48]"
-                                valueClassName="text-[#168A48]"
-                            />
-                        </div>
-
                         <div className="mb-3 grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
                             <div className="relative">
                                 <Search
@@ -831,8 +791,9 @@ export default function StaffBookings() {
                                 <input
                                     value={search}
                                     onChange={(event) => setSearch(event.target.value)}
-                                    placeholder="Search bookings, package, client..."
-                                    className="h-[42px] w-full rounded-xl border border-[#E3D8EA] bg-white px-4 pl-10 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                                    aria-label={canSeeOperationsQueues ? "Search booking tasks" : "Search bookings"}
+                                    placeholder={canSeeOperationsQueues ? "Search by customer, reference, or item" : "Search by customer, reference, or event"}
+                                    className="h-[42px] w-full rounded-xl border border-[#E3D8EA] bg-white px-4 pl-10 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#806A8C] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
                                 />
                             </div>
 
@@ -864,51 +825,12 @@ export default function StaffBookings() {
                             </div>
                         </div>
 
-                        {canSeeOperationsQueues && (
-                            <div className="mb-3 grid min-w-0 items-stretch gap-3 xl:grid-cols-2" aria-label="Booking operations queues">
-                                <StaffSalesOperationsQueue key={`sales-queue-${queueRefreshKey}`} search={search} />
-                                <StaffRentalInventory key={`rental-queue-${queueRefreshKey}`} branchName={branchName}
-                                                      section="queue" queueSearch={search} />
-                            </div>
-                        )}
-
-                        <div className="mb-3 flex flex-wrap gap-2.5">
-                            {TABS.map((tab) => (
-                                <button
-                                    key={tab}
-                                    onClick={() => setFilter(tab)}
-                                    className={`rounded-xl px-3.5 py-2.5 text-[11px] font-semibold transition ${
-                                        filter === tab
-                                            ? "bg-[#2B174C] text-white shadow-sm"
-                                            : "border border-[#E6DDF0] bg-white text-[#2B174C] hover:bg-[#F7F1FF]"
-                                    }`}
-                                    type="button"
-                                >
-                                    {tab}
-
-                                    {counts[tab] > 0 && (
-                                        <span
-                                            className={`ml-1.5 rounded-full px-1.5 py-0.5 text-[9px] ${
-                                                filter === tab
-                                                    ? "bg-white/20 text-white"
-                                                    : "bg-[#EFE8F8] text-[#5F4E75]"
-                                            }`}
-                                        >
-                                            {counts[tab]}
-                                        </span>
-                                    )}
-                                </button>
-                            ))}
-                        </div>
-
-                        {selectedDate && (
+                        {selectedDate && canSeeOperationsQueues && (
                             <div className="mb-3 flex flex-wrap items-center gap-2.5">
                                 <div className="inline-flex items-center gap-2 rounded-xl bg-[#EFE8F8] px-3.5 py-2 text-xs font-semibold text-[#2B174C]">
                                     <CalendarDays size={14} />
-                                    {formatDate(selectedDate)} — {selectedDateCount}{" "}
-                                    {selectedDateCount === 1 ? "booking" : "bookings"}
+                                    Showing tasks for {formatDate(selectedDate)}
                                 </div>
-
                                 <button
                                     onClick={() => setSelectedDate("")}
                                     className="rounded-xl border border-[#E6DDF0] bg-white px-3.5 py-2 text-xs font-semibold text-[#2B174C] hover:bg-[#F7F1FF]"
@@ -919,24 +841,79 @@ export default function StaffBookings() {
                             </div>
                         )}
 
-                        {filtered.length === 0 ? (
-                            <div className="rounded-[14px] border border-[#E6DDF0] bg-white px-4 py-10 text-center text-sm text-[#9B8AAA] shadow-sm">
-                                No bookings found.
+                        {canSeeOperationsQueues ? (
+                            <div className="mb-3 min-w-0" aria-label="Booking operations queue">
+                                {/* Staff work from one queue (consumables + rental equipment). Booking records stay with the Manager. */}
+                                <StaffBookingQueue key={`booking-queue-${queueRefreshKey}`} search={search} date={selectedDate} />
                             </div>
-                        ) : (
-                            <BookingWorkspace bookings={filtered} canManage={canManage}
-                                              canConfirmStandard={false}
-                                              canOperateBookings={false}
-                                              onUpdateStatus={canManage ? updateStatus : undefined}
-                                              onSetPrice={canManage ? setPriceModal : undefined}
-                                              onRecordDownPayment={
-                                                  canManage ? recordDownPayment : undefined
-                                              }
-                                              onMarkFullyPaid={
-                                                  canManage ? markFullyPaid : undefined
-                                              }
-                                              onCancelBooking={canManage ? openCancelModal : undefined} />
-                        )}
+                        ) : <>
+                            <div className="mb-3 flex gap-2.5 overflow-x-auto pb-1 sm:flex-wrap sm:overflow-visible sm:pb-0" role="group" aria-label="Filter bookings by status">
+                                {STAFF_TABS.map((tab) => (
+                                    <button
+                                        key={tab}
+                                        onClick={() => setFilter(tab)}
+                                        aria-pressed={filter === tab}
+                                        className={`shrink-0 whitespace-nowrap rounded-xl px-3.5 py-2.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C3AD6] focus-visible:ring-offset-1 ${
+                                            filter === tab
+                                                ? "bg-[#2B174C] text-white shadow-sm"
+                                                : "border border-[#E6DDF0] bg-white text-[#2B174C] hover:bg-[#F7F1FF]"
+                                        }`}
+                                        type="button"
+                                    >
+                                        {tab}
+
+                                        {counts[tab] > 0 && (
+                                            <span
+                                                className={`ml-1.5 rounded-full px-1.5 py-0.5 text-[9px] ${
+                                                    filter === tab
+                                                        ? "bg-white/20 text-white"
+                                                        : "bg-[#EFE8F8] text-[#5F4E75]"
+                                                }`}
+                                            >
+                                            {counts[tab]}
+                                        </span>
+                                        )}
+                                    </button>
+                                ))}
+                            </div>
+
+                            {selectedDate && (
+                                <div className="mb-3 flex flex-wrap items-center gap-2.5">
+                                    <div className="inline-flex items-center gap-2 rounded-xl bg-[#EFE8F8] px-3.5 py-2 text-xs font-semibold text-[#2B174C]">
+                                        <CalendarDays size={14} />
+                                        {formatDate(selectedDate)} — {selectedDateCount}{" "}
+                                        {selectedDateCount === 1 ? "booking" : "bookings"}
+                                    </div>
+
+                                    <button
+                                        onClick={() => setSelectedDate("")}
+                                        className="rounded-xl border border-[#E6DDF0] bg-white px-3.5 py-2 text-xs font-semibold text-[#2B174C] hover:bg-[#F7F1FF]"
+                                        type="button"
+                                    >
+                                        Clear filter
+                                    </button>
+                                </div>
+                            )}
+
+                            {filtered.length === 0 ? (
+                                <div className="rounded-[14px] border border-[#E6DDF0] bg-white px-4 py-10 text-center text-sm text-[#75657E] shadow-sm">
+                                    No bookings found.
+                                </div>
+                            ) : (
+                                <BookingWorkspace bookings={filtered} canManage={canManage}
+                                                  canConfirmStandard={false}
+                                                  canOperateBookings={false}
+                                                  onUpdateStatus={canManage ? updateStatus : undefined}
+                                                  onSetPrice={canManage ? setPriceModal : undefined}
+                                                  onRecordDownPayment={
+                                                      canManage ? recordDownPayment : undefined
+                                                  }
+                                                  onMarkFullyPaid={
+                                                      canManage ? markFullyPaid : undefined
+                                                  }
+                                                  onCancelBooking={canManage ? openCancelModal : undefined} />
+                            )}
+                        </>}
                     </>
                 )}
             </section>
@@ -1172,64 +1149,6 @@ function CancelInventoryModal({
                     </button>
                 </div>
             </div>
-        </div>
-    );
-}
-
-function CompactMetricCard({
-                               title,
-                               value,
-                               subLabel,
-                               subValue,
-                               icon,
-                               iconClassName = "bg-[#F0E9FF] text-[#5A35A5]",
-                               valueClassName = "text-[#1A1220]",
-                               compactValue = false,
-                           }: {
-    title: string;
-    value: string;
-    subLabel?: string;
-    subValue?: string;
-    icon: React.ReactNode;
-    iconClassName?: string;
-    valueClassName?: string;
-    compactValue?: boolean;
-}) {
-    const helperText =
-        subLabel && subValue
-            ? `${subLabel}: ${subValue}`
-            : "";
-
-    return (
-        <div className="flex h-[132px] flex-col rounded-[18px] border border-[#E6DDF0] bg-white p-3 shadow-sm">
-            <div className="flex items-start justify-between gap-3">
-                <p className="pt-1 text-sm font-semibold text-[#1A1220]">
-                    {title}
-                </p>
-
-                <span
-                    className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${iconClassName}`}
-                >
-                    {icon}
-                </span>
-            </div>
-
-            <p
-                className={[
-                    "mt-3 break-words font-bold leading-tight tracking-[-0.025em]",
-                    compactValue ? "line-clamp-2 text-[19px]" : "text-[23px]",
-                    valueClassName,
-                ].join(" ")}
-                title={value}
-            >
-                {value}
-            </p>
-
-            {helperText && (
-                <p className="mt-1 text-[11px] leading-4 text-[#8A7D90]">
-                    {helperText}
-                </p>
-            )}
         </div>
     );
 }

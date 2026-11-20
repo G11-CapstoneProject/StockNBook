@@ -216,6 +216,8 @@ export default function SubscriptionPage() {
     const [otpSent, setOtpSent] = useState(false);
     const [otpSending, setOtpSending] = useState(false);
     const [otpSecondsRemaining, setOtpSecondsRemaining] = useState(0);
+    const [otpResendRemaining, setOtpResendRemaining] = useState(0);
+    const [otpBlocked, setOtpBlocked] = useState(false);
     const [otpEmailHint, setOtpEmailHint] = useState("");
     const [otpVerifyLoading, setOtpVerifyLoading] = useState(false);
     const [otpVerified, setOtpVerified] = useState(false);
@@ -308,6 +310,12 @@ export default function SubscriptionPage() {
         return () => window.clearInterval(interval);
     }, [otpSent, otpSecondsRemaining]);
 
+    useEffect(() => {
+        if (otpResendRemaining <= 0) return;
+        const timer = window.setTimeout(() => setOtpResendRemaining(value => Math.max(0, value - 1)), 1000);
+        return () => window.clearTimeout(timer);
+    }, [otpResendRemaining]);
+
     function resetPaymentModal() {
         setSelectedPlan(null);
         setUpgradeStep("details");
@@ -317,6 +325,7 @@ export default function SubscriptionPage() {
         setOtpSent(false);
         setOtpSending(false);
         setOtpSecondsRemaining(0);
+        setOtpBlocked(false);
         setOtpEmailHint("");
         setOtpVerified(false);
         setOtpVerifyLoading(false);
@@ -327,7 +336,7 @@ export default function SubscriptionPage() {
     }
 
     async function sendPaymentOtp() {
-        if (!selectedPlan || otpSending) return;
+        if (!selectedPlan || otpSending || otpResendRemaining > 0) return;
 
         setOtpSending(true);
         setError("");
@@ -350,6 +359,7 @@ export default function SubscriptionPage() {
             // Show a useful error inside this dialog instead of silently looking like a refresh.
             const body = await res.json().catch(() => null);
             if (!res.ok) {
+                if (Number(body?.retry_after_seconds) > 0) setOtpResendRemaining(Number(body.retry_after_seconds));
                 throw new Error(
                     body?.error || body?.message ||
                     `Unable to send the verification code (HTTP ${res.status}). Please try again.`,
@@ -366,6 +376,8 @@ export default function SubscriptionPage() {
             setOtp("");
             setOtpEmailHint(body.email_hint || "your registered email");
             setOtpSecondsRemaining(Number(body.expires_in) || 300);
+            setOtpResendRemaining(Number(body.resend_in) || 60);
+            setOtpBlocked(false);
             setMessage(body.message || "Verification code sent to your email.");
         } catch (err) {
             setError(err instanceof Error ? err.message : "Unable to send the verification code.");
@@ -437,7 +449,7 @@ export default function SubscriptionPage() {
             otpLastAttempt.current = "";
             return;
         }
-        if (upgradeStep !== "otp" || !otpSent || otpSecondsRemaining <= 0 ||
+        if (upgradeStep !== "otp" || !otpSent || otpBlocked || otpSecondsRemaining <= 0 ||
             otpVerifyLoading || otpVerified || otpLastAttempt.current === otp) return;
 
         const attempted = otp;
@@ -455,11 +467,12 @@ export default function SubscriptionPage() {
                 });
                 const body = await response.json().catch(() => null);
                 if (!response.ok || body?.verified !== true) {
+                    if (["OTP_ATTEMPTS_EXHAUSTED", "OTP_INVALID"].includes(body?.code)) setOtpBlocked(true);
                     throw new Error(body?.error || "The verification code could not be confirmed.");
                 }
                 if (abandoned) return;
                 setOtpVerified(true);
-                await new Promise<void>((resolve) => window.setTimeout(resolve, 800));
+                await new Promise<void>((resolve) => window.setTimeout(resolve, 1800));
                 if (!abandoned) await continueToPayment();
             } catch (verifyError) {
                 if (abandoned) return;
@@ -474,7 +487,7 @@ export default function SubscriptionPage() {
         void checkCode();
         // Do not abort an in-flight verification on the timer's next tick.
         // The UI is disabled during the server request.
-    }, [otp, otpSent, otpSecondsRemaining, upgradeStep, otpVerifyLoading, otpVerified, token, continueToPayment]);
+    }, [otp, otpSent, otpSecondsRemaining, otpBlocked, upgradeStep, otpVerifyLoading, otpVerified, token, continueToPayment]);
 
     // Send the proof with the verified payment submission; never upload it to /public.
     async function encodeReceiptProof(file: File): Promise<string> {
@@ -1074,7 +1087,7 @@ export default function SubscriptionPage() {
                                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#EDE3FF] text-[#6D35D4]"><ShieldCheck className="h-5 w-5" /></div>
                                 <div><h3 className="text-sm font-bold text-[#2D1B4E]">Verify your account first</h3><p className="mt-1 text-xs leading-5 text-[#7A6E88]">We will send a 6-digit verification code to the email registered to your owner account.</p></div>
                             </div>
-                            <button type="button" disabled={otpSending} onClick={(event) => { event.preventDefault(); void sendPaymentOtp(); }} className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-[#2D1B4E] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#412563] disabled:cursor-not-allowed disabled:opacity-50"><ShieldCheck className="h-4 w-4" />{otpSending ? "Sending verification code..." : "Send verification code"}</button>
+                            <button type="button" disabled={otpSending || otpResendRemaining > 0} onClick={(event) => { event.preventDefault(); void sendPaymentOtp(); }} className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-[#2D1B4E] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#412563] disabled:cursor-not-allowed disabled:opacity-50"><ShieldCheck className="h-4 w-4" />{otpSending ? "Sending verification code..." : otpResendRemaining > 0 ? `Resend available in ${otpResendRemaining}s` : "Send verification code"}</button>
                             {error && (
                                 <p role="alert" aria-live="assertive" className="mt-3 rounded-xl border border-[#EFBABA] bg-[#FFF3F3] px-3 py-2 text-xs font-medium leading-5 text-[#9B3030]">
                                     {error}
@@ -1093,21 +1106,21 @@ export default function SubscriptionPage() {
                         <button type="button" onClick={resetPaymentModal} disabled={otpSending || otpVerifyLoading} aria-label="Close OTP verification" className="absolute right-4 top-4 rounded-full p-2 text-[#7A6E88] transition hover:bg-[#F3EFF8] hover:text-[#2D1B4E] disabled:opacity-50"><X className="h-5 w-5" /></button>
                         <div className="relative mx-auto flex h-[86px] w-[86px] items-center justify-center">
                             <div className="absolute inset-0 rounded-full bg-[#EEE5FF]" /><div className="absolute inset-[11px] rounded-full bg-[#DCCBFF]" />
-                            <div className="relative flex h-14 w-14 items-center justify-center rounded-full bg-[#2D1B4E] text-white shadow-lg">{otpVerified ? <Check className="h-8 w-8 text-[#F1C85C]" /> : <Mail className="h-7 w-7" />}</div>
+                            <div className="relative flex h-14 w-14 items-center justify-center rounded-full bg-[#2D1B4E] text-white shadow-lg">{otpVerified ? <Check className="snb-otp-success-icon h-8 w-8 text-[#F1C85C]" /> : <Mail className="h-7 w-7" />}</div>
                             <Sparkles className="absolute -right-1 top-1 h-4 w-4 text-[#C9951A]" /><Sparkles className="absolute -left-1 bottom-3 h-3.5 w-3.5 text-[#C9951A]" />
                         </div>
                         <h2 id="upgrade-otp-title" className="mt-4 font-serif text-[32px] font-semibold leading-tight text-[#2D1B4E]">{otpVerified ? "Verified Successfully" : "Verify your email"}</h2>
                         <p className="mt-2 text-sm leading-6 text-[#7A6E88]">{otpVerified ? "Your email code was confirmed." : "Enter the 6-digit code sent to"}</p>
                         {!otpVerified && <p className="mt-0.5 break-all text-sm font-bold text-[#2D1B4E]">{otpEmailHint || "your registered email"}</p>}
-                        {error && <p role="alert" className="mt-3 rounded-xl border border-[#EFBABA] bg-[#FFF3F3] px-3 py-2 text-xs font-medium leading-5 text-[#9B3030]">{error}</p>}
                         <div className="mt-6 flex justify-center gap-2 sm:gap-3">
                             {Array.from({ length: 6 }, (_, index) => (
                                 <div key={index} className="relative">
                                     <input
                                         id={`upgrade-otp-${index}`} value={otp[index] || ""}
                                         type="text" inputMode="numeric" pattern="[0-9]*" autoComplete={index === 0 ? "one-time-code" : "off"}
-                                        maxLength={1} disabled={otpSending || otpVerifyLoading || otpVerified || otpSecondsRemaining <= 0}
+                                        maxLength={1} disabled={otpSending || otpVerifyLoading || otpVerified || otpBlocked || otpSecondsRemaining <= 0}
                                         aria-label={`OTP digit ${index + 1}`}
+                                        style={otpVerified ? { animationDelay: `${index * 65}ms` } : undefined}
                                         onChange={(event) => {
                                             const digit = event.target.value.replace(/\D/g, "").slice(-1);
                                             const nextOtp = otp.padEnd(6, " ").split("");
@@ -1133,24 +1146,26 @@ export default function SubscriptionPage() {
                                 </div>
                             ))}
                         </div>
+                        {error && <p role="alert" className="mt-3 text-center text-sm font-medium text-red-600">{error}</p>}
                         {otpVerified ? (
                             <div role="status" aria-live="polite" className="snb-otp-success-mark mt-5 flex items-center justify-center gap-2 font-semibold text-[#318653]"><Check className="h-6 w-6" /> Verified and secure</div>
                         ) : (
-                            <div role="status" aria-live="polite" className="mx-auto mt-5 inline-flex items-center gap-2 rounded-full bg-[#F1E9FF] px-4 py-2 text-sm font-semibold tabular-nums text-[#6F45B8]"><Clock3 className="h-4 w-4" />{`${String(Math.floor(otpSecondsRemaining / 60)).padStart(2, "0")}:${String(otpSecondsRemaining % 60).padStart(2, "0")}`}</div>
+                            <div role="status" aria-live="polite" className="mx-auto mt-5 inline-flex items-center gap-2 rounded-full bg-[#F1E9FF] px-4 py-2 text-sm font-semibold tabular-nums text-[#6F45B8]"><Clock3 className="h-4 w-4" />{otpResendRemaining > 0 ? `Resend available in ${String(Math.floor(otpResendRemaining / 60)).padStart(2, "0")}:${String(otpResendRemaining % 60).padStart(2, "0")}` : "Resend available"}</div>
                         )}
                         {otpVerifyLoading && !otpVerified && <p role="status" className="mt-3 text-sm font-medium text-[#6F45B8]">Checking your code...</p>}
                         {otpVerified && paymentSettingsLoading && <p role="status" className="mt-3 text-xs text-[#7A6E88]">Opening secure checkout...</p>}
-                        {!otpVerified && otpSecondsRemaining <= 0 && <p className="mt-3 text-xs text-red-600">This code has expired. Please request another.</p>}
+                        {!otpVerified && (otpSecondsRemaining <= 0 || otpBlocked) && !error && <p className="mt-3 text-center text-xs text-red-600">This code is no longer usable. Request another when available.</p>}
                         {otpVerified && error && <button type="button" onClick={() => void continueToPayment()} disabled={paymentSettingsLoading} className="mt-3 text-sm font-semibold text-[#6F45B8] underline">Retry payment details</button>}
                         <div className="mt-6 flex items-center gap-3"><div className="h-px flex-1 bg-[#EBE4F0]" /><span className="text-xs text-[#7A6E88]">Didn&apos;t receive the code?</span><div className="h-px flex-1 bg-[#EBE4F0]" /></div>
-                        <button type="button" disabled={otpSending || otpVerifyLoading || otpVerified || otpSecondsRemaining > 0} onClick={() => void sendPaymentOtp()} aria-label="Resend verification code" className="mx-auto mt-3 inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-bold text-[#6F35C5] transition hover:bg-[#F5EFFF] disabled:cursor-not-allowed disabled:text-[#B9AFCA] disabled:hover:bg-transparent"><RefreshCw className={otpSending ? "h-4 w-4 animate-spin" : "h-4 w-4"} />Resend</button>
+                        <button type="button" disabled={otpSending || otpVerifyLoading || otpVerified || otpResendRemaining > 0} onClick={() => void sendPaymentOtp()} aria-label="Resend verification code" className="mx-auto mt-3 inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-bold text-[#6F35C5] transition hover:bg-[#F5EFFF] disabled:cursor-not-allowed disabled:text-[#B9AFCA] disabled:hover:bg-transparent"><RefreshCw className={otpSending ? "h-4 w-4 animate-spin" : "h-4 w-4"} />Resend</button>
                         <div className="mt-5 flex items-center justify-center gap-2 rounded-xl bg-[#FAF8FC] px-4 py-3 text-xs text-[#7A6E88]"><ShieldCheck className="h-4 w-4 shrink-0 text-[#6F45B8]" /><span>For your security, never share this code with anyone.</span></div>
                         <style jsx>{`
                             .snb-otp-filled { box-shadow: 0 0 0 2px rgba(201,149,26,.12), 0 0 12px rgba(201,149,26,.14); animation: snbOtpPop .22s ease-out; }
-                            .snb-otp-success { box-shadow: 0 0 15px rgba(70,163,106,.26); }
-                            .snb-otp-success-mark { animation: snbOtpPop .5s ease-out both; }
+                            .snb-otp-success { box-shadow: 0 0 15px rgba(70,163,106,.26); animation: snbOtpPop .65s ease-out both; }
+                            .snb-otp-success-mark { animation: snbOtpPop .8s ease-out .2s both; }
+                            .snb-otp-success-icon { animation: snbOtpPop .8s cubic-bezier(.2,.8,.2,1) both; }
                             @keyframes snbOtpPop { from { transform: scale(.9); opacity:.55; } to { transform: scale(1); opacity:1; } }
-                            @media (prefers-reduced-motion: reduce) { .snb-otp-filled, .snb-otp-success-mark { animation: none; } }
+                            @media (prefers-reduced-motion: reduce) { .snb-otp-filled, .snb-otp-success, .snb-otp-success-mark, .snb-otp-success-icon { animation: none; } }
                         `}</style>
                     </div>
                 </div>

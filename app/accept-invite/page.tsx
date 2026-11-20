@@ -82,11 +82,15 @@ type InviteDetails = {
 type ActivationResult = InviteDetails & {
     token: string;
     message?: string;
+    code?: string;
+    retry_after_seconds?: number;
 };
 
 type ApiError = {
     error?: string;
     message?: string;
+    code?: string;
+    retry_after_seconds?: number;
 };
 
 const steps = [
@@ -130,9 +134,9 @@ async function postInviteAction<T>(
     const data = (await response.json()) as T & ApiError;
 
     if (!response.ok) {
-        throw new Error(
-            data.error || data.message || "Unable to process this invitation."
-        );
+        throw Object.assign(new Error(data.error || data.message || "Unable to process this invitation."), {
+            code: data.code, retry_after_seconds: data.retry_after_seconds,
+        });
     }
 
     return data;
@@ -226,6 +230,8 @@ function AcceptInviteContent() {
     const [phone, setPhone] = useState("");
     const [otp, setOtp] = useState("");
     const [otpTimer, setOtpTimer] = useState(0);
+    const [resendTimer, setResendTimer] = useState(0);
+    const [otpBlocked, setOtpBlocked] = useState(false);
     const [password, setPassword] = useState("");
     const [confirmPassword, setConfirmPassword] = useState("");
     const [showPassword, setShowPassword] = useState(false);
@@ -295,12 +301,16 @@ function AcceptInviteContent() {
         return () => window.clearInterval(timer);
     }, [currentStep, otpTimer]);
 
+    useEffect(() => {
+        if (resendTimer <= 0) return;
+        const timer = window.setTimeout(() => setResendTimer(value => Math.max(0, value - 1)), 1000);
+        return () => window.clearTimeout(timer);
+    }, [resendTimer]);
+
     const passwordChecks = useMemo(
         () => ({
-            length: password.length >= 8,
-            uppercase: /[A-Z]/.test(password),
-            number: /\d/.test(password),
-            special: /[^A-Za-z0-9]/.test(password),
+            length: Array.from(password).length >= 15,
+            bytes: new TextEncoder().encode(password).length <= 72,
         }),
         [password]
     );
@@ -312,11 +322,12 @@ function AcceptInviteContent() {
     };
 
     const sendVerificationCode = async () => {
+        if (submitting || resendTimer > 0) return;
         setError("");
         setSubmitting(true);
 
         try {
-            const data = await postInviteAction<{ expires_in?: number }>(
+            const data = await postInviteAction<{ expires_in?: number; resend_in?: number }>(
                 "send_manager_invite_otp",
                 { invite_token: inviteToken }
             );
@@ -325,9 +336,13 @@ function AcceptInviteContent() {
             lastOtpAttempt.current = "";
             setOtpVerifiedAnimation(false);
             setOtpTimer(Number(data.expires_in || 300));
+            setResendTimer(Number(data.resend_in || 60));
+            setOtpBlocked(false);
             setCurrentStep(2);
             window.setTimeout(() => otpRefs.current[0]?.focus(), 50);
         } catch (sendError) {
+            const retry = Number((sendError as { retry_after_seconds?: number })?.retry_after_seconds || 0);
+            if (retry > 0) setResendTimer(retry);
             setError(
                 sendError instanceof Error
                     ? sendError.message
@@ -367,7 +382,7 @@ function AcceptInviteContent() {
     };
 
     const verifyOtp = useCallback(async () => {
-        if (submitting || otpVerifiedAnimation || otpTimer <= 0 || !/^\d{6}$/.test(otp)) return;
+        if (submitting || otpVerifiedAnimation || otpBlocked || otpTimer <= 0 || !/^\d{6}$/.test(otp)) return;
         const completedCode = otp;
         setError("");
         setSubmitting(true);
@@ -377,16 +392,17 @@ function AcceptInviteContent() {
                 otp: completedCode,
             });
             setOtpVerifiedAnimation(true);
-            await new Promise<void>((resolve) => window.setTimeout(resolve, 750));
+            await new Promise<void>((resolve) => window.setTimeout(resolve, 1800));
             setCurrentStep(3);
         } catch (verifyError) {
+            if (["OTP_ATTEMPTS_EXHAUSTED", "OTP_INVALID"].includes(String((verifyError as { code?: string })?.code))) setOtpBlocked(true);
             setError(verifyError instanceof Error ? verifyError.message : "The verification code is invalid.");
             setOtp("");
             window.setTimeout(() => otpRefs.current[0]?.focus(), 0);
         } finally {
             setSubmitting(false);
         }
-    }, [submitting, otpVerifiedAnimation, otpTimer, otp, inviteToken]);
+    }, [submitting, otpVerifiedAnimation, otpBlocked, otpTimer, otp, inviteToken]);
 
     // Sending is triggered only when a complete code is entered; repeated
     // renders and timer ticks cannot submit the same six digits again.
@@ -395,10 +411,10 @@ function AcceptInviteContent() {
             lastOtpAttempt.current = "";
             return;
         }
-        if (currentStep !== 2 || otpTimer <= 0 || submitting || otpVerifiedAnimation || lastOtpAttempt.current === otp) return;
+        if (currentStep !== 2 || otpBlocked || otpTimer <= 0 || submitting || otpVerifiedAnimation || lastOtpAttempt.current === otp) return;
         lastOtpAttempt.current = otp;
         void verifyOtp();
-    }, [otp, currentStep, otpTimer, submitting, otpVerifiedAnimation, verifyOtp]);
+    }, [otp, currentStep, otpTimer, otpBlocked, submitting, otpVerifiedAnimation, verifyOtp]);
 
     const saveManagerDetails = async () => {
         if (!managerName.trim()) {
@@ -623,7 +639,7 @@ function AcceptInviteContent() {
                 <ProgressSteps currentStep={currentStep} />
                 <DetailGrid details={details} />
 
-                {error && (
+                {error && currentStep !== 2 && (
                     <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
                         {error}
                     </div>
@@ -650,7 +666,7 @@ function AcceptInviteContent() {
                                     {otpVerifiedAnimation ? "Your email verification was successful." : <>Enter the 6-digit code sent to {maskEmail(details.manager_email)}.</>}
                                 </p>
                             </div>
-                            <button type="button" disabled={submitting || otpVerifiedAnimation || otpTimer > 0} onClick={() => void sendVerificationCode()}
+                            <button type="button" disabled={submitting || otpVerifiedAnimation || resendTimer > 0} onClick={() => void sendVerificationCode()}
                                     aria-label="Resend verification code" className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#2D1B4E] px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50">
                                 <Mail className="h-4 w-4" /> Resend
                             </button>
@@ -666,8 +682,9 @@ function AcceptInviteContent() {
                                         onKeyDown={(event) => handleOtpKeyDown(index, event)}
                                         onPaste={(event) => { setError(""); handleOtpPaste(event); }}
                                         inputMode="numeric" pattern="[0-9]*" autoComplete={index === 0 ? "one-time-code" : "off"}
-                                        maxLength={1} disabled={submitting || otpVerifiedAnimation || otpTimer <= 0}
+                                        maxLength={1} disabled={submitting || otpVerifiedAnimation || otpBlocked || otpTimer <= 0}
                                         aria-label={`Verification digit ${index + 1}`}
+                                        style={otpVerifiedAnimation ? { animationDelay: `${index * 65}ms` } : undefined}
                                         className={`snb-invite-otp-box h-12 w-full rounded-xl border bg-white text-center text-lg font-bold text-[#2F1752] outline-none transition-all duration-200 focus:border-[#6F45B8] focus:ring-4 focus:ring-[#6F45B8]/15 sm:h-14 sm:text-xl ${otpVerifiedAnimation ? "snb-invite-otp-done border-[#46A36A] bg-[#F0FBF4]" : otp[index] ? "snb-invite-otp-filled border-[#C9951A] bg-[#FFFBF2]" : "border-[#DCD2E8]"}`}
                                     />
                                     {index < 5 && <span aria-hidden="true" className={`pointer-events-none absolute -right-2 top-1/2 z-10 h-0.5 w-2 -translate-y-1/2 transition-colors duration-200 ${otp[index] ? "bg-[#C9951A]" : "bg-[#E8DFEF]"}`} />}
@@ -675,19 +692,20 @@ function AcceptInviteContent() {
                             ))}
                         </div>
 
+                        {error && <p role="alert" className="mt-3 max-w-md text-center text-sm font-medium text-red-600">{error}</p>}
                         {otpVerifiedAnimation ? (
                             <p role="status" aria-live="polite" className="snb-invite-otp-confirmed mt-4 flex items-center gap-2 text-sm font-semibold text-[#318653]"><CheckCircle2 className="h-6 w-6" /> Verified and secure</p>
                         ) : (
-                            <p role="status" aria-live="polite" className="mt-4 inline-flex items-center gap-2 rounded-full bg-[#F0E8FA] px-3 py-1.5 text-sm font-medium tabular-nums text-[#3D2560]"><Clock3 className="h-4 w-4" />{formatTimer(otpTimer)}</p>
+                            <p role="status" aria-live="polite" className="mt-4 inline-flex items-center gap-2 rounded-full bg-[#F0E8FA] px-3 py-1.5 text-sm font-medium tabular-nums text-[#3D2560]"><Clock3 className="h-4 w-4" />{resendTimer > 0 ? `Resend available in ${formatTimer(resendTimer)}` : "Resend available"}</p>
                         )}
                         {submitting && !otpVerifiedAnimation && <p role="status" className="mt-3 text-sm font-medium text-[#6F45B8]">Checking your code...</p>}
-                        {otpTimer === 0 && !otpVerifiedAnimation && <p className="mt-2 text-xs text-red-600">This code has expired. Please select Resend.</p>}
+                        {(otpTimer === 0 || otpBlocked) && !otpVerifiedAnimation && !error && <p className="mt-2 max-w-md text-center text-xs text-red-600">This code is no longer usable. Request another when available.</p>}
                         <style jsx>{`
                             .snb-invite-otp-filled { box-shadow: 0 0 0 2px rgba(201,149,26,.12), 0 0 12px rgba(201,149,26,.14); animation: snbInviteOtpPop .22s ease-out; }
-                            .snb-invite-otp-done { box-shadow: 0 0 15px rgba(70,163,106,.25); }
-                            .snb-invite-otp-confirmed { animation: snbInviteOtpPop .5s ease-out both; }
+                            .snb-invite-otp-done { box-shadow: 0 0 15px rgba(70,163,106,.25); animation: snbInviteOtpPop .65s ease-out both; }
+                            .snb-invite-otp-confirmed { animation: snbInviteOtpPop .8s ease-out .2s both; }
                             @keyframes snbInviteOtpPop { from { transform: scale(.9); opacity: .55; } to { transform: scale(1); opacity: 1; } }
-                            @media (prefers-reduced-motion: reduce) { .snb-invite-otp-filled, .snb-invite-otp-confirmed { animation: none; } }
+                            @media (prefers-reduced-motion: reduce) { .snb-invite-otp-filled, .snb-invite-otp-done, .snb-invite-otp-confirmed { animation: none; } }
                         `}</style>
                     </div>
                 )}
@@ -833,10 +851,8 @@ function AcceptInviteContent() {
                                 <p className="text-sm font-bold text-[#321A59]">Password must include:</p>
                                 <div className="mt-3 space-y-2.5 text-sm">
                                     {[
-                                        [passwordChecks.length, "At least 8 characters"],
-                                        [passwordChecks.uppercase, "One uppercase letter"],
-                                        [passwordChecks.number, "One number"],
-                                        [passwordChecks.special, "One special character"],
+                                        [passwordChecks.length, "At least 15 characters"],
+                                        [passwordChecks.bytes, "At most 72 UTF-8 bytes"],
                                     ].map(([valid, label]) => (
                                         <p key={String(label)} className={`flex items-center gap-2 ${valid ? "text-green-700" : "text-[#6B6074]"}`}>
                                             <CheckCircle2 className="h-4 w-4" /> {String(label)}

@@ -2407,6 +2407,7 @@ exports.handler = async (event) => {
         const posReadActions = new Set([
             "get_orders", "get_owner_dashboard_summary", "get_owner_sales_report", "get_owner_order_detail",
             "get_branch_sales_report", "get_branch_order_detail", "get_tax_registration",
+            "get_pos_invoice_detail",
         ]);
         if (posAccess !== "full" && !posReadActions.has(action)) {
             return jsonResponse(403, headers, { error: "Full POS access is required for this action." });
@@ -2784,6 +2785,108 @@ exports.handler = async (event) => {
                 );
             } catch (error) {
                 await connection.rollback();
+                throw error;
+            }
+        }
+
+        // Shared database-backed invoice endpoint for Owner, Manager and Staff.
+        if (action === "get_pos_invoice_detail") {
+            const orderId = String(body.order_id ?? '').trim();
+            const source = String(body.sales_source ?? '').trim().toUpperCase();
+            const branchScope = tokenRole === 'owner' ? requestedBranchId : tokenBranchId;
+            if (tokenRole !== 'owner' && requestedBranchId && requestedBranchId !== tokenBranchId) {
+                return jsonResponse(403, headers, { error: 'Only the assigned branch can be accessed.' });
+            }
+            if (!['owner','manager','staff'].includes(tokenRole) ||
+                (tokenRole !== 'owner' && (!Number.isSafeInteger(branchScope) || branchScope <= 0))) {
+                return jsonResponse(403, headers, { error: 'Invoice access denied.' });
+            }
+            if (!orderId || orderId.length > 80 || !['WALK_IN','BOOKING'].includes(source)) {
+                return jsonResponse(400, headers, { error: 'A valid Order ID and Sales Source are required.' });
+            }
+            if (tokenRole === 'staff' && source !== 'WALK_IN') {
+                return jsonResponse(403, headers, { error: 'Staff may download today’s walk-in transactions only.' });
+            }
+            const numberOrNull = value => value == null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
+            const scopeSql = branchScope == null ? '' : ' AND t.branch_id = ?';
+            const scopeArgs = branchScope == null ? [] : [branchScope];
+            if (source === 'WALK_IN') {
+                // orders.order_id is the numeric PK; order_number is the public transaction ID.
+                // All joins contain tenant scope; user input never supplies store/branch authorization.
+                const todaySql = tokenRole === 'staff' ? ' AND DATE(t.order_date) = ?' : '';
+                const todayArgs = tokenRole === 'staff' ? [getManilaISODate()] : [];
+                const [rows] = await connection.execute(`
+                    SELECT t.order_id AS internalId, t.order_number AS orderId,
+                           s.store_name AS storeName, s.business_name AS businessName,
+                           s.address AS storeAddress, s.tin,
+                           b.branch_name AS branchName, b.address AS branchAddress,
+                           COALESCE(NULLIF(TRIM(c.full_name), ''), 'Walk-in Customer') AS customerName,
+                           COALESCE((SELECT NULLIF(TRIM(ea.user_name), '')
+                                     FROM employee_actions ea
+                                     WHERE ea.store_id = t.store_id AND ea.branch_id = t.branch_id
+                                       AND ea.reference_number = t.order_number
+                                       AND ea.action = 'Completed POS transaction'
+                                     ORDER BY ea.id DESC LIMIT 1), u.full_name) AS cashierName,
+                           DATE_FORMAT(t.order_date, '%Y-%m-%d') AS date,
+                           DATE_FORMAT(t.created_at, '%Y-%m-%d %H:%i:%s') AS createdAt,
+                           t.payment_mode AS paymentMode, t.tax_type AS taxType,
+                           t.vatable_sales AS vatableSales, t.vat_amount AS vatAmount,
+                           t.subtotal, t.total, t.amount_tendered AS amountTendered, t.change_due AS changeDue
+                    FROM orders t
+                    JOIN stores s ON s.id = t.store_id
+                    JOIN branches b ON b.id = t.branch_id AND b.store_id = t.store_id
+                    LEFT JOIN customers c ON c.id = t.customer_id AND c.store_id = t.store_id
+                    LEFT JOIN users u ON u.id = t.processed_by AND u.store_id = t.store_id
+                    WHERE t.store_id = ? AND t.order_number = ?
+                      AND LOWER(TRIM(t.status)) = 'completed'
+                      AND UPPER(TRIM(t.payment_mode)) IN ('CASH','GCASH','BANK_TRANSFER')
+                      ${scopeSql}${todaySql}
+                    LIMIT 2`, [storeId, orderId, ...scopeArgs, ...todayArgs]);
+                if (rows.length !== 1) return jsonResponse(404, headers, { error: 'Completed transaction not found in your allowed scope.' });
+                const { internalId, ...row } = rows[0];
+                const [stored] = await connection.execute(`
+                    SELECT product_name_snapshot AS name, quantity, unit_price AS unitPrice, line_total AS lineTotal
+                    FROM order_items WHERE store_id = ? AND order_id = ? ORDER BY id LIMIT 501`, [storeId, internalId]);
+                const items = stored.slice(0,500).map(x => ({ name: String(x.name || ''), quantity: numberOrNull(x.quantity), unitPrice: numberOrNull(x.unitPrice), lineTotal: numberOrNull(x.lineTotal) }));
+                const itemsAvailable = stored.length <= 500 && items.length > 0 && items.every(x => x.name.trim() && Number.isSafeInteger(x.quantity) && x.quantity > 0 && x.unitPrice != null && x.unitPrice >= 0 && x.lineTotal != null && x.lineTotal >= 0);
+                const total = numberOrNull(row.total), tendered = numberOrNull(row.amountTendered);
+                // Completed walk-in orders use the recorded tender, not a fabricated default.
+                const paymentStatus = tendered == null || total == null ? null : tendered >= total ? 'PAID' : tendered > 0 ? 'PARTIAL' : 'UNPAID';
+                return jsonResponse(200, headers, { success: true, detail: {
+                        ...row, salesSource: 'WALK_IN', total, subtotal: numberOrNull(row.subtotal),
+                        vatableSales: numberOrNull(row.vatableSales), vatAmount: numberOrNull(row.vatAmount),
+                        amountTendered: tendered, changeDue: numberOrNull(row.changeDue), paymentStatus,
+                        items, itemsAvailable, detailNotice: itemsAvailable ? null : 'Historical item details could not be verified.', officialInvoiceNumber: null,
+                    }});
+            }
+            // Booking: preserve the existing completed/fulfilled eligibility and original item logic.
+            // The current booking schema does not have a transaction-time tax_type, subtotal,
+            // cash tender or change snapshot. Do not substitute current registration or sum
+            // deposits/refunds as sale payments. Leave unverified information null.
+            try {
+                const detail = await getOwnerSalesReport.getOrderDetail(connection, storeId,
+                    { order_id: orderId, sales_source: 'BOOKING' }, branchScope);
+                const [rows] = await connection.execute(`
+                    SELECT s.store_name AS storeName, s.business_name AS businessName, s.address AS storeAddress, s.tin,
+                           b.branch_name AS branchName, b.address AS branchAddress, c.full_name AS customerName,
+                           t.vat_amount AS vatAmount
+                    FROM bookings t JOIN stores s ON s.id = t.store_id
+                    JOIN branches b ON b.id = t.branch_id AND b.store_id = t.store_id
+                    JOIN customers c ON c.id = t.customer_id AND c.store_id = t.store_id
+                    WHERE t.store_id = ? AND t.booking_reference = ? ${scopeSql} LIMIT 2`, [storeId, orderId, ...scopeArgs]);
+                if (rows.length !== 1) return jsonResponse(404, headers, { error: 'Booking reference not found in your allowed scope.' });
+                const row = rows[0];
+                // Positive recorded VAT is evidence of VAT; zero alone cannot prove non-VAT.
+                const vat = numberOrNull(row.vatAmount), total = numberOrNull(detail.total);
+                const taxType = vat != null && vat > 0 ? 'VAT' : null;
+                const vatableSales = vat != null && vat > 0 && total != null && total >= vat ? Math.round((total - vat) * 100) / 100 : null;
+                return jsonResponse(200, headers, { success: true, detail: {
+                        ...detail, ...row, total, vatAmount: vat, taxType, vatableSales,
+                        cashierName: detail.cashierName || null, subtotal: null, amountTendered: null, changeDue: null, paymentStatus: null,
+                        officialInvoiceNumber: null,
+                    }});
+            } catch (error) {
+                if ([400,404,409].includes(error?.statusCode)) return jsonResponse(error.statusCode, headers, { error: error.message });
                 throw error;
             }
         }

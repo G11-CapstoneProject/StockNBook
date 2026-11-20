@@ -629,10 +629,10 @@ END`;
 // Booking bill payments (security deposits and damage/loss charge payments are separate).
 const V2_BOOKING_PAID_SQL = (b) => `(COALESCE((SELECT SUM(bp.amount) FROM payments bp
         WHERE bp.booking_id = ${b}.id AND bp.status <> 'voided'
-          AND bp.payment_type NOT IN ('Security Deposit','Additional Charge')), 0)
+          AND bp.payment_type NOT IN ('security_deposit','additional_charge')), 0)
     - COALESCE((SELECT SUM(br.amount) FROM refunds br JOIN payments brp ON brp.id = br.payment_id
         WHERE brp.booking_id = ${b}.id AND br.status = 'completed'
-          AND brp.payment_type NOT IN ('Security Deposit','Additional Charge')), 0))`;
+          AND brp.payment_type NOT IN ('security_deposit','additional_charge')), 0))`;
 
 // Bookings with the legacy customer/package/payment columns.
 const V2_BOOKINGS = `(SELECT
@@ -661,10 +661,10 @@ const V2_BOOKING_FINANCIALS = `(SELECT
         b.id AS booking_id, b.store_id, b.branch_id,
         b.refundable_deposit_required,
         COALESCE((SELECT SUM(dp.amount) FROM payments dp
-                  WHERE dp.booking_id = b.id AND dp.status <> 'voided' AND dp.payment_type = 'Security Deposit'), 0) AS deposit_collected,
+                  WHERE dp.booking_id = b.id AND dp.status <> 'voided' AND dp.payment_type = 'security_deposit'), 0) AS deposit_collected,
         b.deposit_applied_amount AS deposit_applied,
         COALESCE((SELECT SUM(dr.amount) FROM refunds dr JOIN payments drp ON drp.id = dr.payment_id
-                  WHERE drp.booking_id = b.id AND dr.status = 'completed' AND drp.payment_type = 'Security Deposit'), 0) AS deposit_refunded,
+                  WHERE drp.booking_id = b.id AND dr.status = 'completed' AND drp.payment_type = 'security_deposit'), 0) AS deposit_refunded,
         b.final_additional_charges, b.approved_refund_amount, b.settlement_status, b.settlement_notes,
         b.settlement_reviewed_by, b.settlement_reviewed_at, b.required_down_payment, b.down_payment_deadline,
         b.vat_amount, b.agreed_price,
@@ -689,7 +689,7 @@ const V2_BOOKING_CLAIMS = `(SELECT
         cl.line_total AS approved_amount,
         COALESCE((SELECT SUM(cp.amount) FROM payments cp
                   WHERE cp.booking_id = cl.booking_id AND cp.status <> 'voided'
-                    AND cp.payment_type = 'Additional Charge'
+                    AND cp.payment_type = 'additional_charge'
                     AND cp.reference_number = CONCAT('CLAIM-', cl.id)), 0) AS amount_paid,
         cl.unit_price_snapshot AS deposit_applied,
         SUBSTRING(cl.item_status, 7) AS status,

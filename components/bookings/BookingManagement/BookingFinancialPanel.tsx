@@ -3,15 +3,26 @@
 import { useCallback, useEffect, useState } from "react";
 
 type Statement = {
-    booking:{reference:string;name:string;bookingType:string;packageName:string;status:string;eventDate?:string;agreedPrice:number|null;downPayment:number;bookingPayments:number;balance:number};
+    booking:{reference:string;name:string;bookingType:string;packageName:string;status:string;eventDate?:string;agreedPrice:number|null;downPayment:number;bookingPayments:number;bookingRefunded?:number;balance:number};
     packageBase:number;salesSubtotal?:number;rentalSubtotal:number;deliveryFee:number;setupFee:number;
     depositRequired:number;depositCollected:number;depositApplied:number;depositRefunded:number;depositHeld:number;
     claimBalance:number;agreedCharges:number;
     rentalItems:{name:string;quantity:number;days:number;dailyRate:number;amount:number}[];
+    // Present only for cancelled / rejected bookings.
+    cancellation?:{status:string;reason:string|null;closedAt:string|null;refundMethod:string|null;
+        bookingPayments:number;bookingRefunded:number;amountKept:number;depositRefunded:number}|null;
     salesItems?:{name:string;variantName?:string;quantity:number;unitPrice:number;amount:number}[];
     claims:{id:number;sourceType:string;sourceId:number;equipmentName?:string;quantity:number;reason:string;amount:number;amountPaid:number;depositApplied:number;status:string}[];
 };
 const money=(n:number)=>`₱${Number(n||0).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+// Cancellation details shown on the receipt of a cancelled / rejected booking.
+const refundMethodLabel=(methods:string|null|undefined)=>String(methods||'').split(',').map(m=>m.trim()).filter(Boolean)
+    .map(m=>m==='gcash'?'GCash':m==='bank_transfer'?'Bank transfer':m==='cash'?'Cash':m).join(', ');
+const closedAtLabel=(value:string|null|undefined)=>{
+    if(!value)return '';
+    const parsed=new Date(value.includes('T')?value:value.replace(' ','T')+'+08:00');
+    return Number.isNaN(parsed.getTime())?value:parsed.toLocaleString('en-PH',{timeZone:'Asia/Manila',month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'});
+};
 
 // A combined customer charge is saved on ONE claim record to prevent double
 // billing. The other affected items have zero-value companion records for audit.
@@ -230,7 +241,24 @@ function downloadBookingReceiptPdf(statement:Statement,bookingId:number,identity
     if(totalBookedUnits>0)summary('TOTAL PHYSICAL UNITS',String(totalBookedUnits),true);
     inItems=false;
     const isAgreed=v.booking.agreedPrice!==null&&Number.isFinite(Number(v.booking.agreedPrice));
-    const depositDue=Math.max(0,Number(v.depositRequired)-Number(v.depositCollected));
+    const depositDue=v.cancellation?0:Math.max(0,Number(v.depositRequired)-Number(v.depositCollected));
+    if(v.cancellation){
+        const c=v.cancellation;
+        ensure(110);y-=6;rule();y-=20;
+        text(c.status==='Rejected'?'BOOKING REQUEST REJECTED':'BOOKING CANCELLED',left+8,y,9.5,true,'0.64 0.24 0.13');y-=20;
+        if(c.closedAt)summary(c.status==='Rejected'?'Rejected on':'Cancelled on',clean(closedAtLabel(c.closedAt)));
+        if(c.reason)for(const line of wrap(`Reason: ${clean(c.reason)}`,92)){ensure(15);text(line,left+8,y,8.6,false,'0.30 0.23 0.36');y-=14;}
+        if(c.bookingPayments>0.005||c.depositRefunded>0.005){
+            if(c.bookingPayments>0.005){
+                summary('Booking payments received',pesoPdf(c.bookingPayments));
+                summary('Refunded to customer',`- ${pesoPdf(c.bookingRefunded)}`);
+                summary('Kept by the store',pesoPdf(c.amountKept),true);
+            }
+            if(c.depositRefunded>0.005)summary('Security deposit refunded',pesoPdf(c.depositRefunded));
+            if(c.refundMethod)summary('Refund method',clean(refundMethodLabel(c.refundMethod)));
+        }else{ensure(15);text('No payment was received, so nothing was refunded.',left+8,y,8.6,false,'0.30 0.23 0.36');y-=16;}
+        y-=6;
+    }
     if(isAgreed && Math.abs(itemizedSubtotal-Number(v.booking.agreedPrice))>0.005)
         summary('Itemized subtotal',pesoPdf(itemizedSubtotal));
     summary('Final agreed booking price',isAgreed?pesoPdf(Number(v.booking.agreedPrice)):'Awaiting agreement',true);
@@ -266,7 +294,8 @@ function downloadBookingReceiptPdf(statement:Statement,bookingId:number,identity
         if(combinedReceiptTotal(v.claims)>0)
             summary('Combined charge for affected equipment',pesoPdf(combinedReceiptTotal(v.claims)),true);
     }
-    const showExtraSettlement=hasDepositActivity || v.claims.length>0 || Math.abs(Number(v.claimBalance)||0)>0.005;
+    const bookingRefunded=Math.max(0,Number(v.booking.bookingRefunded)||0); // given back on cancellation
+    const showExtraSettlement=hasDepositActivity || v.claims.length>0 || Math.abs(Number(v.claimBalance)||0)>0.005 || bookingRefunded>0.005;
     if(showExtraSettlement){
         ensure(125);y-=7;rule();y-=20;
         text('PAYMENTS / SETTLEMENT',left+8,y,9,true,'0.34 0.19 0.59');y-=24;
@@ -276,7 +305,8 @@ function downloadBookingReceiptPdf(statement:Statement,bookingId:number,identity
         const collected=Number(v.booking.bookingPayments)+Number(v.depositCollected)+claimPayments;
         summary('Total cash collected',pesoPdf(collected),true);
         summary('Deposit refunded to customer',`- ${pesoPdf(v.depositRefunded)}`);
-        summary('Net cash received',pesoPdf(collected-Number(v.depositRefunded)),true);
+        if(bookingRefunded>0.005)summary('Booking payment refunded (cancelled)',`- ${pesoPdf(bookingRefunded)}`);
+        summary('Net cash received',pesoPdf(collected-Number(v.depositRefunded)-bookingRefunded),true);
     }
 
     if(v.claims.length>0||Math.abs(Number(v.claimBalance)||0)>0.005||Math.abs(Number(v.depositApplied)||0)>0.005){
@@ -288,7 +318,7 @@ function downloadBookingReceiptPdf(statement:Statement,bookingId:number,identity
         summary('Unpaid charges',pesoPdf(v.claimBalance),true);
         summary('Deposit still held',pesoPdf(v.depositHeld));
     }
-    if(showExtraSettlement){
+    if(showExtraSettlement&&!v.cancellation){
         ensure(70);y-=10;
         rect(left,y-49,right-left,62,'0.18 0.10 0.30');
         text('TOTAL OUTSTANDING FROM CUSTOMER',left+13,y-6,9,true,'0.87 0.80 0.98');
@@ -408,14 +438,15 @@ export default function BookingFinancialPanel({bookingId,branchId}:BillingReceip
 
     const v=statement;
     const agreedPrice=v.booking.agreedPrice==null?null:Number(v.booking.agreedPrice);
-    const depositDue=Math.max(0,Number(v.depositRequired)-Number(v.depositCollected));
+    const depositDue=v.cancellation?0:Math.max(0,Number(v.depositRequired)-Number(v.depositCollected));
     const bookingDue=Math.max(0,Number(v.booking.balance));
     const claimDue=Math.max(0,Number(v.claimBalance));
     const charges=v.claims.filter(c=>c.status!=='waived');
     const approvedTotal=charges.reduce((sum,c)=>sum+Math.max(0,Number(c.amount)||0),0);
     const claimPayments=charges.reduce((sum,c)=>sum+Math.max(0,Number(c.amountPaid)||0),0);
     const cashCollected=Number(v.booking.bookingPayments)+Number(v.depositCollected)+claimPayments;
-    const netReceived=cashCollected-Number(v.depositRefunded);
+    const bookingRefunded=Math.max(0,Number(v.booking.bookingRefunded)||0); // given back on cancellation
+    const netReceived=cashCollected-Number(v.depositRefunded)-bookingRefunded;
     // Hide empty rental-only sections for package/consumable bookings, but always
     // retain historical deposit and charge activity even if the balance is now zero.
     const hasDepositActivity=[v.depositRequired,v.depositCollected,v.depositApplied,v.depositRefunded,v.depositHeld]
@@ -424,7 +455,7 @@ export default function BookingFinancialPanel({bookingId,branchId}:BillingReceip
         [v.claimBalance,v.depositApplied].some(value=>Math.abs(Number(value)||0)>0.005);
     const hasRentalItems=v.rentalItems.length>0;
     const hasFinancialMovements=Math.abs(Number(v.depositCollected)||0)>0.005||
-        Math.abs(Number(v.depositRefunded)||0)>0.005||Math.abs(claimPayments)>0.005;
+        Math.abs(Number(v.depositRefunded)||0)>0.005||Math.abs(claimPayments)>0.005||bookingRefunded>0.005;
     const totalDue=bookingDue+depositDue+claimDue;
     const fullyReconciled =
         agreedPrice !== null &&
@@ -464,6 +495,22 @@ export default function BookingFinancialPanel({bookingId,branchId}:BillingReceip
                 <div className="min-w-0"><p className="text-[10px] font-bold uppercase tracking-wide text-[#8B7C95]">Booking status</p><p className="mt-1 font-semibold text-[#241537]">{v.booking.status||'—'}</p></div>
             </div>
             <div className="space-y-5 px-4 py-5 sm:px-6">
+                {v.cancellation && <section aria-label="Cancellation" className="space-y-2 rounded-xl border border-[#F2C4C4] bg-[#FFF6F5] p-3">
+                    <h6 className="text-[11px] font-bold uppercase tracking-wider text-[#A33E20]">
+                        {v.cancellation.status==='Rejected'?'Booking request rejected':'Booking cancelled'}
+                    </h6>
+                    {v.cancellation.closedAt&&<p className="text-[11px] text-[#6A587A]">{v.cancellation.status==='Rejected'?'Rejected on':'Cancelled on'} {closedAtLabel(v.cancellation.closedAt)}</p>}
+                    {v.cancellation.reason&&<p className="whitespace-pre-wrap break-words text-[11px] text-[#4D3A60]"><span className="font-semibold">Reason:</span> {v.cancellation.reason}</p>}
+                    {v.cancellation.bookingPayments>0.005||v.cancellation.depositRefunded>0.005 ? <div className="space-y-2 border-t border-dashed border-[#EBCACA] pt-2">
+                        {v.cancellation.bookingPayments>0.005&&<>
+                            {receiptLine('Booking payments received',v.cancellation.bookingPayments)}
+                            {receiptLine('Refunded to customer',v.cancellation.bookingRefunded)}
+                            {receiptLine('Kept by the store',v.cancellation.amountKept,true)}
+                        </>}
+                        {v.cancellation.depositRefunded>0.005&&receiptLine('Security deposit refunded',v.cancellation.depositRefunded)}
+                        {v.cancellation.refundMethod&&<div className="flex items-start justify-between gap-3 text-[#6A587A]"><span>Refund method</span><span className="text-right text-[#25153D]">{refundMethodLabel(v.cancellation.refundMethod)}</span></div>}
+                    </div> : <p className="text-[11px] text-[#6A587A]">No payment was received, so nothing was refunded.</p>}
+                </section>}
                 <section aria-label="Booking charges" className="space-y-2">
                     <h6 className="border-b border-dashed border-[#DDD3E6] pb-2 text-[11px] font-bold uppercase tracking-wider text-[#4E2C85]">Booking charges</h6>
                     {hasItems&&<div className="overflow-hidden rounded-xl border border-[#E8DEF3] bg-white text-[11px]">
@@ -555,6 +602,7 @@ export default function BookingFinancialPanel({bookingId,branchId}:BillingReceip
                     {claimPayments>0&&receiptLine('Additional charge payments received',claimPayments)}
                     <div className="border-t border-[#DFD1F3] pt-2">{receiptLine('Total money collected',cashCollected,true)}</div>
                     {Number(v.depositRefunded)>0&&receiptLine('Less: deposit refunded',Number(v.depositRefunded))}
+                    {bookingRefunded>0.005&&receiptLine('Less: booking payment refunded (cancelled)',bookingRefunded)}
                     <div className="border-t border-[#DFD1F3] pt-2">{receiptLine('Net cash received',netReceived,true)}</div>
                 </section>}
 
@@ -566,13 +614,17 @@ export default function BookingFinancialPanel({bookingId,branchId}:BillingReceip
                     <p className="mt-1 text-[10px] leading-4 text-[#E5D9FF]">Remaining booking balance + unpaid security deposit + unpaid approved charges.</p>
                 </div>}
                 <p className="text-center text-[10px] leading-4 text-[#806A8C]">
-                    {fullyReconciled
-                        ? (hasRentalItems
-                            ? 'Booking payment is complete. Rental release, return and any final deposit settlement are tracked separately.'
-                            : 'Booking fully paid.')
-                        : (hasRentalItems
-                            ? 'Check booking payments and any deposit or charge settlement still due. Rental returns are tracked separately.'
-                            : 'Review outstanding booking payments before closing this booking.')}
+                    {v.cancellation
+                        ? (v.cancellation.status==='Rejected'
+                            ? 'This booking request was rejected. No payment is due.'
+                            : 'This booking was cancelled. Refunds are shown in the Cancellation section; no further payment is due.')
+                        : fullyReconciled
+                            ? (hasRentalItems
+                                ? 'Booking payment is complete. Rental release, return and any final deposit settlement are tracked separately.'
+                                : 'Booking fully paid.')
+                            : (hasRentalItems
+                                ? 'Check booking payments and any deposit or charge settlement still due. Rental returns are tracked separately.'
+                                : 'Review outstanding booking payments before closing this booking.')}
                     <span className="mt-1 block">This is a financial record, not a tax invoice. No payments can be entered from the Billing tab.</span>
                 </p>
             </div>

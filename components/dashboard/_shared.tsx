@@ -11,8 +11,6 @@ import {
 } from "react";
 import * as XLSX from "xlsx";
 import {
-    ArrowLeft,
-    ArrowRight,
     CalendarDays,
     ChevronDown,
     ChevronUp,
@@ -20,7 +18,6 @@ import {
     Download,
     FileSpreadsheet,
     FileText,
-    MapPin,
     Package,
     RefreshCw,
     RotateCcw,
@@ -1545,6 +1542,30 @@ function wrapPdfText(value: string, maxCharacters: number, maxLines = 3) {
     return result;
 }
 
+function formatDashboardPdfTitle(title: string) {
+    const cleaned = normalizePdfText(title)
+        .replace(/[_-]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    if (!cleaned) return "Dashboard Report";
+
+    return cleaned
+        .split(" ")
+        .map((word) => {
+            if (!word) return word;
+            return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+        })
+        .join(" ");
+}
+
+/** Opt-in report layout; default dashboard/report exports retain their existing styling. */
+type DashboardPdfOptions = {
+    centerColumns?: boolean;
+    totalRow?: string[];
+    currencyNote?: boolean;
+};
+
 export function createTablePdf({
                                    title,
                                    storeName,
@@ -1552,6 +1573,7 @@ export function createTablePdf({
                                    dateRange,
                                    headers,
                                    rows,
+                                   options,
                                }: {
     title: string;
     storeName: string;
@@ -1559,21 +1581,38 @@ export function createTablePdf({
     dateRange: string;
     headers: string[];
     rows: string[][];
+    options?: DashboardPdfOptions;
 }) {
-    const pageWidth = 842;
-    const pageHeight = 595;
-    const marginX = 28;
-    const marginBottom = 28;
+    const pageWidth = 595.28;
+    const pageHeight = 841.89;
+    const outerMargin = 25;
+    const pageInset = 24;
+    const marginX = 42;
+    const marginBottom = 54;
     const contentWidth = pageWidth - marginX * 2;
     const regularFont = "F1";
     const boldFont = "F2";
-    const fontSize = headers.length >= 8 ? 5.8 : headers.length >= 6 ? 6.5 : 7.2;
-    const headerFontSize = Math.max(5.6, fontSize - 0.2);
-    const lineHeight = fontSize + 2.2;
-    const cellPaddingX = 4.5;
-    const cellPaddingY = 4.5;
+    const titleText = formatDashboardPdfTitle(title);
+    const fontSize = headers.length >= 6 ? 7 : headers.length >= 5 ? 7.6 : 8.2;
+    const headerFontSize = Math.max(7, fontSize - 0.1);
+    const metaFontSize = 10.2;
+    const lineHeight = fontSize + 2.8;
+    const cellPaddingX = 5;
+    const cellPaddingY = 5;
 
-    const weights = headers.map(getPdfColumnWeight);
+    const cream: [number, number, number] = [0.992, 0.98, 0.956];
+    const white: [number, number, number] = [1, 1, 1];
+    const purple: [number, number, number] = [0.169, 0.09, 0.298];
+    const purpleText: [number, number, number] = [0.169, 0.09, 0.298];
+    const ink: [number, number, number] = [0.102, 0.071, 0.125];
+    const muted: [number, number, number] = [0.373, 0.306, 0.459];
+    const border: [number, number, number] = [0.902, 0.866, 0.941];
+    const tint: [number, number, number] = [0.976, 0.965, 0.992];
+    const divider: [number, number, number] = [0.9, 0.86, 0.94];
+    const altRow: [number, number, number] = [0.989, 0.984, 0.995];
+
+    const centered = options?.centerColumns === true;
+    const weights = headers.map(header => centered && header === "Weeks" ? 2.1 : centered && header === "Rank" ? 0.65 : getPdfColumnWeight(header));
     const totalWeight = weights.reduce((total, weight) => total + weight, 0);
 
     let runningX = marginX;
@@ -1590,24 +1629,37 @@ export function createTablePdf({
         return column;
     });
 
-    const characterLimits = columns.map((column) =>
-        Math.max(6, Math.floor((column.width - cellPaddingX * 2) / (fontSize * 0.52)))
-    );
-
-    const headerLines = headers.map((header, index) =>
-        wrapPdfText(header, characterLimits[index], 2)
-    );
-    const headerLineCount = Math.max(...headerLines.map((lines) => lines.length));
-    const headerHeight = Math.max(
-        20,
-        headerLineCount * (headerFontSize + 1.8) + cellPaddingY * 2
-    );
-
+    const point = (value: number) => Number(value.toFixed(2));
     const pages: string[] = [];
     let commands: string[] = [];
     let cursorY = 0;
 
-    const point = (value: number) => Number(value.toFixed(2));
+    // Helvetica ASCII glyph widths, for exact centered alignment and wrapping.
+    const regularWidths = [278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,278,278,584,584,584,556,1015,667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,611,722,667,944,667,667,611,278,278,278,469,556,333,556,556,500,556,556,278,556,556,222,222,500,222,833,556,556,556,556,333,500,278,556,500,722,500,500,500,334,260,334,584];
+    const boldWidths = [278,333,474,556,556,889,722,238,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,333,333,584,584,584,611,975,722,722,722,722,667,611,778,722,278,556,722,611,833,722,778,667,778,722,667,611,722,667,944,667,667,611,333,278,333,584,556,333,556,611,556,611,556,333,611,611,278,278,556,278,889,611,611,611,611,389,556,333,611,556,778,556,556,500,389,280,389,584];
+    function measure(value: string, size: number, font: string) {
+        const text = normalizePdfText(value);
+        if (!centered) return text.length * size * 0.52;
+        const widths = font === boldFont ? boldWidths : regularWidths;
+        return Array.from(text).reduce((n,c)=>n+(widths[c.charCodeAt(0)-32] ?? 600),0)*size/1000;
+    }
+    function wrapCentered(value: string, width: number, size: number, font: string) {
+        const text = normalizePdfText(value);
+        if (!text) return [""];
+        const lines: string[] = [];
+        let line = "";
+        for(const word of text.split(" ")) {
+            if(line && measure(`${line} ${word}`,size,font)>width) {lines.push(line);line="";}
+            if(measure(word,size,font)>width) {
+                for(const char of word) {
+                    if(line && measure(line+char,size,font)>width) {lines.push(line);line="";}
+                    line+=char;
+                }
+            } else line=line ? `${line} ${word}` : word;
+        }
+        if(line) lines.push(line);
+        return lines.length?lines:[""];
+    }
 
     function addText(
         value: string,
@@ -1615,12 +1667,20 @@ export function createTablePdf({
         y: number,
         size: number,
         font: string,
-        color: [number, number, number]
+        color: [number, number, number],
+        align: "left" | "center" | "right" = "left"
     ) {
+        const normalized = normalizePdfText(value);
+        if (centered && !normalized) return;
+        const text = normalized || "-";
+        const textWidth = measure(text, size, font);
+        const adjustedX =
+            align === "center" ? x - textWidth / 2 : align === "right" ? x - textWidth : x;
+
         commands.push(
             `q ${color.join(" ")} rg BT /${font} ${point(size)} Tf 1 0 0 1 ${point(
-                x
-            )} ${point(y)} Tm (${escapePdf(value)}) Tj ET Q`
+                adjustedX
+            )} ${point(y)} Tm (${escapePdf(text)}) Tj ET Q`
         );
     }
 
@@ -1643,45 +1703,65 @@ export function createTablePdf({
         y: number,
         width: number,
         height: number,
-        color: [number, number, number]
+        color: [number, number, number],
+        lineWidth = 0.7
     ) {
         commands.push(
-            `q ${color.join(" ")} RG 0.45 w ${point(x)} ${point(y)} ${point(
+            `q ${color.join(" ")} RG ${point(lineWidth)} w ${point(x)} ${point(y)} ${point(
                 width
             )} ${point(height)} re S Q`
         );
     }
 
+    function drawDivider(y: number, color: [number, number, number] = divider, lineWidth = 0.7) {
+        commands.push(
+            `q ${color.join(" ")} RG ${point(lineWidth)} w ${point(marginX)} ${point(y)} m ${point(
+                pageWidth - marginX
+            )} ${point(y)} l S Q`
+        );
+    }
+
+    function wrapCellText(value: string, columnWidth: number, linesLimit = 4) {
+        const headerTightness = headers.length >= 6 ? 0.94 : 1;
+        const maxCharacters = Math.max(
+            4,
+            Math.floor(((columnWidth - cellPaddingX * 2) / (fontSize * 0.52)) * headerTightness)
+        );
+        return wrapPdfText(value, maxCharacters, linesLimit);
+    }
+
     function drawTableHeader() {
+        const headerLines = headers.map((header, index) => {
+            const limit = Math.max(
+                4,
+                Math.floor((columns[index].width - cellPaddingX * 2) / (headerFontSize * 0.52))
+            );
+            return centered ? wrapCentered(header, columns[index].width - cellPaddingX * 2, headerFontSize, boldFont) : wrapPdfText(header, limit, 3);
+        });
+        const headerLineCount = Math.max(...headerLines.map((lines) => lines.length));
+        const headerHeight = Math.max(26, headerLineCount * (headerFontSize + 2) + cellPaddingY * 2);
         const bottomY = cursorY - headerHeight;
 
-        fillRect(marginX, bottomY, contentWidth, headerHeight, [0.17, 0.09, 0.3]);
-        strokeRect(marginX, bottomY, contentWidth, headerHeight, [0.77, 0.69, 0.84]);
+        fillRect(marginX, bottomY, contentWidth, headerHeight, tint);
+        strokeRect(marginX, bottomY, contentWidth, headerHeight, border, 0.75);
 
         columns.forEach((column, index) => {
             if (index > 0) {
                 commands.push(
-                    `q 0.92 0.87 0.96 RG 0.35 w ${point(column.x)} ${point(
-                        bottomY
-                    )} m ${point(column.x)} ${point(cursorY)} l S Q`
+                    `q ${border.join(" ")} RG 0.45 w ${point(column.x)} ${point(bottomY)} m ${point(
+                        column.x
+                    )} ${point(cursorY)} l S Q`
                 );
             }
 
             const lines = headerLines[index];
             lines.forEach((line, lineIndex) => {
                 const textWidth = line.length * headerFontSize * 0.52;
-                const textX = column.numeric
+                const textX = centered ? column.x + column.width / 2 : column.numeric
                     ? column.x + column.width - cellPaddingX - textWidth
                     : column.x + cellPaddingX;
-
-                addText(
-                    line,
-                    textX,
-                    cursorY - cellPaddingY - headerFontSize - lineIndex * (headerFontSize + 1.8),
-                    headerFontSize,
-                    boldFont,
-                    [1, 1, 1]
-                );
+                const baseline = centered ? cursorY - (headerHeight - lines.length*(headerFontSize+2))/2 - headerFontSize : cursorY - cellPaddingY - headerFontSize;
+                addText(line, textX, baseline - lineIndex*(headerFontSize+2), headerFontSize, boldFont, purpleText, centered ? "center" : "left");
             });
         });
 
@@ -1689,56 +1769,53 @@ export function createTablePdf({
     }
 
     function drawPageTitle(continued: boolean) {
-        addText(
-            `StockNBook - ${title}${continued ? " (continued)" : ""}`,
-            marginX,
-            pageHeight - 32,
-            14,
-            boldFont,
-            [0.1, 0.07, 0.13]
-        );
+        const cardX = outerMargin;
+        const cardY = pageInset;
+        const cardWidth = pageWidth - outerMargin * 2;
+        const cardHeight = pageHeight - pageInset * 2;
 
-        let metadataY = pageHeight - 49;
+        fillRect(0, 0, pageWidth, pageHeight, cream);
+        fillRect(cardX, cardY, cardWidth, cardHeight, white);
+        fillRect(cardX, pageHeight - pageInset - 6, cardWidth, 6, purple);
 
-        addText(
-            `Store: ${storeName}`,
-            marginX,
-            metadataY,
-            8.5,
-            regularFont,
-            [0.21, 0.15, 0.27]
-        );
+        let topY = pageHeight - 58;
+        addText(storeName || "Store", pageWidth / 2, topY, 21, boldFont, purpleText, "center");
+        topY -= 17;
 
         if (branch) {
-            metadataY -= 13;
-            addText(
-                `Branch: ${branch}`,
-                marginX,
-                metadataY,
-                8.5,
-                regularFont,
-                [0.21, 0.15, 0.27]
-            );
+            addText(`Branch: ${branch}`, pageWidth / 2, topY, 11.5, boldFont, purpleText, "center");
+            topY -= 16;
         }
 
-        metadataY -= 13;
+        addText(`Date range: ${dateRange}`, pageWidth / 2, topY, metaFontSize, regularFont, muted, "center");
+        topY -= 12;
+        drawDivider(topY, border, 0.7);
+
+        topY -= continued ? 24 : 28;
         addText(
-            `Date range: ${dateRange}`,
-            marginX,
-            metadataY,
-            8.5,
+            continued ? `${titleText} (continued)` : titleText,
+            pageWidth / 2,
+            topY,
+            continued ? 16 : 18,
+            boldFont,
+            purpleText,
+            "center"
+        );
+
+        topY -= 16;
+        addText(
+            rows.length
+                ? `${rows.length.toLocaleString("en-PH")} row(s) exported${options?.currencyNote ? " | Amounts in Philippine pesos" : ""}`
+                : "No records available for the selected period",
+            pageWidth / 2,
+            topY,
+            9,
             regularFont,
-            [0.21, 0.15, 0.27]
+            muted,
+            "center"
         );
 
-        const dividerY = metadataY - 8;
-        commands.push(
-            `q 0.84 0.79 0.9 RG 0.6 w ${marginX} ${dividerY} m ${
-                pageWidth - marginX
-            } ${dividerY} l S Q`
-        );
-
-        cursorY = dividerY - 1;
+        cursorY = topY - 18;
         drawTableHeader();
     }
 
@@ -1754,47 +1831,39 @@ export function createTablePdf({
         drawPageTitle(continued);
     }
 
-    function drawTableRow(row: string[], rowIndex: number) {
-        const cellLines = columns.map((_, index) =>
-            wrapPdfText(row[index] ?? "-", characterLimits[index], 3)
+    function drawTableRow(row: string[], rowIndex: number, isTotal = false) {
+        const rowFont = isTotal ? boldFont : regularFont;
+        const cellLines = columns.map((column, index) => centered
+            ? wrapCentered(row[index] ?? "-", column.width - cellPaddingX * 2, fontSize, rowFont)
+            : wrapCellText(row[index] ?? "-", column.width, headers.length >= 6 ? 5 : 4)
         );
         const maxLines = Math.max(...cellLines.map((lines) => lines.length));
-        const rowHeight = Math.max(20, maxLines * lineHeight + cellPaddingY * 2);
+        const rowHeight = Math.max(24, maxLines * lineHeight + cellPaddingY * 2);
 
-        if (cursorY - rowHeight < marginBottom + 10) {
+        if (cursorY - rowHeight < marginBottom + 30) {
             startPage(true);
         }
 
         const rowBottom = cursorY - rowHeight;
-        const rowColor: [number, number, number] =
-            rowIndex % 2 === 0 ? [1, 1, 1] : [0.985, 0.977, 0.99];
-
-        fillRect(marginX, rowBottom, contentWidth, rowHeight, rowColor);
-        strokeRect(marginX, rowBottom, contentWidth, rowHeight, [0.86, 0.81, 0.9]);
+        fillRect(marginX, rowBottom, contentWidth, rowHeight, isTotal ? tint : rowIndex % 2 === 0 ? white : altRow);
+        strokeRect(marginX, rowBottom, contentWidth, rowHeight, border, 0.45);
 
         columns.forEach((column, index) => {
             if (index > 0) {
                 commands.push(
-                    `q 0.9 0.85 0.94 RG 0.3 w ${point(column.x)} ${point(
-                        rowBottom
-                    )} m ${point(column.x)} ${point(cursorY)} l S Q`
+                    `q ${border.join(" ")} RG 0.3 w ${point(column.x)} ${point(rowBottom)} m ${point(
+                        column.x
+                    )} ${point(cursorY)} l S Q`
                 );
             }
 
             cellLines[index].forEach((line, lineIndex) => {
                 const textWidth = line.length * fontSize * 0.52;
-                const textX = column.numeric
+                const textX = centered ? column.x + column.width / 2 : column.numeric
                     ? column.x + column.width - cellPaddingX - textWidth
                     : column.x + cellPaddingX;
-
-                addText(
-                    line,
-                    textX,
-                    cursorY - cellPaddingY - fontSize - lineIndex * lineHeight,
-                    fontSize,
-                    regularFont,
-                    [0.1, 0.07, 0.13]
-                );
+                const baseline = centered ? cursorY - (rowHeight - cellLines[index].length*lineHeight)/2 - fontSize : cursorY - cellPaddingY - fontSize;
+                addText(line, textX, baseline - lineIndex*lineHeight, fontSize, rowFont, isTotal ? purpleText : ink, centered ? "center" : "left");
             });
         });
 
@@ -1806,24 +1875,30 @@ export function createTablePdf({
     if (rows.length === 0) {
         addText(
             "No records found for the selected report period.",
-            marginX + 8,
-            cursorY - 24,
-            9,
+            pageWidth / 2,
+            cursorY - 26,
+            10,
             regularFont,
-            [0.4, 0.35, 0.46]
+            muted,
+            "center"
         );
     } else {
         rows.forEach((row, index) => drawTableRow(row, index));
+        if (options?.totalRow) drawTableRow(options.totalRow, rows.length, true);
     }
 
     finishPage();
 
-    const pageStreams = pages.map(
-        (stream, index) =>
-            `${stream}\nq 0.42 0.35 0.48 rg BT /F1 7 Tf 1 0 0 1 ${pageWidth - 100} 16 Tm (Page ${
-                index + 1
-            } of ${pages.length}) Tj ET Q`
-    );
+    const pageStreams = pages.map((stream, index) => {
+        const footerText = `Powered by StockNBook | Page ${index + 1} of ${pages.length}`;
+        return `${stream}
+q ${divider.join(" ")} RG 0.6 w ${point(marginX)} 42 m ${point(
+            pageWidth - marginX
+        )} 42 l S Q
+q ${muted.join(" ")} rg BT /F1 8 Tf 1 0 0 1 ${point(
+            pageWidth / 2 - footerText.length * 2.05
+        )} 26 Tm (${escapePdf(footerText)}) Tj ET Q`;
+    });
 
     const pageObjectIds = pageStreams.map((_, index) => 5 + index * 2);
     const contentObjectIds = pageStreams.map((_, index) => 6 + index * 2);
@@ -1845,7 +1920,10 @@ export function createTablePdf({
             `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] ` +
             `/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${contentId} 0 R >>`;
 
-        objects[contentId] = `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`;
+        objects[contentId] = `<< /Length ${stream.length} >>
+stream
+${stream}
+endstream`;
     });
 
     const maxObjectId = Math.max(...Object.keys(objects).map(Number));
@@ -2343,6 +2421,7 @@ export function exportTableAsPdf(
     table: ExportTable,
     context: ExportContext,
     filenamePrefix: string,
+    options?: DashboardPdfOptions,
 ) {
     const pdf = createTablePdf({
         title: table.title,
@@ -2351,6 +2430,7 @@ export function exportTableAsPdf(
         dateRange: context.dateRange,
         headers: table.headers,
         rows: table.rows,
+        options,
     });
 
     downloadFile(`${filenamePrefix}.pdf`, "application/pdf", pdf);
@@ -2460,14 +2540,13 @@ function SearchableFilterSelect<T extends string>({
                                                   }: SearchableFilterSelectProps<T>) {
     const selectedLabel =
         options.find((option) => option.value === value)?.label || "";
-    const [query, setQuery] = useState(selectedLabel);
-    const [isOpen, setIsOpen] = useState(false);
+    // null means the dropdown is closed; show the current selected label directly.
+    const [searchQuery, setSearchQuery] = useState<string | null>(null);
+    const isOpen = searchQuery !== null;
+    const query = searchQuery ?? selectedLabel;
 
-    useEffect(() => {
-        if (!isOpen) {
-            setQuery(selectedLabel);
-        }
-    }, [isOpen, selectedLabel]);
+    const openDropdown = () => setSearchQuery((current) => current ?? selectedLabel);
+    const closeDropdown = () => setSearchQuery(null);
 
     const filteredOptions = useMemo(() => {
         const normalizedQuery = query.trim().toLowerCase();
@@ -2483,8 +2562,7 @@ function SearchableFilterSelect<T extends string>({
 
     const selectOption = (option: SearchableSelectOption<T>) => {
         onChange(option.value);
-        setQuery(option.label);
-        setIsOpen(false);
+        closeDropdown();
     };
 
     return (
@@ -2492,8 +2570,7 @@ function SearchableFilterSelect<T extends string>({
             className={`relative ${className}`}
             onBlur={(event) => {
                 if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-                    setIsOpen(false);
-                    setQuery(selectedLabel);
+                    closeDropdown();
                 }
             }}
         >
@@ -2510,13 +2587,12 @@ function SearchableFilterSelect<T extends string>({
                 aria-autocomplete="list"
                 value={query}
                 onFocus={(event) => {
-                    setIsOpen(true);
+                    openDropdown();
                     event.currentTarget.select();
                 }}
-                onClick={() => setIsOpen(true)}
+                onClick={openDropdown}
                 onChange={(event) => {
-                    setQuery(event.target.value);
-                    setIsOpen(true);
+                    setSearchQuery(event.target.value);
                 }}
                 onKeyDown={(event) => {
                     if (event.key === "Enter" && filteredOptions.length > 0) {
@@ -2525,8 +2601,8 @@ function SearchableFilterSelect<T extends string>({
                     }
 
                     if (event.key === "Escape") {
-                        setIsOpen(false);
-                        setQuery(selectedLabel);
+                        event.preventDefault();
+                        closeDropdown();
                     }
                 }}
                 className="h-11 w-full rounded-xl border border-[#E3D9E9] bg-white pl-9 pr-8 text-[12px] font-semibold text-[#2D2035] shadow-sm outline-none transition focus:border-[#8D63C8] focus:ring-2 focus:ring-[#8D63C8]/10"
@@ -2537,7 +2613,7 @@ function SearchableFilterSelect<T extends string>({
                 tabIndex={-1}
                 aria-label={`Open ${ariaLabel}`}
                 onMouseDown={(event) => event.preventDefault()}
-                onClick={() => setIsOpen((current) => !current)}
+                onClick={() => setSearchQuery((current) => current === null ? selectedLabel : null)}
                 className="absolute right-0 top-0 flex h-11 w-9 items-center justify-center text-[#6F5C7C]"
             >
                 <ChevronDown

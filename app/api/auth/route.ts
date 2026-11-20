@@ -47,16 +47,17 @@ export async function POST(req: NextRequest) {
 
     const jsonResponse = NextResponse.json(data, {
       status: response.statusCode || 200,
+      headers: { "Cache-Control": "no-store" },
     });
 
-    // For platform admin logins only: also set an httpOnly cookie carrying
+    // For successful platform administrator logins: also set an httpOnly cookie carrying
     // the same token. This is what lets proxy.ts verify the session
     // server-side before an admin page is even rendered. It does not
     // replace the token returned in the JSON body above — the app still
     // stores that in sessionStorage and sends it as a Bearer header for
     // every other admin API call, unchanged.
     if (
-        normalizedAction === "platform_admin_login" &&
+        (data as { role?: string })?.role === "PLATFORM_ADMIN" &&
         response.statusCode === 200 &&
         (data as { token?: string })?.token
     ) {
@@ -72,12 +73,11 @@ export async function POST(req: NextRequest) {
     return jsonResponse;
 
   } catch (error: any) {
-    console.error("Local Auth API Error:", error);
+    console.error("Local Auth API Error:", { code: error?.code || "AUTH_API_ERROR" });
 
     return NextResponse.json(
         {
           error:
-              error?.message ||
               "Authentication server error",
         },
         {

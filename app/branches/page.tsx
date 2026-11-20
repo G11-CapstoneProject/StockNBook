@@ -1104,12 +1104,13 @@ export default function BranchesPage() {
 
                 <main className="min-w-0 flex-1 overflow-y-auto">
                     <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 backdrop-blur">
-                        <div className="flex min-h-[72px] flex-wrap items-center justify-between gap-4 px-6 py-3">
-                            <h1 className="text-[25px] font-bold tracking-[-0.025em] text-[#1A1220]">
-                                Branches
-                            </h1>
+                        <div className="flex min-h-[72px] flex-wrap items-center justify-between gap-3 px-6 py-3">
+                            <div className="min-w-0">
+                                <h1 className="text-[25px] font-bold text-[#1A1220]">Branches</h1>
+                                <p className="mt-0.5 text-xs text-[#766983]">Manage business locations and assigned teams.</p>
+                            </div>
 
-                            <div className="flex items-center gap-2.5">
+                            <div className="flex flex-wrap items-center gap-2.5">
                             <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
                                 {currentDateTime
                                     ? formatCurrentDateTime(currentDateTime)
@@ -1137,35 +1138,35 @@ export default function BranchesPage() {
                         </div>
                     </header>
 
-                    <section className="space-y-3.5 px-6 py-4">
+                    <section className="space-y-4 px-5 py-5">
                         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                             <SummaryCard
                                 title="Total Branches"
                                 value={summary.totalBranches}
                                 description="All registered business locations"
                                 icon={<Building2 className="h-5 w-5" />}
-                                iconClassName="bg-[#F0E8FA] text-[#5B35A5]"
+                                iconClassName="bg-[#F3EBFF] text-[#6C3AD6]"
                             />
                             <SummaryCard
                                 title="Active Branches"
                                 value={summary.activeBranches}
                                 description="Branches currently operating"
                                 icon={<CheckCircle2 className="h-5 w-5" />}
-                                iconClassName="bg-[#EAF7EF] text-[#21844A]"
+                                iconClassName="bg-[#EAF7F0] text-[#25865B]"
                             />
                             <SummaryCard
                                 title="Inactive Branches"
                                 value={summary.inactiveBranches}
                                 description="Branches currently inactive"
                                 icon={<XCircle className="h-5 w-5" />}
-                                iconClassName="bg-[#FFF0F0] text-[#C32F2F]"
+                                iconClassName="bg-[#FFF0F0] text-[#D52B2B]"
                             />
                             <SummaryCard
                                 title="Total Staff"
                                 value={summary.totalStaff}
                                 description="Staff assigned across branches"
                                 icon={<UserRoundCheck className="h-5 w-5" />}
-                                iconClassName="bg-[#EEF4FF] text-[#3367D6]"
+                                iconClassName="bg-[#E8F1FF] text-[#2169CF]"
                             />
                         </div>
 
@@ -1175,23 +1176,25 @@ export default function BranchesPage() {
                             </div>
                         )}
 
-                        <section className="overflow-hidden rounded-[20px] border border-[#E8E0EF] bg-white shadow-[0_2px_6px_rgba(45,27,78,0.10)]">
-                            <div className="flex flex-wrap items-center justify-between gap-3 px-5 pb-3 pt-5">
-                                <div className="min-w-0">
-                                    <h2 className="text-[18px] font-bold tracking-[-0.02em] text-[#1A1220]">
-                                        Branch Directory
-                                    </h2>
-                                    <p className="mt-1 text-[13px] leading-5 text-[#806A8C]">
-                                        View branch contact information, staff, and assigned managers.
-                                    </p>
+                        <section className="min-w-0 overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm">
+                            <div className="flex min-h-[64px] flex-wrap items-center justify-between gap-3 px-4 py-3.5">
+                                <div className="flex min-w-0 flex-1 items-center gap-2.5">
+                                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#E5F7F5] text-[#147D77]" aria-hidden="true">
+                                        <Building2 size={18} />
+                                    </span>
+                                    <div className="min-w-0">
+                                        <h2 className="text-[15px] font-bold leading-5 text-[#1A1220]">Branch Directory</h2>
+                                        <p className="mt-0.5 text-[11px] leading-4 text-[#86778F]">
+                                            View branch contact information, staff, and assigned managers.
+                                        </p>
+                                    </div>
                                 </div>
-
-                                <span className="text-[13px] font-medium text-[#806A8C]">
+                                <span className="text-[11px] font-medium tabular-nums text-[#806A8C]">
                                     {filteredBranches.length} {filteredBranches.length === 1 ? "branch" : "branches"}
                                 </span>
                             </div>
 
-                            <div className="flex flex-wrap items-center gap-3 px-5 pb-4">
+                            <div className="flex flex-wrap items-center gap-3 px-4 pb-3">
                                 <div className="relative min-w-0 flex-1 basis-full sm:basis-[260px]">
                                     <Search
                                         size={16}
@@ -1201,7 +1204,7 @@ export default function BranchesPage() {
                                         value={search}
                                         onChange={(event) => setSearch(event.target.value)}
                                         placeholder="Search branch, manager, address, or contact..."
-                                        className="h-[46px] w-full rounded-xl border border-[#E6DDF0] bg-white px-4 pl-10 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                                        className="h-[38px] w-full rounded-xl border border-[#E6DDF0] bg-white pl-10 pr-10 text-[12px] text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
                                     />
                                     {search && (
                                         <button
@@ -1218,14 +1221,14 @@ export default function BranchesPage() {
                                 <button
                                     type="button"
                                     onClick={openAddModal}
-                                    className="inline-flex h-[46px] shrink-0 items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
+                                    className="inline-flex h-[38px] shrink-0 items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-[12px] font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
                                 >
                                     <Plus size={16} />
                                     Add Branch
                                 </button>
                             </div>
 
-                            <div className="border-t border-[#EEE7F2] p-4">
+                            <div className="border-t border-[#F1ECF4] p-3.5">
                                 {loading && branches.length === 0 ? (
                                     <ModuleSkeleton variant="branches" />
                                 ) : branches.length === 0 ? (
@@ -1243,7 +1246,7 @@ export default function BranchesPage() {
                                         onAction={() => setSearch("")}
                                     />
                                 ) : (
-                                    <div className="grid items-start gap-4 xl:grid-cols-2">
+                                    <div className="grid min-w-0 grid-cols-1 items-stretch gap-3 xl:grid-cols-2">
                                         {filteredBranches.map((branch) => (
                                             <BranchCard
                                                 key={branch.id}
@@ -1268,18 +1271,18 @@ export default function BranchesPage() {
                             role="dialog"
                             aria-modal="true"
                             aria-labelledby="add-branch-dialog-title"
-                            className="max-h-[78vh] w-full max-w-[1120px] overflow-y-auto rounded-[22px] border border-[#E6DDF0] bg-white shadow-2xl"
+                            className="max-h-[90vh] w-full max-w-[880px] overflow-y-auto rounded-2xl border border-[#E6DDF0] bg-white shadow-2xl"
                             onMouseDown={(event) => event.stopPropagation()}
                         >
-                            <div className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-[#E6DDF0] bg-white px-6 py-5">
+                            <div className="sticky top-0 z-10 flex items-start justify-between gap-3 border-b border-[#F1ECF4] bg-white px-5 py-4">
                                 <div>
                                     <h2
                                         id="add-branch-dialog-title"
-                                        className="text-[22px] font-bold tracking-[-0.02em] text-[#1A1220]"
+                                        className="text-[17px] font-bold text-[#1A1220]"
                                     >
                                         Add Branch
                                     </h2>
-                                    <p className="mt-1 text-sm leading-6 text-[#7A6A84]">
+                                    <p className="mt-1 text-[11px] leading-4 text-[#86778F]">
                                         Add a new business location and optionally
                                         invite a branch manager.
                                     </p>
@@ -1290,21 +1293,21 @@ export default function BranchesPage() {
                                     onClick={closeAddModal}
                                     disabled={adding}
                                     aria-label="Close add branch form"
-                                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#E6DDF0] text-[#806A8C] transition hover:bg-[#F7F1FF] hover:text-[#2B174C] disabled:cursor-not-allowed disabled:opacity-50"
+                                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-[#E6DDF0] text-[#806A8C] transition hover:bg-[#F7F1FF] hover:text-[#2B174C] disabled:cursor-not-allowed disabled:opacity-50"
                                 >
                                     <X size={17} />
                                 </button>
                             </div>
 
-                            <div className="space-y-5 px-6 py-5">
-                                <div className="rounded-2xl border border-[#E8DFF0] bg-[#FFFDF8] p-5">
-                                    <div className="mb-4 flex items-center gap-3">
-                                    <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#F0E8FA] text-[#5B35A5]">
+                            <div className="space-y-4 px-5 py-4">
+                                <div className="rounded-xl border border-[#EEE7F5] bg-[#FAF8FC] p-4">
+                                    <div className="mb-3 flex items-center gap-2.5">
+                                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F3EBFF] text-[#6C3AD6]">
                                         <Building2 className="h-5 w-5" />
                                     </span>
 
                                         <div>
-                                            <h3 className="font-bold text-[#1A1220]">
+                                            <h3 className="text-[14px] font-bold text-[#1A1220]">
                                                 Branch information
                                             </h3>
                                             <p className="mt-0.5 text-xs text-[#7A6A84]">
@@ -1337,7 +1340,7 @@ export default function BranchesPage() {
                                     />
 
                                     <div className="mt-1">
-                                        <p className="mb-2 block text-sm font-medium text-[#1A1220]">
+                                        <p className="mb-1.5 block text-[12px] font-medium text-[#25153D]">
                                             Branch status
                                         </p>
 
@@ -1358,7 +1361,7 @@ export default function BranchesPage() {
                                                     setAddOtherInactiveReason("");
                                                 }}
                                                 className={[
-                                                    "flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition",
+                                                    "flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition",
                                                     addBranchStatus === "active"
                                                         ? "border-[#55B978] bg-[#EDFBF1] ring-2 ring-[#55B978]/10"
                                                         : "border-[#E6DDF0] bg-white hover:border-[#9ED9B3] hover:bg-[#F7FCF8]",
@@ -1366,7 +1369,7 @@ export default function BranchesPage() {
                                             >
                                             <span
                                                 className={[
-                                                    "flex h-9 w-9 shrink-0 items-center justify-center rounded-full",
+                                                    "flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px]",
                                                     addBranchStatus === "active"
                                                         ? "bg-[#DDF6E6] text-[#168344]"
                                                         : "bg-[#F1F4F2] text-[#6F7D74]",
@@ -1376,10 +1379,10 @@ export default function BranchesPage() {
                                             </span>
 
                                                 <span>
-                                                <span className="block text-sm font-semibold text-[#1A1220]">
+                                                <span className="block text-[12px] font-semibold text-[#25153D]">
                                                     Active
                                                 </span>
-                                                <span className="mt-0.5 block text-xs leading-5 text-[#7A6A84]">
+                                                <span className="mt-0.5 block text-[11px] leading-4 text-[#86778F]">
                                                     The branch is currently operating.
                                                 </span>
                                             </span>
@@ -1395,7 +1398,7 @@ export default function BranchesPage() {
                                                     setAddBranchStatus("inactive")
                                                 }
                                                 className={[
-                                                    "flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition",
+                                                    "flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition",
                                                     addBranchStatus === "inactive"
                                                         ? "border-[#E08A8A] bg-[#FFF2F2] ring-2 ring-[#E08A8A]/10"
                                                         : "border-[#E6DDF0] bg-white hover:border-[#E8B4B4] hover:bg-[#FFF8F8]",
@@ -1403,7 +1406,7 @@ export default function BranchesPage() {
                                             >
                                             <span
                                                 className={[
-                                                    "flex h-9 w-9 shrink-0 items-center justify-center rounded-full",
+                                                    "flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px]",
                                                     addBranchStatus === "inactive"
                                                         ? "bg-[#FFE0E0] text-[#C32F2F]"
                                                         : "bg-[#F5F1F1] text-[#857777]",
@@ -1413,10 +1416,10 @@ export default function BranchesPage() {
                                             </span>
 
                                                 <span>
-                                                <span className="block text-sm font-semibold text-[#1A1220]">
+                                                <span className="block text-[12px] font-semibold text-[#25153D]">
                                                     Inactive
                                                 </span>
-                                                <span className="mt-0.5 block text-xs leading-5 text-[#7A6A84]">
+                                                <span className="mt-0.5 block text-[11px] leading-4 text-[#86778F]">
                                                     The branch is temporarily not operating.
                                                 </span>
                                             </span>
@@ -1443,14 +1446,14 @@ export default function BranchesPage() {
                                     </div>
                                 </div>
 
-                                <div className="rounded-2xl border border-[#E8DFF0] bg-white p-5">
-                                    <div className="mb-4 flex items-center gap-3">
-                                    <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#EEF4FF] text-[#3367D6]">
+                                <div className="rounded-xl border border-[#EEE7F5] bg-white p-4">
+                                    <div className="mb-3 flex items-center gap-2.5">
+                                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#E8F1FF] text-[#2169CF]">
                                         <UserRoundCheck className="h-5 w-5" />
                                     </span>
 
                                         <div>
-                                            <h3 className="font-bold text-[#1A1220]">
+                                            <h3 className="text-[14px] font-bold text-[#1A1220]">
                                                 Branch manager
                                                 <span className="ml-2 text-xs font-medium text-[#8A7A94]">
                                                 Optional
@@ -1481,7 +1484,7 @@ export default function BranchesPage() {
                                     </div>
 
                                     <div className="mt-5 border-t border-[#E6DDF0] pt-5">
-                                        <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-[#806A8C]">
+                                        <p className="mb-3 text-[11px] font-semibold uppercase tracking-wide text-[#806A8C]">
                                             Manager Permissions
                                         </p>
 
@@ -1530,12 +1533,12 @@ export default function BranchesPage() {
                                 </div>
                             </div>
 
-                            <div className="sticky bottom-0 flex gap-3 border-t border-[#E6DDF0] bg-white px-6 py-4">
+                            <div className="sticky bottom-0 flex flex-wrap justify-end gap-2.5 border-t border-[#F1ECF4] bg-white px-5 py-3">
                                 <button
                                     type="button"
                                     onClick={closeAddModal}
                                     disabled={adding}
-                                    className="flex-1 rounded-xl border border-[#E6DDF0] bg-white px-5 py-2.5 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-50"
+                                    className="rounded-xl border border-[#E6DDF0] bg-white px-4 py-2.5 text-[12px] font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-50"
                                 >
                                     Cancel
                                 </button>
@@ -1544,7 +1547,7 @@ export default function BranchesPage() {
                                     type="button"
                                     onClick={() => void handleCreateBranch()}
                                     disabled={adding}
-                                    className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
+                                    className="flex items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 py-2.5 text-[12px] font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
                                 >
                                     <Plus size={16} />
                                     {adding ? "Adding branch..." : "Add branch"}
@@ -1567,13 +1570,13 @@ export default function BranchesPage() {
 
                 {showEditModal && editingBranch && (
                     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm">
-                        <div className="max-h-[90vh] w-full max-w-[620px] overflow-y-auto rounded-[18px] border border-[#E6DDF0] bg-white shadow-2xl">
-                            <div className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-[#E6DDF0] bg-white px-6 py-5">
+                        <div className="max-h-[90vh] w-full max-w-[620px] overflow-y-auto rounded-2xl border border-[#E6DDF0] bg-white shadow-2xl">
+                            <div className="sticky top-0 z-10 flex items-start justify-between gap-3 border-b border-[#F1ECF4] bg-white px-5 py-4">
                                 <div>
-                                    <h2 className="text-[20px] font-bold text-[#1A1220]">
+                                    <h2 className="text-[17px] font-bold text-[#1A1220]">
                                         Edit Branch
                                     </h2>
-                                    <p className="mt-1 text-sm text-[#7A6A84]">
+                                    <p className="mt-1 text-[11px] leading-4 text-[#86778F]">
                                         Update branch and assigned manager details.
                                     </p>
                                 </div>
@@ -1589,7 +1592,7 @@ export default function BranchesPage() {
                                 </button>
                             </div>
 
-                            <div className="space-y-5 px-6 py-5">
+                            <div className="space-y-4 px-5 py-4">
                                 <div className="grid gap-4 sm:grid-cols-2">
                                     <TextInput
                                         label="Branch name"
@@ -1610,7 +1613,7 @@ export default function BranchesPage() {
                                 />
 
                                 <div className="border-t border-[#E6DDF0] pt-5">
-                                    <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-[#806A8C]">
+                                    <p className="mb-3 text-[11px] font-semibold uppercase tracking-wide text-[#806A8C]">
                                         Branch Status
                                     </p>
 
@@ -1631,7 +1634,7 @@ export default function BranchesPage() {
                                                 setEditOtherInactiveReason("");
                                             }}
                                             className={[
-                                                "flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition",
+                                                "flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition",
                                                 editBranchStatus === "active"
                                                     ? "border-[#55B978] bg-[#EDFBF1] ring-2 ring-[#55B978]/10"
                                                     : "border-[#E6DDF0] bg-white hover:border-[#9ED9B3] hover:bg-[#F7FCF8]",
@@ -1639,7 +1642,7 @@ export default function BranchesPage() {
                                         >
                                         <span
                                             className={[
-                                                "flex h-9 w-9 shrink-0 items-center justify-center rounded-full",
+                                                "flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px]",
                                                 editBranchStatus === "active"
                                                     ? "bg-[#DDF6E6] text-[#168344]"
                                                     : "bg-[#F1F4F2] text-[#6F7D74]",
@@ -1649,10 +1652,10 @@ export default function BranchesPage() {
                                         </span>
 
                                             <span>
-                                            <span className="block text-sm font-semibold text-[#1A1220]">
+                                            <span className="block text-[12px] font-semibold text-[#25153D]">
                                                 Active
                                             </span>
-                                            <span className="mt-0.5 block text-xs leading-5 text-[#7A6A84]">
+                                            <span className="mt-0.5 block text-[11px] leading-4 text-[#86778F]">
                                                 The branch is currently operating.
                                             </span>
                                         </span>
@@ -1668,7 +1671,7 @@ export default function BranchesPage() {
                                                 setEditBranchStatus("inactive")
                                             }
                                             className={[
-                                                "flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition",
+                                                "flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition",
                                                 editBranchStatus === "inactive"
                                                     ? "border-[#E08A8A] bg-[#FFF2F2] ring-2 ring-[#E08A8A]/10"
                                                     : "border-[#E6DDF0] bg-white hover:border-[#E8B4B4] hover:bg-[#FFF8F8]",
@@ -1676,7 +1679,7 @@ export default function BranchesPage() {
                                         >
                                         <span
                                             className={[
-                                                "flex h-9 w-9 shrink-0 items-center justify-center rounded-full",
+                                                "flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px]",
                                                 editBranchStatus === "inactive"
                                                     ? "bg-[#FFE0E0] text-[#C32F2F]"
                                                     : "bg-[#F5F1F1] text-[#857777]",
@@ -1686,10 +1689,10 @@ export default function BranchesPage() {
                                         </span>
 
                                             <span>
-                                            <span className="block text-sm font-semibold text-[#1A1220]">
+                                            <span className="block text-[12px] font-semibold text-[#25153D]">
                                                 Inactive
                                             </span>
-                                            <span className="mt-0.5 block text-xs leading-5 text-[#7A6A84]">
+                                            <span className="mt-0.5 block text-[11px] leading-4 text-[#86778F]">
                                                 The branch is temporarily not operating.
                                             </span>
                                         </span>
@@ -1716,7 +1719,7 @@ export default function BranchesPage() {
                                 </div>
 
                                 <div className="border-t border-[#E6DDF0] pt-5">
-                                    <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-[#806A8C]">
+                                    <p className="mb-3 text-[11px] font-semibold uppercase tracking-wide text-[#806A8C]">
                                         Manager Details
                                     </p>
 
@@ -1735,7 +1738,7 @@ export default function BranchesPage() {
                                 </div>
 
                                 <div className="border-t border-[#E6DDF0] pt-5">
-                                    <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-[#806A8C]">
+                                    <p className="mb-3 text-[11px] font-semibold uppercase tracking-wide text-[#806A8C]">
                                         Manager Permissions
                                     </p>
 
@@ -1830,12 +1833,12 @@ export default function BranchesPage() {
                                 </div>
                             </div>
 
-                            <div className="sticky bottom-0 flex gap-3 border-t border-[#E6DDF0] bg-white px-6 py-4">
+                            <div className="sticky bottom-0 flex flex-wrap justify-end gap-2.5 border-t border-[#F1ECF4] bg-white px-5 py-3">
                                 <button
                                     type="button"
                                     onClick={closeEditModal}
                                     disabled={saving}
-                                    className="flex-1 rounded-xl border border-[#E6DDF0] bg-white px-5 py-2.5 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed"
+                                    className="rounded-xl border border-[#E6DDF0] bg-white px-4 py-2.5 text-[12px] font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed"
                                 >
                                     Cancel
                                 </button>
@@ -1844,7 +1847,7 @@ export default function BranchesPage() {
                                     type="button"
                                     onClick={() => void handleUpdateBranch()}
                                     disabled={saving}
-                                    className="flex-1 rounded-xl bg-[#2B174C] px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
+                                    className="rounded-xl bg-[#2B174C] px-4 py-2.5 text-[12px] font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
                                 >
                                     {saving ? "Saving..." : "Save changes"}
                                 </button>
@@ -1871,19 +1874,19 @@ function SummaryCard({
     iconClassName: string;
 }) {
     return (
-        <div className="min-h-[142px] rounded-[20px] border border-[#E6DDF0] bg-white px-5 py-4 shadow-[0_2px_6px_rgba(45,27,78,0.10)]">
-            <div className="flex h-full items-center gap-4">
-                <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${iconClassName}`}>
+        <div className="flex min-h-[108px] w-full min-w-0 items-center rounded-[16px] border border-[#E6DDF0] bg-white px-3.5 py-3 text-left shadow-sm">
+            <div className="flex w-full min-w-0 items-center gap-3">
+                <span className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl ${iconClassName}`}>
                     {icon}
                 </span>
                 <div className="min-w-0">
-                    <p className="text-[15px] font-medium text-[#2B174C]">
+                    <p className="text-[12px] font-semibold leading-4 text-[#25153D]">
                         {title}
                     </p>
-                    <p className="mt-1 text-[28px] font-bold leading-none tracking-[-0.02em] text-[#1A1220]">
+                    <p className="mt-1 break-words text-[24px] font-bold leading-none tabular-nums text-[#25153D]">
                         {value}
                     </p>
-                    <p className="mt-2 text-[12px] leading-5 text-[#806A8C]">
+                    <p className="mt-1 text-[11px] leading-4 text-[#806A8C]">
                         {description}
                     </p>
                 </div>
@@ -1907,44 +1910,39 @@ function BranchCard({
 
     return (
         <article
-            className="overflow-hidden rounded-[18px] border bg-white transition-shadow duration-200 hover:shadow-md"
-            style={{
-                borderColor: "#E7DFF0",
-                boxShadow:
-                    "0 3px 12px rgba(45, 27, 78, 0.08)",
-            }}
+            className="flex min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm"
         >
-            <div className="flex items-start justify-between gap-4 px-4 pb-3 pt-4">
-                <div className="flex min-w-0 items-center gap-3">
+            <div className="flex flex-wrap items-start justify-between gap-2.5 px-4 py-3.5">
+                <div className="flex min-w-0 flex-1 items-center gap-2.5">
                     <span
-                        className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl"
+                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px]"
                         style={{
-                            backgroundColor: "#F2ECFF",
-                            color: "#6D3CC7",
+                            backgroundColor: "#F3EBFF",
+                            color: "#6C3AD6",
                         }}
                     >
                         <Building2
-                            size={21}
+                            size={18}
                             strokeWidth={2}
                             aria-hidden="true"
                         />
                     </span>
 
                     <div className="min-w-0">
-                        <h3 className="truncate text-[18px] font-bold tracking-[-0.015em] text-[#1A1220]">
+                        <h3 className="break-words text-[15px] font-bold leading-5 text-[#1A1220]">
                             {branch.branch_name}
                         </h3>
 
-                        <p className="mt-1 truncate text-[13px] text-[#7A6A84]">
+                        <p className="mt-0.5 break-words text-[11px] leading-4 text-[#86778F]">
                             Manager:{" "}
                             {branch.manager_name || "Not assigned"}
                         </p>
                     </div>
                 </div>
 
-                <div className="max-w-[230px] shrink-0 text-right">
+                <div className="max-w-full shrink-0 text-right sm:max-w-[45%]">
                     <span
-                        className="inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-semibold"
+                        className="inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] font-semibold"
                         style={
                             status === "active"
                                 ? {
@@ -1981,7 +1979,7 @@ function BranchCard({
                     {status === "inactive" && inactiveReason && (
                         <div className="mt-2">
                             <span
-                                className="inline-flex rounded-full border px-3 py-1 text-[10px] font-semibold"
+                                className="inline-block max-w-full break-words rounded-lg border px-2.5 py-1 text-[10px] font-medium"
                                 style={{
                                     borderColor: "#F5C9C9",
                                     backgroundColor: "#FFF1F1",
@@ -1996,14 +1994,14 @@ function BranchCard({
                 </div>
             </div>
 
-            <div className="grid grid-cols-1 gap-3 px-4 pb-4 sm:grid-cols-2 xl:grid-cols-3">
+            <div className="grid flex-1 grid-cols-[repeat(auto-fit,minmax(min(100%,160px),1fr))] gap-2.5 px-4 pb-3.5">
                 <div>
                     <Metric
                         value={branch.address || "No address provided"}
                         label="Address"
                         icon={<MapPin size={18} strokeWidth={2} aria-hidden="true" />}
-                        iconBackground="#F1E9FF"
-                        iconColor="#6D3CC7"
+                        iconBackground="#F3EBFF"
+                        iconColor="#6C3AD6"
                         wrapValue
                     />
                 </div>
@@ -2011,25 +2009,25 @@ function BranchCard({
                     value={branch.contact_number || "No phone number"}
                     label="Phone Number"
                     icon={<Phone size={18} strokeWidth={2} aria-hidden="true" />}
-                    iconBackground="#EAF3FF"
-                    iconColor="#2E78DA"
+                    iconBackground="#E8F1FF"
+                    iconColor="#2169CF"
                     wrapValue
                 />
                 <Metric
                     value={Number(branch.staff_count || 0)}
                     label="Total Staff"
                     icon={<UsersRound size={18} strokeWidth={2} aria-hidden="true" />}
-                    iconBackground="#EAF8EF"
-                    iconColor="#188348"
+                    iconBackground="#EAF7F0"
+                    iconColor="#25865B"
                 />
             </div>
 
-            <div className="flex items-center justify-end border-t border-[#EEE7F2] px-4 py-3">
+            <div className="mt-auto flex items-center justify-end border-t border-[#F1ECF4] px-3 py-1.5">
                 <div className="flex shrink-0 flex-wrap justify-end gap-2">
                     <button
                         type="button"
                         onClick={onEdit}
-                        className="inline-flex h-[30px] items-center gap-1 rounded-lg bg-[#F1EBFF] px-3 text-[10px] font-semibold text-[#5734B3] transition hover:bg-[#E7DCFF]"
+                        className="inline-flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-[11px] font-semibold text-[#6D35D4] transition hover:bg-[#FAF7FE] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#7651BA]"
                     >
                         <Pencil size={11} />
                         Edit
@@ -2038,7 +2036,7 @@ function BranchCard({
                     <button
                         type="button"
                         onClick={onDelete}
-                        className="inline-flex h-[30px] items-center gap-1 rounded-lg bg-[#FFF0F0] px-3 text-[10px] font-semibold text-[#D83A45] transition hover:bg-[#FFE2E2]"
+                        className="inline-flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-[11px] font-semibold text-[#D52B2B] transition hover:bg-[#FFF0F0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D52B2B]"
                     >
                         <Trash2 size={11} />
                         Delete
@@ -2066,15 +2064,10 @@ function Metric({
 }) {
     return (
         <div
-            className="flex h-full min-w-0 items-center gap-2.5 rounded-xl border bg-white px-3 py-3"
-            style={{
-                borderColor: "#EEE6F3",
-                boxShadow:
-                    "0 1px 4px rgba(45, 27, 78, 0.04)",
-            }}
+            className="flex h-full min-h-[68px] min-w-0 items-center gap-2.5 rounded-xl border border-[#EEE7F5] bg-[#FAF8FC] px-3 py-2.5"
         >
             <span
-                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px]"
                 style={{
                     backgroundColor: iconBackground,
                     color: iconColor,
@@ -2085,13 +2078,13 @@ function Metric({
 
             <div className="min-w-0">
                 <p
-                    className={`${wrapValue ? "break-words text-[13px]" : "truncate text-[15px]"} font-bold leading-5 text-[#1A1220]`}
+                    className={`${wrapValue ? "break-words text-[12px]" : "break-words text-[14px] tabular-nums"} font-bold leading-5 text-[#1A1220]`}
                     title={String(value)}
                 >
                     {value}
                 </p>
 
-                <p className="mt-0.5 text-[10px] font-medium leading-4 text-[#7A6A84] sm:text-[11px]">
+                <p className="mt-0.5 text-[11px] leading-4 text-[#806A8C]">
                     {label}
                 </p>
             </div>
@@ -2111,9 +2104,9 @@ function EmptyBranches({
     onAction: () => void;
 }) {
     return (
-        <div className="rounded-[14px] border border-[#E6DDF0] bg-white px-5 py-14 text-center shadow-sm">
-            <h2 className="text-[16px] font-bold text-[#1A1220]">{title}</h2>
-            <p className="mx-auto mt-1 max-w-md text-sm text-[#7A6A84]">
+        <div className="rounded-xl border border-[#EEE7F5] bg-[#FAF8FC] px-5 py-10 text-center">
+            <h2 className="text-[15px] font-bold text-[#1A1220]">{title}</h2>
+            <p className="mx-auto mt-1 max-w-md text-[12px] text-[#86778F]">
                 {detail}
             </p>
 
@@ -2178,7 +2171,7 @@ function InactiveReasonFields({
                 <div className="mt-3">
                     <label
                         htmlFor={`${idPrefix}-other-inactive-reason`}
-                        className="mb-2 block text-sm font-medium text-[#1A1220]"
+                        className="mb-1.5 block text-[12px] font-medium text-[#25153D]"
                     >
                         Other reason
                     </label>
@@ -2219,7 +2212,7 @@ function TextInput({
 }) {
     return (
         <div>
-            <label className="mb-2 block text-sm font-medium text-[#1A1220]">
+            <label className="mb-1.5 block text-[12px] font-medium text-[#25153D]">
                 {label}
             </label>
 
@@ -2228,7 +2221,7 @@ function TextInput({
                 value={value}
                 placeholder={placeholder}
                 onChange={(event) => onChange(event.target.value)}
-                className="h-[42px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-3 text-sm text-[#1A1220] outline-none placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                className="h-[38px] w-full rounded-xl border border-[#E6DDF0] bg-white px-3 text-[12px] text-[#1A1220] outline-none placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
             />
         </div>
     );
@@ -2244,7 +2237,7 @@ function AccessToggle({
     onChange: (checked: boolean) => void;
 }) {
     return (
-        <label className="flex items-center justify-between rounded-xl border border-[#EEE7F2] bg-[#FFFDF8] px-3 py-2.5 text-sm text-[#1A1220]">
+        <label className="flex items-center justify-between gap-2 rounded-xl border border-[#EEE7F5] bg-[#FAF8FC] px-3 py-2.5 text-[12px] text-[#25153D]">
             <span>{label}</span>
 
             <input

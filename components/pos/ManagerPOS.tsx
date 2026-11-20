@@ -19,7 +19,7 @@ import {
     WalletCards,
 } from "lucide-react";
 import type { UsePOSReturn } from "@/hooks/usePOS";
-import { createVatReportPdf, createOrderInvoicePdf, type OwnerOrderInvoice } from "./OwnerPOS";
+import { createVatReportPdf, createOrderInvoicePdf, fetchOrderInvoiceDetail, type OwnerOrderInvoice } from "./OwnerPOS";
 import {
     OrdersTable,
     formatPOSOrderTime,
@@ -135,11 +135,12 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
         setExpandedOrderKey(key);
         if (!details[key]) void loadDetail(order, key);
     };
-    const downloadInvoice = (detail: OwnerOrderInvoice, key: string) => {
+    const downloadInvoice = async (detail: OwnerOrderInvoice, key: string) => {
         if (downloadingInvoice || !detail.itemsAvailable) return;
         setDownloadingInvoice(key);
         try {
-            downloadFile(createOrderInvoicePdf(detail),
+            const invoiceDetail = await fetchOrderInvoiceDetail(detail.orderId, detail.salesSource);
+            downloadFile(createOrderInvoicePdf(invoiceDetail),
                 `stocknbook-order-${detail.orderId.replace(/[^A-Za-z0-9_-]/g, "_")}.pdf`);
         } catch (error) {
             setDetailErrors(previous => ({ ...previous,
@@ -420,34 +421,10 @@ export function BranchPOSView({ pos }: { pos: UsePOSReturn }) {
     const itemsSoldToday = completedTodayOrders.reduce((total, order) =>
         total + order.items.reduce((sum, item) => sum + Number(item.quantity || 0), 0), 0);
 
-    // Use the original completed order item snapshots for the same A4 invoice-style
-    // internal copy used by Owner and Manager; never infer missing line prices.
-    const downloadStaffInvoice = (order: Order) => {
-        const lines = order.items.map(item => ({
-            name: item.name, quantity: item.quantity,
-            unitPrice: item.unitPrice == null ? null : Number(item.unitPrice),
-            lineTotal: item.lineTotal == null ? null : Number(item.lineTotal),
-        }));
-        const itemsAvailable = lines.length > 0 && lines.every(item =>
-            Boolean(item.name.trim()) && Number(item.quantity) > 0 &&
-            item.unitPrice != null && Number.isFinite(item.unitPrice) &&
-            item.lineTotal != null && Number.isFinite(item.lineTotal));
-        if (!itemsAvailable) return;
-        const detail: OwnerOrderInvoice = {
-            orderId: order.id,
-            storeName: sessionStorage.getItem("business_name") ||
-                sessionStorage.getItem("store_name") ||
-                sessionStorage.getItem("stocknbook_store_name") || "StockNBook Store",
-            branchName: order.branchName || pos.activeBranchName || "Assigned Branch",
-            salesSource: "WALK_IN", customerName: "Walk-in", date: order.date,
-            createdAt: order.createdAt || order.date,
-            paymentMode: order.paymentMode || "Not recorded",
-            taxType: order.taxType || null,
-            vatAmount: order.taxType?.toUpperCase() === "VAT" ? Number(order.vatAmount || 0) : null,
-            total: Number(order.total), items: lines, itemsAvailable,
-            detailNotice: null, officialInvoiceNumber: null,
-        };
+    // Retrieve the same database-backed invoice detail as Owner and Manager.
+    const downloadStaffInvoice = async (order: Order) => {
         try {
+            const detail = await fetchOrderInvoiceDetail(order.id, "WALK_IN");
             const pdf = createOrderInvoicePdf(detail);
             const url = URL.createObjectURL(pdf);
             const link = document.createElement("a");

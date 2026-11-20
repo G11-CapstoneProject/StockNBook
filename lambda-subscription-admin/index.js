@@ -1092,14 +1092,126 @@ async function sendSubscriptionDecisionEmail(toEmail, details) {
         socket.end();
     }
 }
+/*
+ * Subscription plan synchronization (mirrors lambda-auth).
+ * subscriptions + plans is the authoritative current plan. stores.plan and
+ * users.plan are cached copies of plans.plan_code for the whole business and
+ * are updated in the same transaction whenever the effective plan changes.
+ */
+async function syncStorePlanCode(connection, storeId, planCode) {
+    const code = String(planCode || "").trim().toLowerCase();
+    if (!code || !Number(storeId)) return;
+    await connection.execute(
+        "UPDATE stores SET plan = ? WHERE id = ? AND plan <> ?",
+        [code, Number(storeId), code]
+    );
+    // users.updated_at is preserved: the account itself did not change.
+    await connection.execute(
+        "UPDATE users SET plan = ?, updated_at = updated_at WHERE store_id = ? AND plan <> ?",
+        [code, Number(storeId), code]
+    );
+}
+
+// Reverts every Growth/Scale subscription whose expiration date has passed
+// without an approved renewal to the active Starter plan. Each store is
+// processed in its own short transaction with the subscription row locked
+// (approvePayment locks the same row), and the expired condition is
+// re-checked under that lock, so a renewal approved first is never
+// overwritten. Payment history is never modified. Safe to run repeatedly.
+async function revertExpiredPaidSubscriptions(connection) {
+    const results = { reverted: 0 };
+    const [starterRows] = await connection.execute(
+        `SELECT id, plan_code FROM plans
+         WHERE LOWER(plan_code) = 'starter'
+         ORDER BY is_archived ASC, id ASC LIMIT 1`
+    );
+    const starter = starterRows[0];
+    if (!starter) {
+        console.error("[stocknbook-expiry] Starter plan is not configured; expired subscriptions were not reverted.");
+        return results;
+    }
+
+    const [candidates] = await connection.execute(
+        `SELECT sub.id AS subscription_id, sub.store_id
+         FROM subscriptions sub
+                  INNER JOIN plans p ON p.id = sub.plan_id
+         WHERE p.price > 0
+           AND sub.expires_at IS NOT NULL
+           AND DATE(sub.expires_at) < CURDATE()
+           AND LOWER(sub.status) IN ('active', 'expiring', 'expired')
+         ORDER BY sub.id ASC`
+    );
+
+    for (const candidate of candidates) {
+        await connection.beginTransaction();
+        try {
+            const [rows] = await connection.execute(
+                `SELECT sub.id, sub.store_id, sub.status, sub.expires_at, p.price,
+                        CASE WHEN sub.expires_at IS NOT NULL AND DATE(sub.expires_at) < CURDATE()
+                             THEN 1 ELSE 0 END AS is_past_expiry
+                 FROM subscriptions sub
+                          INNER JOIN plans p ON p.id = sub.plan_id
+                 WHERE sub.id = ?
+                     FOR UPDATE`,
+                [candidate.subscription_id]
+            );
+            const current = rows[0];
+            const stillExpiredPaid =
+                current &&
+                Number(current.price) > 0 &&
+                Number(current.is_past_expiry) === 1 &&
+                ["active", "expiring", "expired"].includes(String(current.status || "").toLowerCase());
+
+            if (!stillExpiredPaid) {
+                await connection.commit();
+                continue;
+            }
+
+            // Keep the expiry notice for the paid period (sent below).
+            await connection.execute(
+                `INSERT IGNORE INTO subscription_expiry_notices
+                     (subscription_id, expires_on, notice_type, delivery_status)
+                 SELECT id, DATE(expires_at), 'EXPIRED', 'PENDING'
+                 FROM subscriptions WHERE id = ? AND expires_at IS NOT NULL`,
+                [current.id]
+            );
+            await connection.execute(
+                `UPDATE subscriptions
+                 SET plan_id = ?,
+                     status = 'active',
+                     started_at = DATE_ADD(DATE(expires_at), INTERVAL 1 DAY),
+                     expires_at = NULL,
+                     last_renewed_at = NULL,
+                     scheduled_plan_id = NULL,
+                     scheduled_change_at = NULL
+                 WHERE id = ?
+                   AND expires_at IS NOT NULL
+                   AND DATE(expires_at) < CURDATE()`,
+                [starter.id, current.id]
+            );
+            await syncStorePlanCode(connection, current.store_id, starter.plan_code);
+            await connection.commit();
+            results.reverted++;
+        } catch (error) {
+            await connection.rollback();
+            console.error("[stocknbook-expiry] Unable to revert an expired subscription:", {
+                subscription_id: candidate.subscription_id,
+                message: error?.message || "unknown error",
+            });
+        }
+    }
+    return results;
+}
+
 async function runExpiryNotificationJob() {
     const connection = await pool.getConnection();
-    const results = { candidates: 0, sent: 0, failed: 0, skipped: 0 };
+    const results = { candidates: 0, sent: 0, failed: 0, skipped: 0, reverted: 0 };
     try {
         // Only non-cancelled paid plans. The seven-day email is sent at most
         // once per subscription/expiration date; missed job days are recovered.
         const [subscriptions] = await connection.execute(`
             SELECT sub.id AS subscription_id, sub.expires_at,
+                   DATE_FORMAT(sub.expires_at, '%Y-%m-%d') AS expires_on_text,
                    s.store_name, s.email AS owner_email, p.plan_name AS plan_name,
                    DATEDIFF(DATE(sub.expires_at), CURDATE()) AS days_remaining
             FROM subscriptions sub
@@ -1110,20 +1222,10 @@ async function runExpiryNotificationJob() {
               AND DATE(sub.expires_at) BETWEEN DATE_SUB(CURDATE(), INTERVAL 7 DAY)
               AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)
             ORDER BY sub.id ASC`);
-        for (const sub of subscriptions) {
-            const days = Number(sub.days_remaining);
-            // A grace period never postpones the historical expiration notice.
-            const type = days < 0 ? 'EXPIRED' : days <= 7 ? 'EXPIRING_7_DAYS' : null;
-            if (!type) continue;
-            results.candidates++;
-            const expiry = normalizeDate(sub.expires_at);
-            await connection.execute(`
-                        INSERT IGNORE INTO subscription_expiry_notices
-                  (subscription_id, expires_on, notice_type, delivery_status)
-                VALUES (?, ?, ?, 'PENDING')`,
-                [sub.subscription_id, expiry, type]);
-            // Atomic claim prevents two simultaneous jobs from duplicating email.
-            // An SMTP error can be retried after five minutes.
+        // Claims and sends one notice. The atomic claim prevents two
+        // simultaneous jobs from duplicating email; an SMTP error can be
+        // retried after five minutes.
+        const deliverNotice = async (sub, expiry, type) => {
             const [claim] = await connection.execute(`
                         UPDATE subscription_expiry_notices
                         SET delivery_status = 'SENDING', attempts = attempts + 1,
@@ -1135,7 +1237,7 @@ async function runExpiryNotificationJob() {
                                (delivery_status = 'SENDING' AND
                                 last_attempt_at < DATE_SUB(NOW(), INTERVAL 30 MINUTE)))`,
                 [sub.subscription_id, expiry, type]);
-            if (!claim.affectedRows) { results.skipped++; continue; }
+            if (!claim.affectedRows) { results.skipped++; return; }
             try {
                 const email = String(sub.owner_email || '').trim().toLowerCase();
                 if (!email) throw new Error('Store owner email is missing.');
@@ -1162,6 +1264,55 @@ async function runExpiryNotificationJob() {
                     [String(error?.message || 'SMTP failure').slice(0, 500), sub.subscription_id, expiry, type]);
                 results.failed++;
             }
+        };
+
+        for (const sub of subscriptions) {
+            const days = Number(sub.days_remaining);
+            // A grace period never postpones the historical expiration notice.
+            const type = days < 0 ? 'EXPIRED' : days <= 7 ? 'EXPIRING_7_DAYS' : null;
+            if (!type) continue;
+            results.candidates++;
+            // The calendar date is formatted by MySQL so a non-UTC Node process
+            // cannot shift it to the previous day (one notice per expiry date).
+            const expiry = sub.expires_on_text || normalizeDate(sub.expires_at);
+            await connection.execute(`
+                        INSERT IGNORE INTO subscription_expiry_notices
+                  (subscription_id, expires_on, notice_type, delivery_status)
+                VALUES (?, ?, ?, 'PENDING')`,
+                [sub.subscription_id, expiry, type]);
+            await deliverNotice(sub, expiry, type);
+        }
+
+        // Expired Growth/Scale subscriptions without an approved renewal return
+        // to the active Starter plan (also enforced on demand by lambda-auth).
+        const reversion = await revertExpiredPaidSubscriptions(connection);
+        results.reverted = reversion.reverted;
+
+        // A subscription reverted before this job ran (on demand in lambda-auth)
+        // no longer has a paid expires_at, so its queued EXPIRED notice is
+        // delivered here. The plan name comes from its last approved payment.
+        const [queuedNotices] = await connection.execute(`
+            SELECT n.subscription_id, DATE_FORMAT(n.expires_on, '%Y-%m-%d') AS expires_on_text, n.notice_type,
+                   s.store_name, s.email AS owner_email,
+                   COALESCE((
+                       SELECT pl.plan_name
+                       FROM subscription_payments sp
+                                INNER JOIN plans pl ON pl.id = sp.plan_id
+                       WHERE sp.subscription_id = n.subscription_id
+                         AND LOWER(sp.status) = 'approved'
+                       ORDER BY sp.reviewed_at DESC, sp.id DESC
+                       LIMIT 1
+                   ), 'paid') AS plan_name
+            FROM subscription_expiry_notices n
+                     INNER JOIN subscriptions sub ON sub.id = n.subscription_id
+                     INNER JOIN stores s ON s.id = sub.store_id
+            WHERE n.notice_type = 'EXPIRED'
+              AND n.delivery_status IN ('PENDING', 'FAILED', 'SENDING')
+              AND n.expires_on >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+            ORDER BY n.id ASC`);
+        for (const notice of queuedNotices) {
+            results.candidates++;
+            await deliverNotice(notice, notice.expires_on_text, 'EXPIRED');
         }
         return results;
     } finally {
@@ -1275,10 +1426,9 @@ async function approvePayment(connection, paymentId, admin) {
 
         // Approval also updates the store-level label atomically with the
         // paid subscription. The payment and audit records remain unchanged.
-        await connection.execute(
-            "UPDATE stores SET plan = ? WHERE id = ?",
-            [plan.plan_code, payment[c.storeId]]
-        );
+        // stores.plan and users.plan are cached copies of plans.plan_code for
+        // the whole business (Owner, Managers and Staff share one plan).
+        await syncStorePlanCode(connection, payment[c.storeId], plan.plan_code);
         await connection.commit();
 
         // Once committed, an email outage must not undo a genuine approval.

@@ -18,12 +18,14 @@ import {
     Copy,
     Filter,
     Mail,
+    Pencil,
     RefreshCw,
     Search,
     UserCheck,
     UsersRound,
     UserX,
     X,
+    XCircle,
 } from "lucide-react";
 
 type ManagerStatus = "active" | "inactive" | "pending";
@@ -33,9 +35,36 @@ type BranchManager = {
     employeeCode: string;
     name: string;
     email: string;
+    phone: string;
     branch: string;
+    branchId: number;
+    emailVerified: boolean;
     status: ManagerStatus;
 };
+
+type BranchOption = {
+    id: number;
+    name: string;
+    managerEmail: string;
+};
+
+type ManagerActionResult = {
+    ok: boolean;
+    status: number;
+    data: Record<string, unknown>;
+};
+
+// Same rule as the backend: 11-digit Philippine mobile number starting with 09
+// (spaces, dashes and the +63 prefix are accepted and normalized server-side).
+function isValidPhilippineMobile(value: string) {
+    const digits = value.replace(/\D/g, "");
+    const local = digits.startsWith("63")
+        ? `0${digits.slice(2)}`
+        : digits.length === 10 && digits.startsWith("9")
+            ? `0${digits}`
+            : digits;
+    return /^09\d{9}$/.test(local);
+}
 
 type ManagerInviteDelivery = {
     link: string;
@@ -89,11 +118,16 @@ function normalizeManager(value: unknown): BranchManager {
             asText(manager.email) ||
             asText(manager.manager_email) ||
             "No email provided",
+        phone:
+            asText(manager.phone) ||
+            asText(manager.manager_phone),
         branch:
             asText(manager.branch) ||
             asText(manager.branch_name) ||
             asText(manager.branchName) ||
             "No branch assigned",
+        branchId: asNumber(manager.branch_id ?? manager.branchId),
+        emailVerified: manager.email_verified === true,
         status: normalizeStatus(
             manager.status ??
             manager.manager_status ??
@@ -159,6 +193,23 @@ export default function BranchManagersPage() {
         useState<ManagerInviteDelivery | null>(null);
     const [resendingManagerId, setResendingManagerId] =
         useState<number | null>(null);
+
+    // Owner manager account management (details, branch, email, invitation).
+    const [editingManager, setEditingManager] = useState<BranchManager | null>(null);
+    const [branchOptions, setBranchOptions] = useState<BranchOption[]>([]);
+    const [editName, setEditName] = useState("");
+    const [editPhone, setEditPhone] = useState("");
+    const [editBranchId, setEditBranchId] = useState(0);
+    const [savingDetails, setSavingDetails] = useState(false);
+    const [editError, setEditError] = useState("");
+    const [newEmail, setNewEmail] = useState("");
+    const [emailStep, setEmailStep] = useState<"idle" | "code">("idle");
+    const [emailCode, setEmailCode] = useState("");
+    const [emailBusy, setEmailBusy] = useState(false);
+    const [emailMessage, setEmailMessage] = useState("");
+    const [emailResendIn, setEmailResendIn] = useState(0);
+    const [confirmCancelInvite, setConfirmCancelInvite] = useState<BranchManager | null>(null);
+    const [cancellingManagerId, setCancellingManagerId] = useState<number | null>(null);
 
     const loadManagers = useCallback(async () => {
         const token =
@@ -242,6 +293,12 @@ export default function BranchManagersPage() {
         const timeout = window.setTimeout(() => setNotice(null), 5600);
         return () => window.clearTimeout(timeout);
     }, [notice]);
+
+    useEffect(() => {
+        if (emailResendIn <= 0) return;
+        const timer = window.setTimeout(() => setEmailResendIn((value) => Math.max(0, value - 1)), 1000);
+        return () => window.clearTimeout(timer);
+    }, [emailResendIn]);
 
     useEffect(() => {
         const updateDateTime = () => setCurrentDateTime(new Date());
@@ -406,6 +463,206 @@ export default function BranchManagersPage() {
             setError(error instanceof Error ? error.message : "Unable to change manager access.");
             setNotice({ title: "Unable to update access", message: error instanceof Error ? error.message : "Try again.", kind: "error" });
         } finally { setUpdatingManagerId(null); }
+    };
+
+    const postManagerAction = async (
+        action: string,
+        payload: Record<string, unknown>,
+    ): Promise<ManagerActionResult> => {
+        const token = sessionStorage.getItem("token") || localStorage.getItem("token");
+        if (!token) {
+            router.push("/");
+            return { ok: false, status: 401, data: { error: "Please sign in again." } };
+        }
+        const response = await fetch("/api/branch-managers", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ action, ...payload }),
+        });
+        const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+        return { ok: response.ok, status: response.status, data };
+    };
+
+    const resultMessage = (data: Record<string, unknown>, fallback: string) =>
+        asText(data.error) || asText(data.message) || fallback;
+
+    const loadBranchOptions = async () => {
+        const token = sessionStorage.getItem("token") || localStorage.getItem("token");
+        if (!token) return;
+        try {
+            const response = await fetch("/api/branches", {
+                method: "GET",
+                headers: { Authorization: `Bearer ${token}` },
+                cache: "no-store",
+            });
+            const data = await response.json().catch(() => ({}));
+            const records: unknown[] = Array.isArray(data.branches) ? data.branches : [];
+            setBranchOptions(records.map((item) => {
+                const branch = item && typeof item === "object" ? (item as RawManager) : {};
+                return {
+                    id: asNumber(branch.id),
+                    name: asText(branch.branch_name) || "Unnamed branch",
+                    managerEmail: asText(branch.manager_email).toLowerCase(),
+                };
+            }).filter((branch) => branch.id > 0));
+        } catch {
+            setBranchOptions([]);
+        }
+    };
+
+    const openManagerEditor = (manager: BranchManager) => {
+        setEditingManager(manager);
+        setEditName(manager.name === "Unnamed manager" ? "" : manager.name);
+        setEditPhone(manager.phone);
+        setEditBranchId(manager.branchId);
+        setEditError("");
+        setNewEmail("");
+        setEmailStep("idle");
+        setEmailCode("");
+        setEmailMessage("");
+        setEmailResendIn(0);
+        void loadBranchOptions();
+    };
+
+    const closeManagerEditor = () => {
+        if (savingDetails || emailBusy) return;
+        setEditingManager(null);
+    };
+
+    const saveManagerDetails = async () => {
+        if (!editingManager) return;
+        const name = editName.trim();
+        if (name.length < 2 || name.length > 120) {
+            setEditError("Enter a valid manager name.");
+            return;
+        }
+        if (editPhone.trim() && !isValidPhilippineMobile(editPhone)) {
+            setEditError("Enter an 11-digit Philippine mobile number starting with 09.");
+            return;
+        }
+        setSavingDetails(true);
+        setEditError("");
+        try {
+            const result = await postManagerAction("update_manager_details", {
+                manager_id: editingManager.id,
+                full_name: name,
+                phone: editPhone.trim(),
+                branch_id: editBranchId || undefined,
+            });
+            if (!result.ok) {
+                setEditError(resultMessage(result.data, "Unable to update the manager."));
+                return;
+            }
+            const inviteLink = asText(result.data.invite_link);
+            if (inviteLink) {
+                setLatestManagerInvite({
+                    link: inviteLink,
+                    email: editingManager.email,
+                    emailSent: result.data.email_sent === true,
+                    emailError: asText(result.data.email_error),
+                });
+            }
+            setEditingManager(null);
+            await loadManagers();
+            setNotice({ title: "Manager updated", message: resultMessage(result.data, "Manager details updated."), kind: "success" });
+        } catch (error) {
+            setEditError(error instanceof Error ? error.message : "Unable to update the manager.");
+        } finally {
+            setSavingDetails(false);
+        }
+    };
+
+    const requestEmailChange = async () => {
+        if (!editingManager || emailBusy || emailResendIn > 0) return;
+        const email = newEmail.trim().toLowerCase();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+            setEmailMessage("Enter a valid email address.");
+            return;
+        }
+        setEmailBusy(true);
+        setEmailMessage("");
+        try {
+            const result = await postManagerAction("request_manager_email_change", {
+                manager_id: editingManager.id,
+                new_email: email,
+            });
+            const retryAfter = Number(result.data.retry_after_seconds || 0);
+            if (retryAfter > 0) setEmailResendIn(retryAfter);
+            if (!result.ok) {
+                setEmailMessage(resultMessage(result.data, "Unable to change the email address."));
+                return;
+            }
+            if (result.data.verification_required === true) {
+                setEmailStep("code");
+                setEmailCode("");
+                setEmailResendIn(Number(result.data.resend_in || 60));
+                setEmailMessage(resultMessage(result.data, "A verification code was sent to the new email address."));
+                return;
+            }
+            const inviteLink = asText(result.data.invite_link);
+            if (inviteLink) {
+                setLatestManagerInvite({
+                    link: inviteLink,
+                    email,
+                    emailSent: result.data.email_sent === true,
+                    emailError: asText(result.data.email_error),
+                });
+            }
+            setEditingManager(null);
+            await loadManagers();
+            setNotice({ title: "Invitation email updated", message: resultMessage(result.data, "A new invitation was issued."), kind: result.data.email_sent === true ? "success" : "error" });
+        } catch (error) {
+            setEmailMessage(error instanceof Error ? error.message : "Unable to change the email address.");
+        } finally {
+            setEmailBusy(false);
+        }
+    };
+
+    const confirmEmailChange = async () => {
+        if (!editingManager || emailBusy) return;
+        if (!/^\d{6}$/.test(emailCode)) {
+            setEmailMessage("Enter the complete 6-digit verification code.");
+            return;
+        }
+        setEmailBusy(true);
+        setEmailMessage("");
+        try {
+            const result = await postManagerAction("confirm_manager_email_change", {
+                manager_id: editingManager.id,
+                new_email: newEmail.trim().toLowerCase(),
+                otp: emailCode,
+            });
+            if (!result.ok) {
+                setEmailMessage(resultMessage(result.data, "Unable to verify the code."));
+                return;
+            }
+            setEditingManager(null);
+            await loadManagers();
+            setNotice({ title: "Login email updated", message: resultMessage(result.data, "The manager's login email was updated."), kind: "success" });
+        } catch (error) {
+            setEmailMessage(error instanceof Error ? error.message : "Unable to verify the code.");
+        } finally {
+            setEmailBusy(false);
+        }
+    };
+
+    const cancelManagerInvite = async (manager: BranchManager) => {
+        setCancellingManagerId(manager.id);
+        try {
+            const result = await postManagerAction("cancel_manager_invite", { manager_id: manager.id });
+            if (!result.ok) {
+                setNotice({ title: "Unable to cancel invitation", message: resultMessage(result.data, "Please try again."), kind: "error" });
+                return;
+            }
+            setConfirmCancelInvite(null);
+            setLatestManagerInvite((current) => (current && current.email === manager.email ? null : current));
+            await loadManagers();
+            setNotice({ title: "Invitation cancelled", message: resultMessage(result.data, "The invitation link can no longer be used."), kind: "success" });
+        } catch (error) {
+            setNotice({ title: "Unable to cancel invitation", message: error instanceof Error ? error.message : "Please try again.", kind: "error" });
+        } finally {
+            setCancellingManagerId(null);
+        }
     };
 
     return (
@@ -694,6 +951,16 @@ export default function BranchManagersPage() {
                                                                 <button
                                                                     type="button"
                                                                     disabled={isUpdating}
+                                                                    onClick={() => openManagerEditor(manager)}
+                                                                    aria-label={`Manage ${manager.name}`}
+                                                                    className="inline-flex h-[34px] items-center justify-center gap-1.5 rounded-lg bg-[#F1EBFF] px-3 text-xs font-semibold text-[#6D35D4] transition hover:bg-[#E6DCFF] disabled:cursor-not-allowed disabled:opacity-60"
+                                                                >
+                                                                    <Pencil size={13} />
+                                                                    Manage
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    disabled={isUpdating}
                                                                     onClick={() => setConfirmAccessChange(manager)}
                                                                     className={`inline-flex h-[34px] items-center justify-center gap-1.5 rounded-lg px-3 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-60 ${manager.status === "inactive"
                                                                         ? "bg-[#E8F7EE] text-[#138342] hover:bg-[#DDF5E5]"
@@ -741,7 +1008,7 @@ export default function BranchManagersPage() {
                                                 <td className="px-2.5 py-2.5">{manager.email}</td>
                                                 <td className="px-2.5 py-2.5">{manager.branch}</td>
                                                 <td className="px-2.5 py-2.5"><span className="font-semibold text-[#A56607]">Pending</span></td>
-                                                <td className="px-2.5 py-2.5"><button type="button" onClick={() => void resendManagerInvite(manager)} disabled={resendingManagerId === manager.id} className="rounded-lg bg-[#F1EBFF] px-3 py-1.5 font-semibold text-[#6D35D4] hover:bg-[#E6DCFF] disabled:opacity-50">{resendingManagerId === manager.id ? "Resending..." : "Resend Invite"}</button></td>
+                                                <td className="px-2.5 py-2.5"><div className="flex flex-wrap items-center justify-center gap-1.5"><button type="button" onClick={() => openManagerEditor(manager)} disabled={resendingManagerId === manager.id || cancellingManagerId === manager.id} className="rounded-lg border border-[#E6DDF0] bg-white px-3 py-1.5 font-semibold text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-50">Manage</button><button type="button" onClick={() => void resendManagerInvite(manager)} disabled={resendingManagerId === manager.id || cancellingManagerId === manager.id} className="rounded-lg bg-[#F1EBFF] px-3 py-1.5 font-semibold text-[#6D35D4] hover:bg-[#E6DCFF] disabled:opacity-50">{resendingManagerId === manager.id ? "Resending..." : "Resend Invite"}</button><button type="button" onClick={() => setConfirmCancelInvite(manager)} disabled={resendingManagerId === manager.id || cancellingManagerId === manager.id} className="rounded-lg bg-[#FDEDED] px-3 py-1.5 font-semibold text-[#C13333] hover:bg-[#FADDDD] disabled:opacity-50">Cancel</button></div></td>
                                             </tr>)}</tbody>
                                         </table>
                                     </div>
@@ -755,6 +1022,76 @@ export default function BranchManagersPage() {
                         <div role="dialog" aria-modal="true" aria-labelledby="manager-status-dialog-title" className="w-full max-w-md rounded-[20px] border border-[#E6DDF0] bg-white p-6 shadow-2xl">
                             <div className="flex items-start justify-between gap-4"><div><h2 id="manager-status-dialog-title" className="text-lg font-bold text-[#1A1220]">{confirmAccessChange.status === "inactive" ? "Reactivate Manager Access" : "Deactivate Manager Access"}</h2><p className="mt-2 text-sm leading-6 text-[#7A6A84]">{confirmAccessChange.status === "inactive" ? `Restore ${confirmAccessChange.name}'s login access?` : `Disable ${confirmAccessChange.name}'s login access?`} Their name, account, branch assignment, and employee records will remain saved.</p></div><button type="button" aria-label="Close" disabled={!!updatingManagerId} onClick={() => setConfirmAccessChange(null)}><X size={18}/></button></div>
                             <div className="mt-6 flex justify-end gap-2"><button type="button" disabled={!!updatingManagerId} onClick={() => setConfirmAccessChange(null)} className="rounded-xl border border-[#E6DDF0] px-4 py-2 text-sm font-semibold text-[#2B174C]">Cancel</button><button type="button" disabled={!!updatingManagerId} onClick={() => void updateManagerAccess(confirmAccessChange)} className={`rounded-xl px-4 py-2 text-sm font-semibold text-white disabled:opacity-50 ${confirmAccessChange.status === "inactive" ? "bg-[#138342]" : "bg-[#A33E20]"}`}>{updatingManagerId ? "Updating..." : confirmAccessChange.status === "inactive" ? "Reactivate Access" : "Deactivate Access"}</button></div>
+                        </div>
+                    </div>}
+
+                    {editingManager && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45 p-4" onMouseDown={e => { if (e.target === e.currentTarget) closeManagerEditor(); }}>
+                        <div role="dialog" aria-modal="true" aria-labelledby="manager-editor-title" className="max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-[20px] border border-[#E6DDF0] bg-white p-6 shadow-2xl">
+                            <div className="flex items-start justify-between gap-4">
+                                <div>
+                                    <h2 id="manager-editor-title" className="text-lg font-bold text-[#1A1220]">Manage Branch Manager</h2>
+                                    <p className="mt-1 text-sm text-[#7A6A84]">Update account information, branch assignment, or login email. Manager module access is assigned automatically by the Manager role.</p>
+                                </div>
+                                <button type="button" aria-label="Close" disabled={savingDetails || emailBusy} onClick={closeManagerEditor}><X size={18} /></button>
+                            </div>
+
+                            <dl className="mt-4 grid grid-cols-2 gap-3 rounded-xl border border-[#EEE7F2] bg-[#FFFCF8] p-3.5 text-xs">
+                                <div><dt className="font-semibold uppercase tracking-wide text-[#806A8C]">Employee ID</dt><dd className="mt-0.5 font-semibold text-[#2B174C]">{editingManager.employeeCode || "—"}</dd></div>
+                                <div><dt className="font-semibold uppercase tracking-wide text-[#806A8C]">Status</dt><dd className={`mt-0.5 font-semibold ${getStatusClass(editingManager.status)}`}>{getStatusLabel(editingManager.status)}</dd></div>
+                                <div className="col-span-2"><dt className="font-semibold uppercase tracking-wide text-[#806A8C]">Login email</dt><dd className="mt-0.5 break-all text-[#2B174C]">{editingManager.email}{editingManager.status !== "pending" && editingManager.emailVerified ? " (verified)" : ""}</dd></div>
+                            </dl>
+
+                            <div className="mt-5 space-y-4">
+                                <div>
+                                    <label htmlFor="manager-edit-name" className="mb-1.5 block text-sm font-medium text-[#1A1220]">Full name</label>
+                                    <input id="manager-edit-name" value={editName} onChange={e => setEditName(e.target.value)} disabled={savingDetails} placeholder="Manager full name" className="h-[44px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-3.5 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:cursor-not-allowed disabled:bg-[#F7F4F8] disabled:text-[#8A7D92]" />
+                                </div>
+                                <div>
+                                    <label htmlFor="manager-edit-phone" className="mb-1.5 block text-sm font-medium text-[#1A1220]">Phone number</label>
+                                    <input id="manager-edit-phone" type="tel" inputMode="tel" value={editPhone} onChange={e => setEditPhone(e.target.value)} disabled={savingDetails} placeholder="0912 345 6789" className="h-[44px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-3.5 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:cursor-not-allowed disabled:bg-[#F7F4F8] disabled:text-[#8A7D92]" />
+                                    <p className="mt-1 text-xs text-[#7A6A84]">Enter an 11-digit Philippine mobile number starting with 09.</p>
+                                </div>
+                                <div>
+                                    <label htmlFor="manager-edit-branch" className="mb-1.5 block text-sm font-medium text-[#1A1220]">Assigned branch</label>
+                                    <select id="manager-edit-branch" value={editBranchId || ""} onChange={e => setEditBranchId(Number(e.target.value))} disabled={savingDetails} className="h-[44px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-3.5 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:cursor-not-allowed disabled:bg-[#F7F4F8] disabled:text-[#8A7D92]">
+                                        {!branchOptions.some(branch => branch.id === editingManager.branchId) && editingManager.branchId > 0 && <option value={editingManager.branchId}>{editingManager.branch}</option>}
+                                        {branchOptions.map(branch => {
+                                            const occupied = branch.id !== editingManager.branchId && Boolean(branch.managerEmail) && branch.managerEmail !== editingManager.email.toLowerCase();
+                                            return <option key={branch.id} value={branch.id} disabled={occupied}>{branch.name}{occupied ? " (has a manager)" : ""}</option>;
+                                        })}
+                                    </select>
+                                    <p className="mt-1 text-xs text-[#7A6A84]">{editingManager.status === "pending" ? "Changing the branch issues a new invitation; the previous link stops working." : "After a branch change the manager must sign in again and can access only the new branch."}</p>
+                                </div>
+                                {editError && <p role="alert" className="rounded-xl border border-[#F3C4C4] bg-[#FFF2F2] px-3 py-2 text-xs font-medium text-[#9B1C1C]">{editError}</p>}
+                                <div className="flex justify-end">
+                                    <button type="button" onClick={() => void saveManagerDetails()} disabled={savingDetails || emailBusy} className="rounded-xl bg-[#2B174C] px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:opacity-50">{savingDetails ? "Saving..." : "Save details"}</button>
+                                </div>
+                            </div>
+
+                            <div className="mt-5 border-t border-[#E6DDF0] pt-5">
+                                <h3 className="text-sm font-bold text-[#1A1220]">Change login email</h3>
+                                <p className="mt-1 text-xs leading-5 text-[#7A6A84]">{editingManager.status === "pending"
+                                    ? "The invitation is re-sent to the new address and the previous invitation link stops working."
+                                    : "A verification code is sent to the new address. The login email changes only after you enter the code the manager received. Passwords are never visible to or editable by the owner."}</p>
+                                <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                                    <input type="email" value={newEmail} onChange={e => { setNewEmail(e.target.value); if (emailStep === "code") { setEmailStep("idle"); setEmailCode(""); } }} disabled={emailBusy} placeholder="new.manager@email.com" aria-label="New login email" className="h-[44px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-3.5 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:cursor-not-allowed disabled:bg-[#F7F4F8] disabled:text-[#8A7D92]" />
+                                    <button type="button" onClick={() => void requestEmailChange()} disabled={emailBusy || emailResendIn > 0 || !newEmail.trim()} className="shrink-0 rounded-xl border border-[#E6DDF0] bg-white px-4 py-2 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:opacity-50">
+                                        {emailBusy && emailStep === "idle" ? "Sending..." : emailResendIn > 0 ? `Resend in ${emailResendIn}s` : editingManager.status === "pending" ? "Update & resend" : emailStep === "code" ? "Resend code" : "Send code"}
+                                    </button>
+                                </div>
+                                {emailStep === "code" && <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                                    <input value={emailCode} onChange={e => setEmailCode(e.target.value.replace(/\D/g, "").slice(0, 6))} disabled={emailBusy} inputMode="numeric" autoComplete="one-time-code" placeholder="6-digit code" aria-label="Verification code" className="h-[44px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-3.5 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:cursor-not-allowed disabled:bg-[#F7F4F8] disabled:text-[#8A7D92]" />
+                                    <button type="button" onClick={() => void confirmEmailChange()} disabled={emailBusy || emailCode.length !== 6} className="shrink-0 rounded-xl bg-[#2B174C] px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:opacity-50">{emailBusy ? "Verifying..." : "Verify & update"}</button>
+                                </div>}
+                                {emailMessage && <p role="status" className="mt-2 text-xs text-[#5F4E75]">{emailMessage}</p>}
+                            </div>
+                        </div>
+                    </div>}
+
+                    {confirmCancelInvite && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45 p-4" onMouseDown={e => { if (e.target === e.currentTarget && !cancellingManagerId) setConfirmCancelInvite(null); }}>
+                        <div role="dialog" aria-modal="true" aria-labelledby="cancel-invite-dialog-title" className="w-full max-w-md rounded-[20px] border border-[#E6DDF0] bg-white p-6 shadow-2xl">
+                            <div className="flex items-start justify-between gap-4"><div><h2 id="cancel-invite-dialog-title" className="text-lg font-bold text-[#1A1220]">Cancel Manager Invitation</h2><p className="mt-2 text-sm leading-6 text-[#7A6A84]">Cancel the pending invitation for {confirmCancelInvite.name} ({confirmCancelInvite.email})? The invitation link will stop working and {confirmCancelInvite.branch} can be assigned a new manager.</p></div><button type="button" aria-label="Close" disabled={!!cancellingManagerId} onClick={() => setConfirmCancelInvite(null)}><X size={18}/></button></div>
+                            <div className="mt-6 flex justify-end gap-2"><button type="button" disabled={!!cancellingManagerId} onClick={() => setConfirmCancelInvite(null)} className="rounded-xl border border-[#E6DDF0] px-4 py-2 text-sm font-semibold text-[#2B174C]">Keep Invitation</button><button type="button" disabled={!!cancellingManagerId} onClick={() => void cancelManagerInvite(confirmCancelInvite)} className="inline-flex items-center gap-1.5 rounded-xl bg-[#A33E20] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"><XCircle size={15}/>{cancellingManagerId ? "Cancelling..." : "Cancel Invitation"}</button></div>
                         </div>
                     </div>}
 

@@ -491,7 +491,7 @@ export default function OwnerPackages() {
 
     return (
         <>
-            <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur">
+            <header className="sticky top-0 z-20 shrink-0 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur">
                 <div className="flex min-h-[72px] flex-wrap items-center justify-between gap-4 px-6 py-3">
                     <div className="flex items-center gap-3">
                         <h1 className="text-[25px] font-bold text-[#1A1220]">
@@ -524,9 +524,9 @@ export default function OwnerPackages() {
                 </div>
             </header>
 
-            <section className="px-6 py-4 font-sans">
-                <div className="space-y-3">
-                    <div className="grid gap-3 md:grid-cols-3">
+            <section className="flex flex-1 flex-col px-6 py-4 font-sans lg:min-h-[490px]">
+                <div className="flex flex-1 flex-col gap-3 lg:min-h-0">
+                    <div className="grid shrink-0 gap-3 md:grid-cols-3">
                         <PackageSummaryCard
                             title="Total Packages"
                             value={totalPackages}
@@ -568,8 +568,8 @@ export default function OwnerPackages() {
                         </div>
                     )}
 
-                    <section className="min-h-[440px] rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
-                        <div className="mb-3 flex items-center justify-between gap-4">
+                    <section className="flex min-h-[280px] flex-1 flex-col rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
+                        <div className="mb-3 flex shrink-0 items-center justify-between gap-4">
                             <div>
                                 <h2 className="text-[16px] font-bold text-[#1A1220]">
                                     {isAllBranchesView
@@ -604,7 +604,7 @@ export default function OwnerPackages() {
                             </button>
                         </div>
 
-                        <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_190px_160px_240px]">
+                        <div className="relative z-10 mb-5 grid shrink-0 gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_190px_160px_240px]">
                             <div className="relative">
                                 <Search
                                     size={15}
@@ -783,34 +783,36 @@ export default function OwnerPackages() {
                             </div>
                         </div>
 
-                        {(loadingBranches && branches.length === 0) ||
-                        ((loadingPackages || !hasLoadedSelectedScope) && packages.length === 0) ? (
-                            <ModuleSkeleton variant="packages" />
-                        ) : filteredPackages.length === 0 ? (
-                            <EmptyState
-                                title="No packages found."
-                                detail={
-                                    search || selectedCategory !== "All" || selectedStatus !== "All"
-                                        ? "Try different search, category, or status filters."
-                                        : isAllBranchesView
-                                            ? "No plans are available across branches yet."
-                                            : "This branch does not have plans yet."
-                                }
-                            />
-                        ) : (
-                            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                                {filteredPackages.map((pkg) => (
-                                    <PackageCard
-                                        key={pkg.id}
-                                        pkg={pkg}
-                                        branchName={branches.find((branch) => branch.id === Number(pkg.branch_id))?.name || (pkg.branch_id ? `Branch #${pkg.branch_id}` : "Not recorded")}
-                                        canManage={false}
-                                        onEdit={() => undefined}
-                                        onDelete={() => undefined}
-                                    />
-                                ))}
-                            </div>
-                        )}
+                        <div className="min-h-0 flex-1 lg:overflow-y-auto lg:overscroll-contain lg:p-1">
+                            {(loadingBranches && branches.length === 0) ||
+                            ((loadingPackages || !hasLoadedSelectedScope) && packages.length === 0) ? (
+                                <ModuleSkeleton variant="packages" />
+                            ) : filteredPackages.length === 0 ? (
+                                <EmptyState
+                                    title="No packages found."
+                                    detail={
+                                        search || selectedCategory !== "All" || selectedStatus !== "All"
+                                            ? "Try different search, category, or status filters."
+                                            : isAllBranchesView
+                                                ? "No plans are available across branches yet."
+                                                : "This branch does not have plans yet."
+                                    }
+                                />
+                            ) : (
+                                <div className="grid grid-cols-1 content-start gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                                    {filteredPackages.map((pkg) => (
+                                        <PackageCard
+                                            key={pkg.id}
+                                            pkg={pkg}
+                                            branchName={branches.find((branch) => branch.id === Number(pkg.branch_id))?.name || (pkg.branch_id ? `Branch #${pkg.branch_id}` : "Not recorded")}
+                                            canManage={false}
+                                            onEdit={() => undefined}
+                                            onDelete={() => undefined}
+                                        />
+                                    ))}
+                                </div>
+                            )}
+                        </div>
                     </section>
                 </div>
             </section>

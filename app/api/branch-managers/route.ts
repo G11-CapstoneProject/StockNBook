@@ -167,11 +167,17 @@ export async function POST(req: NextRequest) {
                     ? "deactivate_manager"
                     : "");
 
+        // Owner-only manager account management. lambda-auth verifies the
+        // Owner token and store for every action listed here.
         const allowedActions = new Set([
             "add_manager_to_branch",
             "resend_manager_invite",
             "deactivate_manager",
             "reactivate_manager",
+            "update_manager_details",
+            "request_manager_email_change",
+            "confirm_manager_email_change",
+            "cancel_manager_invite",
         ]);
 
         if (!allowedActions.has(action)) {

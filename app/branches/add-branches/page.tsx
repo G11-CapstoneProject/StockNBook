@@ -60,18 +60,6 @@ type Branch = {
 
 type BranchStatus = "active" | "inactive";
 
-const defaultPermissions: Permissions = {
-    dashboard: true,
-    bookings: true,
-    packages: true,
-    packages_manage: false,
-    inventory: true,
-    pos: true,
-    reports: false,
-    staff_management: false,
-    branch_settings: false,
-};
-
 function getBranchStatus(branch: Branch): BranchStatus {
     const branchStatus = String(
         branch.branch_status || branch.status || ""
@@ -150,8 +138,6 @@ export default function BranchesPage() {
     >("active");
     const [addManagerName, setAddManagerName] = useState("");
     const [addManagerEmail, setAddManagerEmail] = useState("");
-    const [addPermissions, setAddPermissions] =
-        useState<Permissions>(defaultPermissions);
     const [adding, setAdding] = useState(false);
 
     const [showEditModal, setShowEditModal] = useState(false);
@@ -164,8 +150,6 @@ export default function BranchesPage() {
     >("active");
     const [editManagerName, setEditManagerName] = useState("");
     const [editManagerEmail, setEditManagerEmail] = useState("");
-    const [editPermissions, setEditPermissions] =
-        useState<Permissions>(defaultPermissions);
     const [saving, setSaving] = useState(false);
 
     const loadBranches = useCallback(async () => {
@@ -267,7 +251,6 @@ export default function BranchesPage() {
         setAddBranchStatus("active");
         setAddManagerName("");
         setAddManagerEmail("");
-        setAddPermissions({ ...defaultPermissions });
     };
 
     const openAddModal = () => {
@@ -342,7 +325,6 @@ export default function BranchesPage() {
                             branch_status: addBranchStatus,
                             manager_name: addManagerName.trim(),
                             manager_email: normalizedManagerEmail,
-                            permissions: addPermissions,
                         },
                     ],
                     send_invitation_emails: hasManagerEmail,
@@ -406,10 +388,6 @@ export default function BranchesPage() {
         setEditBranchStatus(getBranchStatus(branch));
         setEditManagerName(branch.manager_name || "");
         setEditManagerEmail(branch.manager_email || "");
-        setEditPermissions({
-            ...defaultPermissions,
-            ...(branch.permissions || {}),
-        });
         setShowEditModal(true);
     };
 
@@ -452,8 +430,6 @@ export default function BranchesPage() {
                     status: editBranchStatus,
                     branch_status: editBranchStatus,
                     manager_name: editManagerName,
-                    manager_email: editManagerEmail,
-                    permissions: editPermissions,
                 }),
             });
 
@@ -739,14 +715,14 @@ export default function BranchesPage() {
                                         label="Branch name"
                                         value={addBranchName}
                                         onChange={setAddBranchName}
-                                        placeholder="e.g. Main Branch"
+                                        placeholder="Main Branch"
                                     />
 
                                     <TextInput
                                         label="Contact number"
                                         value={addContactNumber}
                                         onChange={setAddContactNumber}
-                                        placeholder="e.g. 0912 345 6789"
+                                        placeholder="0912 345 6789"
                                     />
                                 </div>
 
@@ -869,7 +845,7 @@ export default function BranchesPage() {
                                         label="Manager name"
                                         value={addManagerName}
                                         onChange={setAddManagerName}
-                                        placeholder="e.g. Ana Cruz"
+                                        placeholder="Ana Cruz"
                                     />
 
                                     <TextInput
@@ -883,49 +859,10 @@ export default function BranchesPage() {
 
                                 <div className="mt-5 border-t border-[#E6DDF0] pt-5">
                                     <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-[#806A8C]">
-                                        Manager Permissions
+                                        Manager Access
                                     </p>
 
-                                    <div className="grid gap-2 sm:grid-cols-2">
-                                        {(
-                                            [
-                                                ["dashboard", "Dashboard"],
-                                                ["bookings", "Bookings"],
-                                                ["packages", "Packages"],
-                                                [
-                                                    "packages_manage",
-                                                    "Manage Packages",
-                                                ],
-                                                ["inventory", "Inventory"],
-                                                ["pos", "Sales / POS"],
-                                                ["reports", "Reports"],
-                                                [
-                                                    "staff_management",
-                                                    "Staff Management",
-                                                ],
-                                                [
-                                                    "branch_settings",
-                                                    "Branch Settings",
-                                                ],
-                                            ] as Array<
-                                                [keyof Permissions, string]
-                                            >
-                                        ).map(([key, label]) => (
-                                            <AccessToggle
-                                                key={key}
-                                                label={label}
-                                                checked={addPermissions[key]}
-                                                onChange={(checked) =>
-                                                    setAddPermissions(
-                                                        (current) => ({
-                                                            ...current,
-                                                            [key]: checked,
-                                                        })
-                                                    )
-                                                }
-                                            />
-                                        ))}
-                                    </div>
+                                    <ManagerRoleAccessNotice />
                                 </div>
                             </div>
 
@@ -1101,117 +1038,18 @@ export default function BranchesPage() {
                                         value={editManagerName}
                                         onChange={setEditManagerName}
                                     />
-                                    <TextInput
-                                        label="Manager email"
+                                    <ReadOnlyManagerEmail
                                         value={editManagerEmail}
-                                        onChange={setEditManagerEmail}
                                     />
                                 </div>
                             </div>
 
                             <div className="border-t border-[#E6DDF0] pt-5">
                                 <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-[#806A8C]">
-                                    Manager Permissions
+                                    Manager Access
                                 </p>
 
-                                <div className="grid gap-2 sm:grid-cols-2">
-                                    <AccessToggle
-                                        label="Dashboard"
-                                        checked={editPermissions.dashboard}
-                                        onChange={(checked) =>
-                                            setEditPermissions((prev) => ({
-                                                ...prev,
-                                                dashboard: checked,
-                                            }))
-                                        }
-                                    />
-                                    <AccessToggle
-                                        label="Bookings"
-                                        checked={editPermissions.bookings}
-                                        onChange={(checked) =>
-                                            setEditPermissions((prev) => ({
-                                                ...prev,
-                                                bookings: checked,
-                                            }))
-                                        }
-                                    />
-                                    <AccessToggle
-                                        label="Packages"
-                                        checked={editPermissions.packages}
-                                        onChange={(checked) =>
-                                            setEditPermissions((prev) => ({
-                                                ...prev,
-                                                packages: checked,
-                                            }))
-                                        }
-                                    />
-                                    <AccessToggle
-                                        label="Manage Packages"
-                                        checked={
-                                            editPermissions.packages_manage
-                                        }
-                                        onChange={(checked) =>
-                                            setEditPermissions((prev) => ({
-                                                ...prev,
-                                                packages_manage: checked,
-                                            }))
-                                        }
-                                    />
-                                    <AccessToggle
-                                        label="Inventory"
-                                        checked={editPermissions.inventory}
-                                        onChange={(checked) =>
-                                            setEditPermissions((prev) => ({
-                                                ...prev,
-                                                inventory: checked,
-                                            }))
-                                        }
-                                    />
-                                    <AccessToggle
-                                        label="Sales / POS"
-                                        checked={editPermissions.pos}
-                                        onChange={(checked) =>
-                                            setEditPermissions((prev) => ({
-                                                ...prev,
-                                                pos: checked,
-                                            }))
-                                        }
-                                    />
-                                    <AccessToggle
-                                        label="Reports"
-                                        checked={editPermissions.reports}
-                                        onChange={(checked) =>
-                                            setEditPermissions((prev) => ({
-                                                ...prev,
-                                                reports: checked,
-                                            }))
-                                        }
-                                    />
-                                    <AccessToggle
-                                        label="Staff Management"
-                                        checked={
-                                            editPermissions.staff_management
-                                        }
-                                        onChange={(checked) =>
-                                            setEditPermissions((prev) => ({
-                                                ...prev,
-                                                staff_management: checked,
-                                            }))
-                                        }
-                                    />
-                                    <AccessToggle
-                                        label="Branch Settings"
-                                        checked={
-                                            editPermissions.branch_settings
-                                        }
-                                        onChange={(checked) =>
-                                            setEditPermissions((prev) => ({
-                                                ...prev,
-                                                branch_settings: checked,
-                                            }))
-                                        }
-                                    />
-                                </div>
+                                <ManagerRoleAccessNotice />
                             </div>
                         </div>
 
@@ -1469,25 +1307,38 @@ function TextInput({
     );
 }
 
-function AccessToggle({
-                          label,
-                          checked,
-                          onChange,
-                      }: {
-    label: string;
-    checked: boolean;
-    onChange: (checked: boolean) => void;
-}) {
+// Branch Managers receive every Manager-role module automatically after
+// activation, so the Owner no longer assigns individual Manager permissions.
+function ManagerRoleAccessNotice() {
     return (
-        <label className="flex items-center justify-between rounded-xl border border-[#EEE7F2] bg-[#FFFDF8] px-3 py-2.5 text-sm text-[#1A1220]">
-            <span>{label}</span>
+        <div className="rounded-xl border border-[#EEE7F2] bg-[#FFFDF8] px-4 py-3 text-xs leading-5 text-[#5F4E75]">
+            Branch Managers automatically receive access to all Manager modules
+            for their assigned branch once they activate their account. Paid
+            features still follow your current subscription plan.
+        </div>
+    );
+}
+
+// A manager's login email is not edited from the branch form. Email changes
+// are made from Branch Managers, where the new address is verified first.
+function ReadOnlyManagerEmail({ value }: { value: string }) {
+    return (
+        <div>
+            <label className="mb-2 block text-sm font-medium text-[#1A1220]">
+                Manager email
+            </label>
 
             <input
-                type="checkbox"
-                checked={checked}
-                onChange={(event) => onChange(event.target.checked)}
-                className="h-4 w-4 accent-[#2B174C]"
+                type="email"
+                value={value}
+                readOnly
+                aria-readonly="true"
+                className="h-[42px] w-full cursor-not-allowed rounded-xl border border-[#E6DDF0] bg-[#F7F4F8] px-3 text-sm text-[#7A6A84] outline-none"
             />
-        </label>
+
+            <p className="mt-1.5 text-xs text-[#7A6A84]">
+                Change the login email from Branch Managers.
+            </p>
+        </div>
     );
 }

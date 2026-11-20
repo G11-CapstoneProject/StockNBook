@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { BarChart3, Building2, RefreshCw, TrendingUp, Package, Gift, Armchair, Download, ShoppingCart, CalendarDays, X, Calculator, Info } from "lucide-react";
+import { BarChart3, Building2, RefreshCw, Package, Gift, Armchair, Download, ShoppingCart, CalendarDays, X, Calculator, Info } from "lucide-react";
 import type { ExportContext, ExportTable } from "./_shared";
 
 type PeriodOption = "month" | "quarter" | "year";
@@ -32,7 +32,6 @@ type OwnerIconTone = keyof typeof ownerIconTones;
 type OwnerKpiTone = "purple" | "green" | "amber" | "blue";
 const ownerKpiVisuals = {
     sales: { icon: BarChart3, tone: "purple" },
-    profit: { icon: TrendingUp, tone: "green" },
     booking: { icon: CalendarDays, tone: "amber" },
     walk: { icon: ShoppingCart, tone: "blue" },
 } as const;
@@ -53,12 +52,11 @@ function amount(value:unknown):Amount{if(value==null||value==="")return null;con
 function requiredNumber(value:unknown){const n=amount(value);if(n===null)throw new Error("Invalid ranking data returned by the API.");return n;}
 function sum(values:Amount[]):Amount{if(values.some(v=>v===null||!Number.isFinite(v)))return null;return values.reduce<number>((a,v)=>a+Math.round(v!*100),0)/100;}
 function total(a:Amount,b:Amount){return sum([a,b]);}
-function difference(a:Amount,b:Amount){return a===null||b===null?null:(Math.round(a*100)-Math.round(b*100))/100;}
 function record(v:unknown):Record<string,unknown>{if(!v||typeof v!=="object"||Array.isArray(v))throw new Error("Invalid dashboard API response.");return v as Record<string,unknown>;}
 function parseDaily(v:unknown):DailyRow[]{if(!Array.isArray(v))throw new Error("Deploy the updated POS Lambda to enable Owner Dashboard reporting.");return v.map(x=>{const r=record(x);const date=String(r.date||"");if(!/^\d{4}-\d{2}-\d{2}$/.test(date)||!r.branchId)throw new Error("Invalid branch/date in dashboard response.");return {date,branchId:String(r.branchId),sales:amount(r.sales),cost:amount(r.cost)};});}
 function parseRankings(v:unknown,kind:"consumable"|"package"|"rental"):Rankings{const raw=record(v);const parse=(p:PeriodOption)=>{const rows=raw[p];if(!Array.isArray(rows))throw new Error("Ranking data unavailable.");return rows.map(x=>{const r=record(x);return {key:String(r.key||r.name),name:String(r.name||"Unnamed"),secondary:"",count:requiredNumber(kind==="consumable"?r.units:kind==="package"?r.bookings:r.rentals),revenue:requiredNumber(kind==="consumable"?r.sales:r.revenue)};}).sort((a,b)=>b.revenue-a.revenue||a.name.localeCompare(b.name)).slice(0,5);};return {month:parse("month"),quarter:parse("quarter"),year:parse("year")};}
 function parseSnapshot(v:unknown):Snapshot{const r=record(v);const range=record(r.dateRange);if(!Array.isArray(r.branches))throw new Error("Branch data unavailable.");return {dateRange:{startDate:String(range.startDate),endDate:String(range.endDate)},branches:r.branches.map(x=>{const b=record(x);return {id:String(b.id),branchName:String(b.branchName||"Unnamed branch")};}),walkDaily:parseDaily(r.walkDaily),bookingDaily:parseDaily(r.bookingDaily).map(row=>r.rentalCostMethod==="manual_unit_cost_per_rental"?row:{...row,cost:null}),rentalCostMethod:String(r.rentalCostMethod||""),topProducts:parseRankings(r.topProducts,"consumable")};}
-function summarize(data:Snapshot,start:string,end:string,branchId?:string){const filter=(r:DailyRow)=>r.date>=start&&r.date<=end&&(!branchId||r.branchId===branchId);const w=data.walkDaily.filter(filter),b=data.bookingDaily.filter(filter);const walk=sum(w.map(r=>r.sales)),booking=sum(b.map(r=>r.sales)),cost=sum([...w,...b].map(r=>r.cost)),sales=total(walk,booking);return {walk,booking,sales,cost,profit:difference(sales,cost),estimated:b.length>0};}
+function summarize(data:Snapshot,start:string,end:string,branchId?:string){const filter=(r:DailyRow)=>r.date>=start&&r.date<=end&&(!branchId||r.branchId===branchId);const w=data.walkDaily.filter(filter),b=data.bookingDaily.filter(filter);const walk=sum(w.map(r=>r.sales)),booking=sum(b.map(r=>r.sales)),sales=total(walk,booking);return {walk,booking,sales};}
 type TrendPoint={label:string;start:string;end:string;sales:Amount;booking:Amount;walk:Amount};
 function buildTrend(data:Snapshot,period:ChartPeriod):TrendPoint[]{const today=data.dateRange.endDate;const ranges:{start:string;end:string;label:string}[]=[];const add=(start:string,end:string,label:string)=>ranges.push({start,end:end>today?today:end,label});const d=dateOf(today);
     if(period==="weekly"){
@@ -112,18 +110,13 @@ export default function OwnerDashboard(){
     const trend=useMemo(()=>data?buildTrend(data,chartPeriod):[],[data,chartPeriod]);
     const branches=useMemo(()=>{if(!data)return [];const byId=new Map(data.branches.map(x=>[x.id,x.branchName]));for(const row of [...data.walkDaily,...data.bookingDaily])if(!byId.has(row.branchId))byId.set(row.branchId,`Branch #${row.branchId}`);return [...byId].map(([id,name])=>({id,name,...summarize(data,periodStart(branchPeriod,today),today,id)})).sort((a,b)=>(b.sales??-Infinity)-(a.sales??-Infinity)||a.name.localeCompare(b.name));},[data,branchPeriod,today]);
     const period=periodLabel("month",today);
-    const profitNote=current?.profit!=null&&current.profit<0?(current.estimated?"Estimated loss":"Costs exceed sales"):"Sales less cost of sales";
-    const profitTitle="Gross Profit";
-    const costBasis=(current?.estimated?"Booking costs use current item cost prices, so past profits may change. ":"")+"Walk-in costs use item cost prices recorded at the time of sale. Other expenses and tax adjustments are not included." + (data && data.rentalCostMethod!=="manual_unit_cost_per_rental" ? " Deploy the updated POS Lambda to use the revised rental cost calculation." : "");
     const details:Record<OwnerKpiKey,OwnerKpiDetail>={
         sales:{title:"Total Sales",amount:current?.sales??null,period,formula:"Total Sales = Booking Sales + Walk-In Sales",items:[["Booking Sales",current?.booking??null],["Walk-In Sales",current?.walk??null]],description:"Completed bookings by event date and completed POS orders by order date. Booking sales use the agreed price (or saved package price if absent), excluding separately collected deposits and settlement adjustments."},
-        profit:{title:profitTitle,amount:current?.profit??null,period,formula:"Gross Profit = Total Sales − Cost of Sales",items:[["Total Sales",current?.sales??null],["Less: Cost of Sales",current?.cost??null]],description:costBasis},
         booking:{title:"Booking Sales",amount:current?.booking??null,period,formula:"Sum of agreed prices of completed bookings",items:[["Booking Sales",current?.booking??null]],description:"Only completed bookings; filtered by event date. Uses agreed price or the saved package price if absent."},
         walk:{title:"Walk-In Sales",amount:current?.walk??null,period,formula:"Sum of completed walk-in POS order totals",items:[["Walk-In Sales",current?.walk??null]],description:"Only completed walk-in POS orders in the reporting period."}
     };
     const cards:{key:OwnerKpiKey;title:string;value:Amount;note:string;icon:React.ReactNode;tone:OwnerKpiTone}[]=[
         {key:"sales",title:"Total Sales",value:current?.sales??null,note:"Combined booking and walk-in sales",icon:<BarChart3 size={23}/>,tone:"purple"},
-        {key:"profit",title:profitTitle,value:current?.profit??null,note:current?.profit==null?"Required cost data unavailable":profitNote,icon:<TrendingUp size={23}/>,tone:"green"},
         {key:"booking",title:"Booking Sales",value:current?.booking??null,note:"Sales from completed bookings",icon:<CalendarDays size={23}/>,tone:"amber"},
         {key:"walk",title:"Walk-In Sales",value:current?.walk??null,note:"Sales from walk-in transactions",icon:<ShoppingCart size={23}/>,tone:"blue"}
     ];
@@ -131,11 +124,11 @@ export default function OwnerDashboard(){
     return <><header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur"><div className="flex flex-wrap items-center justify-between gap-3 px-6 py-3"><div><h1 className="text-[25px] font-bold text-[#1A1220]">Owner Dashboard</h1><p className="mt-0.5 text-xs text-[#766983]">Sales and financial overview across all branches.</p></div><div className="flex items-center gap-2.5"><time className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">{formatCurrentDashboardDateTime(now)}</time><button type="button" disabled={refreshing} onClick={()=>setRefresh(v=>v+1)} className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:opacity-60"><RefreshCw size={16} className={refreshing?"animate-spin":""}/>{refreshing?"Refreshing...":"Refresh"}</button></div></div></header>
         <main aria-busy={loading} className="space-y-4 px-5 py-5 font-sans">
             {error&&<div role="alert" className="rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] px-4 py-3 text-xs text-[#B42318]">{error}</div>}
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">{cards.map(k=>loading?<div key={k.key} className={`${ownerKpiCardClass} animate-pulse`}><span className="h-12 w-12 shrink-0 rounded-xl bg-[#EEE8F3]"/><span className="min-w-0 flex-1 space-y-2"><span className="block h-3.5 w-24 rounded bg-[#EEE8F3]"/><span className="block h-7 w-28 rounded bg-[#EEE8F3]"/></span></div>:<OwnerFinancialCard key={k.key} title={k.title} value={peso(k.value)} note={k.note} icon={k.icon} iconTone={k.tone} onClick={()=>setSelectedKpi(k.key)}/>)}</div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">{cards.map(k=>loading?<div key={k.key} className={`${ownerKpiCardClass} animate-pulse`}><span className="h-12 w-12 shrink-0 rounded-xl bg-[#EEE8F3]"/><span className="min-w-0 flex-1 space-y-2"><span className="block h-3.5 w-24 rounded bg-[#EEE8F3]"/><span className="block h-7 w-28 rounded bg-[#EEE8F3]"/></span></div>:<OwnerFinancialCard key={k.key} title={k.title} value={peso(k.value)} note={k.note} icon={k.icon} iconTone={k.tone} onClick={()=>setSelectedKpi(k.key)}/>)}</div>
             <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
                 <section className={`${panelClass} flex flex-col p-4`}><OwnerPanelTitle title="Sales Overview Chart" tone="indigo" icon={<BarChart3 size={18}/>} action={<><select aria-label="Sales overview interval" className={filterClass} value={chartPeriod} onChange={e=>setChartPeriod(e.target.value as ChartPeriod)}>{(["monthly","weekly","yearly"] as const).map(p=><option key={p} value={p}>{p[0].toUpperCase()+p.slice(1)}</option>)}</select><OwnerExportButton label="Sales Overview" disabled={!trend.length} onExport={()=>{if(data) downloadOwnerSalesOverview(data,chartPeriod,trend);}}/></>}/><div className="mt-3 flex flex-1 flex-col justify-center"><SalesOverview data={trend} loading={loading}/></div></section>
                 <section className={`${panelClass} flex flex-col`}><div className="border-b border-[#E9E1EE] px-4 py-3.5"><OwnerPanelTitle title="Branch Sales Performance" tone="teal" icon={<Building2 size={18}/>} action={<><select aria-label="Branch performance period" className={filterClass} value={branchPeriod} onChange={e=>setBranchPeriod(e.target.value as PeriodOption)}><option value="month">This Month</option><option value="quarter">This Quarter</option><option value="year">This Year</option></select><OwnerExportButton label="Branch Sales Performance" disabled={!branches.length} onExport={()=>downloadOwnerBranchReport(branchPeriod,branches,today)}/></>}/></div>
-                    <div className="max-h-[248px] min-h-0 overflow-auto"><table className="w-full min-w-[500px] text-center [&_th]:px-2 [&_td]:px-2"><thead className="sticky top-0 bg-[#FFFCF8]"><tr>{["Branch","Total Sales","Booking Sales","Walk-In Sales","Gross Profit"].map(h=><th key={h} className={headerCell}>{h}</th>)}</tr></thead><tbody>{branches.map(r=><tr key={r.id} className="border-t border-[#E9E1EE] hover:bg-[#FBF8FE]"><td className="px-4 py-2 text-left text-[11px] font-semibold text-[#2B174C]">{r.name}</td><td className={bodyCell}>{peso(r.sales)}</td><td className={bodyCell}>{peso(r.booking)}</td><td className={bodyCell}>{peso(r.walk)}</td><td className={bodyCell}>{peso(r.profit)}</td></tr>)}{!branches.length&&<tr><td colSpan={5} className="px-4 py-8 text-xs text-[#86778F]">{loading?"Loading branches...":data?"No branches found.":"Branch sales unavailable."}</td></tr>}</tbody></table></div></section>
+                    <div className="max-h-[248px] min-h-0 overflow-auto"><table className="w-full min-w-[500px] text-center [&_th]:px-2 [&_td]:px-2"><thead className="sticky top-0 bg-[#FFFCF8]"><tr>{["Branch","Total Sales","Booking Sales","Walk-In Sales"].map(h=><th key={h} className={headerCell}>{h}</th>)}</tr></thead><tbody>{branches.map(r=><tr key={r.id} className="border-t border-[#E9E1EE] hover:bg-[#FBF8FE]"><td className="px-4 py-2 text-left text-[11px] font-semibold text-[#2B174C]">{r.name}</td><td className={bodyCell}>{peso(r.sales)}</td><td className={bodyCell}>{peso(r.booking)}</td><td className={bodyCell}>{peso(r.walk)}</td></tr>)}{!branches.length&&<tr><td colSpan={4} className="px-4 py-8 text-xs text-[#86778F]">{loading?"Loading branches...":data?"No branches found.":"Branch sales unavailable."}</td></tr>}</tbody></table></div></section>
             </div>
             {rankError&&<p role="alert" className="rounded-xl border border-[#F2C4C4] bg-[#FFF0F0] px-4 py-3 text-xs text-[#B42318]">{rankError}</p>}
             <div className="grid grid-cols-1 items-stretch gap-3 xl:grid-cols-3">{rankPanels.map(p=><OwnerRankingPanel key={p.title} title={p.title} icon={p.icon} tone={p.tone} rows={p.rows} countLabel={p.countLabel} period={p.period} onPeriodChange={p.change} onViewAll={()=>router.push("/analytics")} onExport={()=>downloadOwnerRanking(p.file,p.period,p.countLabel,(p.rows??[]).slice(0,5),today)}/>)}</div>
@@ -154,7 +147,7 @@ function SalesOverview({data,loading}:{data:TrendPoint[];loading:boolean}){
 }
 
 type OwnerCsvCell = string | number | null | undefined;
-type OwnerKpiKey = "sales" | "profit" | "booking" | "walk";
+type OwnerKpiKey = "sales" | "booking" | "walk";
 type OwnerKpiDetail = {
     title: string;
     amount: number | null;
@@ -202,12 +195,12 @@ function downloadOwnerSalesOverview(data: Snapshot, period: ChartPeriod, trend: 
     const report = salesReportTable(data,period,trend);
     if(report.rows.length) downloadOwnerReport(`owner_sales_overview_${period}.pdf`,report.headers,report.rows,report.dateRange,report.totalRow);
 }
-type BranchReportRow = {name:string;sales:Amount;booking:Amount;walk:Amount;profit:Amount};
+type BranchReportRow = {name:string;sales:Amount;booking:Amount;walk:Amount};
 function branchReportTable(branches: BranchReportRow[]) {
     return {
-        headers:["Branch","Total Sales","Booking Sales","Walk-In Sales","Gross Profit"],
-        rows:branches.map(r=>[r.name,reportMoney(r.sales),reportMoney(r.booking),reportMoney(r.walk),reportMoney(r.profit)]),
-        totalRow:["Total",reportMoney(sum(branches.map(r=>r.sales))),reportMoney(sum(branches.map(r=>r.booking))),reportMoney(sum(branches.map(r=>r.walk))),reportMoney(sum(branches.map(r=>r.profit)))],
+        headers:["Branch","Total Sales","Booking Sales","Walk-In Sales"],
+        rows:branches.map(r=>[r.name,reportMoney(r.sales),reportMoney(r.booking),reportMoney(r.walk)]),
+        totalRow:["Total",reportMoney(sum(branches.map(r=>r.sales))),reportMoney(sum(branches.map(r=>r.booking))),reportMoney(sum(branches.map(r=>r.walk)))],
     };
 }
 function downloadOwnerBranchReport(period: PeriodOption, branches: BranchReportRow[], today: string) {
@@ -281,8 +274,8 @@ function OwnerKpiDetailModal({kpiKey,detail,onClose}:{kpiKey:OwnerKpiKey;detail:
     const Icon = visual.icon;
     const tone = ownerIconTones[visual.tone];
     const amountText = (amount:number|null) => amount === null ? "Unavailable" : amount < 0 ? `−${peso(Math.abs(amount))}` : peso(amount);
-    const isLoss = kpiKey === "profit" && detail.amount !== null && detail.amount < 0;
-    const resultLabel = isLoss ? "Gross Loss" : detail.title;
+    const isNegative = detail.amount !== null && detail.amount < 0;
+    const resultLabel = detail.title;
 
     useEffect(() => {
         const dialog = dialogRef.current;
@@ -317,7 +310,7 @@ function OwnerKpiDetailModal({kpiKey,detail,onClose}:{kpiKey:OwnerKpiKey;detail:
                             <p className="text-[11px] font-semibold uppercase tracking-wide">{resultLabel}</p>
                             <span className="flex items-center gap-1.5 rounded-lg bg-white/75 px-2 py-1 text-[10px] font-medium"><CalendarDays size={13} aria-hidden="true"/><span id="owner-kpi-detail-period">{detail.period}</span></span>
                         </div>
-                        <p className={`mt-2 break-words text-[30px] font-bold leading-tight tracking-tight tabular-nums ${isLoss?"text-[#B42318]":"text-[#25153D]"}`}>{amountText(detail.amount)}</p>
+                        <p className={`mt-2 break-words text-[30px] font-bold leading-tight tracking-tight tabular-nums ${isNegative?"text-[#B42318]":"text-[#25153D]"}`}>{amountText(detail.amount)}</p>
                         <p className="mt-1 text-[11px] text-[#806A8C]">All branches · Month to date</p>
                     </div>
                     <section aria-label="Formula" className="rounded-xl border border-[#E9E1EE] bg-[#FAF8FC] px-4 py-3">
@@ -334,8 +327,8 @@ function OwnerKpiDetailModal({kpiKey,detail,onClose}:{kpiKey:OwnerKpiKey;detail:
                                 </div>
                             ))}
                             <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 bg-[#F8F5FC] px-4 py-3">
-                                <dt className="text-[12px] font-bold text-[#25153D]">{isLoss?"Gross Loss":"Total"}</dt>
-                                <dd className={`break-words text-right text-[17px] font-bold tabular-nums ${isLoss?"text-[#B42318]":"text-[#25153D]"}`}>{amountText(detail.amount)}</dd>
+                                <dt className="text-[12px] font-bold text-[#25153D]">{"Total"}</dt>
+                                <dd className={`break-words text-right text-[17px] font-bold tabular-nums ${isNegative?"text-[#B42318]":"text-[#25153D]"}`}>{amountText(detail.amount)}</dd>
                             </div>
                         </dl>
                     </section>

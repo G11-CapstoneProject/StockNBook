@@ -633,7 +633,7 @@ type ManagerConditionIssue = {
     reference:string; bookingReference:string|null;
 };
 // Issues reported while preparing a booking are saved as "Booking REF: notes";
-// the booking has its own column, so show only the notes.
+// Show only the notes in maintenance details; retain the booking link internally.
 function conditionIssueNotes(reason:string|null|undefined, bookingReference:string|null|undefined) {
     const text=String(reason||"").trim();
     const prefix=bookingReference?`Booking ${bookingReference}: `:"";
@@ -728,7 +728,6 @@ function ManagerConditionTable({rows,onView}:{rows:ManagerConditionRow[];onView:
 }
 function ManagerConditionDetails({entry,onClose}:{entry:ManagerConditionIssue|RentalMaintenanceHistory;onClose:()=>void}) {
     const issue='kind' in entry;
-    const bookingReference=entry.bookingReference||null;
     const date=issue?entry.reportedAt:entry.occurredAt;
     const notes=entry.notes;
     return <div className="fixed inset-0 z-[90] flex items-center justify-center bg-[#160C26]/65 p-4" onClick={onClose} role="presentation">
@@ -741,8 +740,7 @@ function ManagerConditionDetails({entry,onClose}:{entry:ManagerConditionIssue|Re
             <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 text-xs">
                 <div><dt className="text-[#86778F]">Recorded quantity</dt><dd className="mt-1 font-semibold text-[#21132E]">{issue?entry.units:entry.quantity} unit(s)</dd></div>
                 <div><dt className="text-[#86778F]">Recorded date</dt><dd className="mt-1 font-semibold text-[#21132E]"><ManagerConditionDate value={date}/></dd></div>
-                <div><dt className="text-[#86778F]">Booking Reference</dt><dd className="mt-1 break-all font-semibold text-[#21132E]">{bookingReference||'—'}</dd></div>
-                <div><dt className="text-[#86778F]">{issue?'Issue type':'Recorded by'}</dt><dd className="mt-1 font-semibold text-[#21132E]">{issue?entry.title:entry.actorName||'Not recorded'}</dd></div>
+                <div className="col-span-2"><dt className="text-[#86778F]">{issue?'Issue type':'Recorded by'}</dt><dd className="mt-1 font-semibold text-[#21132E]">{issue?entry.title:entry.actorName||'Not recorded'}</dd></div>
             </dl>
             <div className="mt-4 rounded-xl border border-[#E9E1EE] bg-[#FCFAFF] p-3">
                 <p className="text-xs font-semibold text-[#21132E]">{issue?'Incident / condition notes':'Staff activity notes'}</p>

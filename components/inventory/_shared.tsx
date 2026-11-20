@@ -25,6 +25,8 @@ export type ProductVariant = {
     variantValues: Record<string, string>;
     stock: number;
     sellableStock?: number; // Display-only; backend stock changes continue to use stock.
+    branchStock?: number; // Physical on-hand units from the branch ledger.
+    reservedStock?: number; // Confirmed booking holds, included in branchStock.
     expiredBatchUnits?: number; // Recorded expired units awaiting physical disposal.
     alertLevel: number;
     originalPrice: number;
@@ -55,6 +57,8 @@ export type Product = {
     category: string;
     stock: number;
     sellableStock?: number; // Display-only; backend stock changes continue to use stock.
+    branchStock?: number; // Physical on-hand units from the branch ledger.
+    reservedStock?: number; // Confirmed booking holds, included in branchStock.
     expiredBatchUnits?: number; // Recorded expired units awaiting physical disposal.
     alertLevel: number;
     originalPrice: number;
@@ -233,6 +237,12 @@ export async function safeParseResponse<T = unknown>(
     }
 }
 
+// Display only. An older API response may not include ledger balances yet.
+export function formatInventoryBalance(value?: number): string {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0
+        ? value.toLocaleString("en-PH") : "—";
+}
+
 export function normalizeProductVariant(raw: any): ProductVariant {
     const rawValues = raw.variantValues ?? raw.variant_values ?? {};
     let parsedVariantValues: Record<string, string>;
@@ -251,6 +261,8 @@ export function normalizeProductVariant(raw: any): ProductVariant {
         variantValues: parsedVariantValues,
         stock: Number(raw.stock ?? 0),
         sellableStock: raw.sellableStock == null ? undefined : Number(raw.sellableStock),
+        branchStock: raw.branchStock == null ? undefined : Number(raw.branchStock),
+        reservedStock: raw.reservedStock == null ? undefined : Number(raw.reservedStock),
         expiredBatchUnits: raw.expiredBatchUnits == null ? undefined : Number(raw.expiredBatchUnits),
         alertLevel: Number(raw.alertLevel ?? raw.alert_level ?? 0),
         originalPrice: Number(raw.originalPrice ?? raw.original_price ?? 0),
@@ -278,6 +290,8 @@ export function normalizeProduct(raw: any): Product {
         category: raw.category || "",
         stock: Number(raw.stock ?? 0),
         sellableStock: raw.sellableStock == null ? undefined : Number(raw.sellableStock),
+        branchStock: raw.branchStock == null ? undefined : Number(raw.branchStock),
+        reservedStock: raw.reservedStock == null ? undefined : Number(raw.reservedStock),
         expiredBatchUnits: raw.expiredBatchUnits == null ? undefined : Number(raw.expiredBatchUnits),
         alertLevel: Number(raw.alertLevel ?? raw.alert_level ?? 0),
         originalPrice: Number(raw.originalPrice ?? raw.original_price ?? 0),

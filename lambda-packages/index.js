@@ -289,14 +289,14 @@ function v2VariantName(values, fallback) {
 // ===== END StockNBook v2 catalog =====
 
 // ===== BEGIN StockNBook v2 packages read model =====
-// Packages with the legacy column names (name, original_value, cover_image).
+// Packages with the legacy column names (name, original_value).
 // Package contents are read from package_items by attachV2Inclusions().
 const V2_PACKAGES = `(SELECT
         pk.id, pk.store_id, pk.branch_id, pk.package_code, pk.package_name AS name, pk.description,
         COALESCE((SELECT SUM(pki.quantity * pki.unit_price_snapshot)
                   FROM package_items pki WHERE pki.package_id = pk.id), 0) AS original_value,
         pk.discount_type, pk.discount_value, pk.package_price, pk.down_payment_amount, pk.duration,
-        pk.status, pk.category, pk.cover_image_url AS cover_image, NULL AS inclusions,
+        pk.status, pk.category, NULL AS inclusions,
         pk.created_at, pk.updated_at
     FROM packages pk)`;
 // ===== END StockNBook v2 packages read model =====
@@ -636,7 +636,6 @@ function normalizePackageRow(row) {
         duration: row.duration || "",
         status: row.status || "Active",
         category: row.category || undefined,
-        cover_image: row.cover_image || "",
         inclusions: parseInclusions(row.inclusions),
         created_at: row.created_at || "",
     };
@@ -729,13 +728,6 @@ function getIncomingPackage(body) {
         name: toSafeString(body.name, 255),
         description: toSafeString(body.description, 5000),
         category: toSafeString(body.category, 120),
-
-        coverImage:
-            typeof body.cover_image === "string"
-                ? body.cover_image
-                : typeof body.coverImage === "string"
-                    ? body.coverImage
-                    : "",
 
         originalValue:
             toNumber(firstDefined(body.original_value, body.originalValue)) ?? 0,
@@ -941,7 +933,7 @@ async function getPackageAccess(connection, decoded, role, storeId) {
     const [rows] = await connection.execute(
         `SELECT permissions FROM users
          WHERE id = ? AND store_id = ? AND branch_id = ? AND role = ? AND status = 'active'
-         LIMIT 1`,
+             LIMIT 1`,
         [accountId, storeId, branchId, role]
     );
     if (!rows.length) return "none";
@@ -1220,7 +1212,7 @@ exports.handler = async (event) => {
             );
         }
 
-        if (["get_packages", "create_package", "update_package", "delete_package"].includes(action)) {
+        if (["get_packages", "get_package_rental_catalog", "create_package", "update_package", "delete_package"].includes(action)) {
             const access = await getPackageAccess(connection, decoded, tokenRole, storeId);
             const canProceed = action === "get_packages" ? access !== "none" : access === "full";
             if (!canProceed) {
@@ -1228,6 +1220,25 @@ exports.handler = async (event) => {
                     error: "You do not have permission for this package operation."
                 });
             }
+        }
+
+        if (action === "get_package_rental_catalog") {
+            if (!activeBranchId) return badRequest(headers, "A branch is required.");
+            const [rows] = await connection.execute(
+                `SELECT e.id, e.equipment_name AS name, c.category_name AS category,
+                        e.rental_rate_per_day AS dailyRate, bi.on_hand_quantity AS totalUnits,
+                        GREATEST(CAST(bi.on_hand_quantity AS SIGNED) - CAST(bi.reserved_quantity AS SIGNED)
+                                 - CAST(bi.unavailable_quantity AS SIGNED), 0) AS physicallyAvailable
+                   FROM equipment e
+                   JOIN branch_inventory bi ON bi.equipment_id=e.id AND bi.store_id=e.store_id
+                   LEFT JOIN categories c ON c.id=e.category_id AND c.store_id=e.store_id
+                  WHERE e.store_id=? AND bi.branch_id=? AND e.deleted_at IS NULL
+                    AND LOWER(e.status)='active' AND LOWER(bi.status)='active'
+                    AND e.rental_rate_per_day>0 AND bi.on_hand_quantity>0
+                  ORDER BY e.equipment_name, e.id`, [storeId, activeBranchId]);
+            return jsonResponse(200, headers, {success:true, branchId:activeBranchId,
+                equipment:rows.map(row=>({...row,id:Number(row.id),dailyRate:Number(row.dailyRate),
+                    totalUnits:Number(row.totalUnits),physicallyAvailable:Number(row.physicallyAvailable)}))});
         }
 
         if (action === "get_packages") {
@@ -1301,10 +1312,9 @@ exports.handler = async (event) => {
                          duration,
                          status,
                          category,
-                         cover_image_url,
                          updated_by
                      )
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                     [
                         storeId,
                         activeBranchId,
@@ -1318,7 +1328,6 @@ exports.handler = async (event) => {
                         pkg.duration,
                         pkg.status,
                         pkg.category || null,
-                        pkg.coverImage || null,
                         await v2ActorUserId(connection, storeId,
                             (await getActingEmployee(connection, decoded, tokenRole, storeId)).id),
                     ]
@@ -1436,8 +1445,7 @@ exports.handler = async (event) => {
                         down_payment_amount = ?,
                         duration = ?,
                         status = ?,
-                        category = ?,
-                        cover_image_url = ?
+                        category = ?
                     WHERE id = ?
                       AND store_id = ?
                 `;
@@ -1452,7 +1460,6 @@ exports.handler = async (event) => {
                     pkg.duration,
                     pkg.status,
                     pkg.category || null,
-                    pkg.coverImage || null,
                     packageId,
                     storeId,
                 ];

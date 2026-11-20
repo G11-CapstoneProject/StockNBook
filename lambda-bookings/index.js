@@ -348,7 +348,13 @@ async function saveBookingVat(db, { bookingId, storeId }) {
     // Only the agreed (taxable) booking price is used; no price yet means no VAT yet.
     const vat = isVatRegistered(rows[0].tax_registration) && Number.isFinite(agreed) && agreed > 0
         ? inclusiveVat(agreed).vatAmount : 0;
-    await db.execute(`UPDATE bookings SET vat_amount=? WHERE id=? AND store_id=?`, [vat, Number(bookingId), Number(storeId)]);
+    // Preserve the tax registration at the same point as the VAT amount; invoices
+    // must not infer historical registration from the store's current setting.
+    const registration = lower(rows[0].tax_registration);
+    const taxType = isVatRegistered(registration) ? "VAT"
+        : ["non_vat", "non_vat_registered", "non-vat", "non-vat-registered"].includes(registration) ? "NON_VAT" : null;
+    await db.execute(`UPDATE bookings SET vat_amount=?, tax_type=? WHERE id=? AND store_id=?`,
+        [vat, taxType, Number(bookingId), Number(storeId)]);
     return vat;
 }
 
@@ -1277,7 +1283,8 @@ async function automaticallyCompleteSettledBooking(db, bookingId, storeId) {
         throw err;
     }
     const [result] = await db.execute(
-        `UPDATE bookings SET status='Completed', settlement_status='settled'
+        `UPDATE bookings SET status='Completed', settlement_status='settled',
+                             completed_at=UTC_TIMESTAMP() + INTERVAL 8 HOUR
          WHERE id=? AND store_id=? AND status='Pending Settlement'`, [Number(bookingId), Number(storeId)]);
     return result.affectedRows === 1;
 }

@@ -8,7 +8,7 @@ import {
 import { useInventoryController } from "@/hooks/useInventory";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
-import { SuccessToast, labelClass, fieldClass, type Product } from "./_shared";
+import { SuccessToast, labelClass, fieldClass, formatInventoryBalance, type Product } from "./_shared";
 import StaffRentalInventory from "./StaffRentalInventory";
 
 /* Staff inventory only: the existing product hook remains the authoritative
@@ -221,8 +221,8 @@ function staffLineDisplayStatus(stock:number, reorder:number, expiration?:string
 }
 function staffProductDisplayStatus(product:Product): StaffInventoryStatus {
     const variants=product.hasVariants && product.variants?.length ? product.variants : null;
-    const statuses=(variants ? variants.map(variant=>staffLineDisplayStatus(variant.stock,variant.alertLevel,variant.expirationDate)) :
-        [staffLineDisplayStatus(product.stock,product.alertLevel,product.expirationDate)]);
+    const statuses=(variants ? variants.map(variant=>staffLineDisplayStatus(variant.sellableStock ?? variant.stock,variant.alertLevel,variant.expirationDate)) :
+        [staffLineDisplayStatus(product.sellableStock ?? product.stock,product.alertLevel,product.expirationDate)]);
     if(statuses.includes("Expired"))return "Expired";
     if(statuses.includes("Expiring Soon"))return "Expiring Soon";
     if(statuses.every(s=>s==="Out of Stock"))return "Out of Stock";
@@ -745,16 +745,15 @@ export default function StaffInventory() {
                                     </div>
                                 </div>
                                 <div className="min-h-0 w-full flex-1 overflow-auto overscroll-contain" role="region" aria-label="Branch sales inventory list" tabIndex={0}>
-                                    <table className="w-full min-w-[760px] table-auto text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
-                                        <colgroup><col className="w-[14%]"/><col className="w-[24%]"/><col className="w-[12%]"/><col className="w-[10%]"/><col className="w-[9%]"/><col className="w-[10%]"/><col className="w-[10%]"/><col className="w-[11%]"/></colgroup>
+                                    <table className="w-full min-w-[950px] table-auto text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                                        <colgroup><col className="w-[14%]"/><col className="w-[19%]"/><col className="w-[11%]"/><col className="w-[9%]"/><col className="w-[9%]"/><col className="w-[9%]"/><col className="w-[10%]"/><col className="w-[10%]"/><col className="w-[9%]"/></colgroup>
                                         <thead className="sticky top-0 z-10 bg-[#FFFCF8]"><tr className="border-b border-[#E9E1EE]">
-                                            {['Product No.','Product','Category','Available Stock','Reorder Point','Expiration','Status','Action'].map(label=><th key={label} className={headClass}>{label}</th>)}
+                                            {['Product No.','Product','Category','Total Stock','Available','Reserved','Expiration','Status','Action'].map(label=><th key={label} className={headClass}>{label}</th>)}
                                         </tr></thead>
                                         <tbody>{visibleProducts.map(product=>{
                                             const variants=product.hasVariants&&product.variants?.length?product.variants:[];
                                             const expandable=variants.length>0;
                                             const expanded=Boolean(expandedProductIds[product.id]);
-                                            const reorder=expandable?variants.reduce((sum,v)=>sum+Math.max(0,Number(v.alertLevel||0)),0):Math.max(0,Number(product.alertLevel||0));
                                             const expirations=(expandable?variants.map(v=>v.expirationDate):[product.expirationDate]).filter((v):v is string=>!!v);
                                             const expiration=expirations.map(v=>v.slice(0,10)).sort()[0]||null;
                                             const sellableProduct={...product,
@@ -771,8 +770,9 @@ export default function StaffInventory() {
                                                     </td>
                                                     <td className="break-words px-2 py-2 font-semibold">{product.name}</td>
                                                     <td className="break-words px-2 py-2 text-[#5F4E75]">{product.category||"—"}</td>
+                                                    <td className="px-2 py-2 text-center font-semibold">{formatInventoryBalance(product.branchStock)}</td>
                                                     <td className="px-2 py-2 text-center font-semibold">{availableStock.toLocaleString('en-PH')}</td>
-                                                    <td className="px-2 py-2 text-center text-[#5F4E75]">{reorder.toLocaleString('en-PH')}</td>
+                                                    <td className="px-2 py-2 text-center font-semibold text-[#5F4E75]">{formatInventoryBalance(product.reservedStock)}</td>
                                                     <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(expiration)}</td>
                                                     <td className="px-2 py-2 text-center">{staffInventoryStatusBadge(staffProductDisplayStatus(sellableProduct))}</td>
                                                     <td className="px-2 py-2 text-center"><button type="button" disabled={!canRestock} aria-label={`Restock ${product.name}`}
@@ -784,8 +784,9 @@ export default function StaffInventory() {
                                                         <td className="whitespace-nowrap py-2 pr-4 pl-[35px] text-left text-[10px] font-semibold text-[#5F3D82]" title="Variant Number">{variant.variantNumber||"—"}</td>
                                                         <td className="break-words px-2 py-2 pl-8 text-[10px] font-semibold text-[#5F3D82]">↳ {staffVariantDisplayName(variant.variantValues)}</td>
                                                         <td className="px-2 py-2 text-[#8A7D90]">Variant</td>
+                                                        <td className="px-2 py-2 text-center font-semibold">{formatInventoryBalance(variant.branchStock)}</td>
                                                         <td className="px-2 py-2 text-center font-semibold">{Number(variant.sellableStock ?? variant.stock ?? 0).toLocaleString('en-PH')}</td>
-                                                        <td className="px-2 py-2 text-center text-[#5F4E75]">{Number(variant.alertLevel||0).toLocaleString('en-PH')}</td>
+                                                        <td className="px-2 py-2 text-center font-semibold text-[#5F4E75]">{formatInventoryBalance(variant.reservedStock)}</td>
                                                         <td className="px-2 py-2 text-center text-[#5F4E75]">{inventoryExpirationLabel(variant.expirationDate)}</td>
                                                         <td className="px-2 py-2 text-center">{staffInventoryStatusBadge(staffLineDisplayStatus(Number(variant.sellableStock ?? variant.stock),Number(variant.alertLevel),variant.expirationDate))}</td>
                                                         <td className="px-2 py-2 text-center"><button type="button" disabled={!canRestock} aria-label={`Restock ${product.name} variant`} title={canRestock?undefined:"Full Inventory access is required to restock."} onClick={()=>openRestock(product)} className={staffRestockAction}><PackagePlus size={11}/> Restock</button></td>

@@ -37,7 +37,7 @@ import {
 
 import LandingPage from "../../components/landing/LandingPage";
 // Phone formatting stays inside this existing page/component; no helper file is required.
-const MOBILE_PHONE_PLACEHOLDER = "e.g. 0912 345 6789";
+const MOBILE_PHONE_PLACEHOLDER = "0912 345 6789";
 const MOBILE_PHONE_HELP = "Enter an 11-digit Philippine mobile number starting with 09.";
 
 function normalizeMobileNumber(value: string): string {
@@ -309,7 +309,11 @@ function AcceptInviteContent() {
 
     const passwordChecks = useMemo(
         () => ({
-            length: Array.from(password).length >= 15,
+            length: Array.from(password).length >= 8,
+            uppercase: /[A-Z]/.test(password),
+            lowercase: /[a-z]/.test(password),
+            number: /[0-9]/.test(password),
+            special: /[\x21-\x2F\x3A-\x40\x5B-\x60\x7B-\x7E]/.test(password),
             bytes: new TextEncoder().encode(password).length <= 72,
         }),
         [password]
@@ -422,7 +426,7 @@ function AcceptInviteContent() {
             return;
         }
         if (!isValidMobileNumber(phone)) {
-            setError("Enter a valid Philippine mobile number (e.g. 0912 345 6789).");
+            setError("Enter a valid 11-digit Philippine mobile number starting with 09.");
             return;
         }
 
@@ -455,12 +459,12 @@ function AcceptInviteContent() {
 
     const activateAccount = async () => {
         if (!isValidMobileNumber(phone)) {
-            setError("Enter a valid Philippine mobile number (e.g. 0912 345 6789).");
+            setError("Enter a valid 11-digit Philippine mobile number starting with 09.");
             return;
         }
 
         if (!passwordValid) {
-            setError("Create a password that meets all requirements.");
+            setError(!passwordChecks.bytes ? "Your password is too long. Please use a shorter password." : "Create a password that meets all requirements.");
             return;
         }
 
@@ -847,15 +851,18 @@ function AcceptInviteContent() {
                                 </div>
                             </div>
 
-                            <div className="rounded-2xl border border-[#E1D8EC] bg-[#F8F4FF] p-4">
-                                <p className="text-sm font-bold text-[#321A59]">Password must include:</p>
-                                <div className="mt-3 space-y-2.5 text-sm">
+                            <div>
+                                <p className="text-sm font-semibold text-[#2D1B4E]">Password must include:</p>
+                                <div className="mt-2 space-y-1.5 text-sm">
                                     {[
-                                        [passwordChecks.length, "At least 15 characters"],
-                                        [passwordChecks.bytes, "At most 72 UTF-8 bytes"],
+                                        [passwordChecks.length, "At least 8 characters"],
+                                        [passwordChecks.uppercase, "At least one uppercase letter (A–Z)"],
+                                        [passwordChecks.lowercase, "At least one lowercase letter (a–z)"],
+                                        [passwordChecks.number, "At least one number (0–9)"],
+                                        [passwordChecks.special, "At least one special character (!, @, #, etc.)"],
                                     ].map(([valid, label]) => (
-                                        <p key={String(label)} className={`flex items-center gap-2 ${valid ? "text-green-700" : "text-[#6B6074]"}`}>
-                                            <CheckCircle2 className="h-4 w-4" /> {String(label)}
+                                        <p key={String(label)} className={`flex items-center gap-2 ${valid ? "font-medium text-[#168A4A]" : "text-[#7A6E88]"}`}>
+                                            <CheckCircle2 className={`h-4 w-4 shrink-0 ${valid ? "text-[#1AA05A]" : "text-[#8E8497]"}`} /> <span>{String(label)}</span>
                                         </p>
                                     ))}
                                 </div>

@@ -759,6 +759,8 @@ function createBookingAllocationKey(productId, variantId) {
 }
 
 function buildBookingForecast(bookings = [], { periodDays = 30 } = {}) {
+    // v2: Confirmed / Preparing / Released bookings with an upcoming event date.
+    // Released (items already picked up) counts with Confirmed.
     const activeBookings = bookings
         .filter((booking) => {
             const status = normalizeBookingStatus(booking.status);
@@ -766,6 +768,7 @@ function buildBookingForecast(bookings = [], { periodDays = 30 } = {}) {
             return (
                 status === "CONFIRMED" ||
                 status === "PREPARING" ||
+                status === "RELEASED" ||
                 status === "APPROVED"
             );
         })
@@ -939,7 +942,7 @@ function buildBookingForecast(bookings = [], { periodDays = 30 } = {}) {
         isReady: true,
         periodDays: Math.max(1, toSafeNumber(periodDays) || 30),
         forecastBasis:
-            "Confirmed and preparing bookings already scheduled within the selected period.",
+            "Confirmed, preparing and released bookings already scheduled within the selected period.",
         expectedBookings: activeBookings.length,
         confirmedBookings,
         preparingBookings,

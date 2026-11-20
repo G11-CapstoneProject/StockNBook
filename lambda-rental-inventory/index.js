@@ -1813,7 +1813,7 @@ async function settleReturnedRentalBooking(db,scope,reference) {
                                            COALESCE(c.amount_paid,0)+COALESCE(c.deposit_applied,0)+0.005`,
         [booking.id,scope.storeId,scope.branchId]);
     if(Number(claims[0]?.pending||0)>0)return;
-    await db.execute(`UPDATE bookings SET status='Completed'
+    await db.execute(`UPDATE bookings SET status='Completed', completed_at=UTC_TIMESTAMP() + INTERVAL 8 HOUR
                       WHERE id=? AND store_id=? AND branch_id=? AND status='Pending Settlement'`,
         [booking.id,scope.storeId,scope.branchId]);
 }

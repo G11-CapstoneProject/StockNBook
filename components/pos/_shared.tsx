@@ -200,6 +200,8 @@ export type Order = {
     // Calculated by the POS backend from the exact order_items rows.
     cost?: number | null;
     profit?: number | null;
+    additionalCharges?: number | null;
+    depositRefunded?: number | null;
 };
 
 export type ApiOrder = {
@@ -234,6 +236,8 @@ export type ApiOrder = {
     cashierName?: string | null;
     cashierRole?: string | null;
 
+    additionalCharges?: number | string | null;
+    depositRefunded?: number | string | null;
     totalCost?: number;
     total_cost?: number;
     profit?: number;

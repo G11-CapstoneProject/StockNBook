@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import * as XLSX from "xlsx";
+import { formatInventoryBalance } from "./_shared";
 import ManagerRentalInventory from "@/components/inventory/ManagerRentalInventory";
 import {
     AlertTriangle,
@@ -47,6 +48,7 @@ type ProductVariant = {
     sellableStock?: number;
     expiredBatchUnits?: number;
     branchStock?: number;
+    reservedStock?: number;
     batchStock?: number;
     ledgerMismatch?: boolean;
     id: number;
@@ -80,6 +82,7 @@ type Product = {
     sellableStock?: number;
     expiredBatchUnits?: number;
     branchStock?: number;
+    reservedStock?: number;
     batchStock?: number;
     ledgerMismatch?: boolean;
     id: number;
@@ -949,13 +952,6 @@ function getProductTotalStock(product: Product) {
     );
 }
 
-function getProductReorderLevel(product: Product) {
-    return getProductStockLines(product).reduce(
-        (sum, line) => sum + Math.max(0, line.alertLevel),
-        0
-    );
-}
-
 function getProductExpiration(product: Product) {
     const dates = getProductStockLines(product)
         .map((line) => parseInventoryExpirationDate(line.expirationDate))
@@ -1509,8 +1505,9 @@ function getManagerInventoryExportRows(
             "Product No.",
             "Product",
             "Category",
-            "Available Stock",
-            "Reorder Point",
+            "Total Stock",
+            "Available",
+            "Reserved",
             "Expiration",
             "Status",
         ],
@@ -1521,8 +1518,9 @@ function getManagerInventoryExportRows(
                 getProductNumber(product) || "—",
                 product.name,
                 product.category || "—",
+                formatInventoryBalance(product.branchStock),
                 getProductTotalStock(sellableProduct),
-                getProductReorderLevel(product),
+                formatInventoryBalance(product.reservedStock),
                 expiration ? formatDate(expiration.toISOString()) : "—",
                 getProductStatus(sellableProduct),
             ];
@@ -1536,8 +1534,9 @@ function getManagerInventoryExportRows(
                     variant.variantNumber || "—",
                     `${product.name} - ${getVariantName(variant)}`,
                     product.category || "—",
+                    formatInventoryBalance(variant.branchStock),
                     line.stock,
-                    line.alertLevel,
+                    formatInventoryBalance(variant.reservedStock),
                     formatDate(variant.expirationDate),
                     getLineStatus(line),
                 ];
@@ -3535,7 +3534,7 @@ function ManagerInventoryTable({
                             Branch Inventory List
                         </h2>
                         <p className="mt-0.5 text-[11px] text-[#86778F]">
-                            Search, filter, and maintain the sales products assigned to this branch.
+                            Current stock, sellable units, and confirmed booking reservations for this branch.
                         </p>
                     </div>
                 </div>
@@ -3583,24 +3582,26 @@ function ManagerInventoryTable({
                 </div>
             ) : (
                 <div className="max-h-[360px] w-full overflow-y-auto overflow-x-auto overscroll-contain" style={{ maxHeight: 360 }} role="region" aria-label="Branch inventory list" tabIndex={0}>
-                    <table className="w-full min-w-0 table-auto text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
+                    <table className="w-full min-w-[1050px] table-auto text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
                         <colgroup>
-                            <col className="w-[13%]" />
-                            <col className="w-[22%]" />
+                            <col className="w-[14%]" />
+                            <col className="w-[16%]" />
                             <col className="w-[11%]" />
                             <col className="w-[9%]" />
-                            <col className="w-[8.5%]" />
-                            <col className="w-[9.5%]" />
-                            <col className="w-[9%]" />
-                            <col className="w-[18%]" />
+                            <col className="w-[8%]" />
+                            <col className="w-[8%]" />
+                            <col className="w-[10%]" />
+                            <col className="w-[8%]" />
+                            <col className="w-[16%]" />
                         </colgroup>
                         <thead className="sticky top-0 z-10 bg-[#FFFCF8]">
                         <tr className="border-b border-[#E9E1EE]">
                             <MiniHeader center>Product No.</MiniHeader>
                             <MiniHeader center>Product</MiniHeader>
                             <MiniHeader center>Category</MiniHeader>
-                            <MiniHeader center>Available Stock</MiniHeader>
-                            <MiniHeader center>Reorder Point</MiniHeader>
+                            <MiniHeader center>Total Stock</MiniHeader>
+                            <MiniHeader center>Available</MiniHeader>
+                            <MiniHeader center>Reserved</MiniHeader>
                             <MiniHeader center>Expiration</MiniHeader>
                             <MiniHeader center>Status</MiniHeader>
                             <MiniHeader center>Action</MiniHeader>
@@ -3614,7 +3615,7 @@ function ManagerInventoryTable({
                             const expandable = product.hasVariants && variants.length > 0;
                             const expanded = Boolean(expandedIds[product.id]);
                             const expiration = getProductExpiration(product);
-                            // The column is "Available Stock", so display eligible batch
+                            // Available displays eligible batch
                             // stock, not legacy catalog stock used for receiving accounting.
                             const sellableProduct = toSellableProduct(product);
                             const status = getProductStatus(sellableProduct);
@@ -3667,10 +3668,13 @@ function ManagerInventoryTable({
                                             {product.category || "—"}
                                         </td>
                                         <td className="px-2 py-2 text-center font-semibold text-[#2B174C]">
+                                            {formatInventoryBalance(product.branchStock)}
+                                        </td>
+                                        <td className="px-2 py-2 text-center font-semibold text-[#2B174C]">
                                             {formatNumber(getProductTotalStock(sellableProduct))}
                                         </td>
-                                        <td className="px-2 py-2 text-center text-[#5F4E75]">
-                                            {formatNumber(getProductReorderLevel(product))}
+                                        <td className="px-2 py-2 text-center font-semibold text-[#5F4E75]">
+                                            {formatInventoryBalance(product.reservedStock)}
                                         </td>
                                         <td className="px-2 py-2 text-center text-[#5F4E75]">
                                             {expiration
@@ -3764,10 +3768,13 @@ function ManagerInventoryTable({
                                                         {product.category || "—"}
                                                     </td>
                                                     <td className="px-2 py-2 text-center font-semibold text-[#2B174C]">
+                                                        {formatInventoryBalance(variant.branchStock)}
+                                                    </td>
+                                                    <td className="px-2 py-2 text-center font-semibold text-[#2B174C]">
                                                         {formatNumber(variant.sellableStock ?? variant.stock)}
                                                     </td>
-                                                    <td className="px-2 py-2 text-center text-[#5F4E75]">
-                                                        {formatNumber(variant.alertLevel)}
+                                                    <td className="px-2 py-2 text-center font-semibold text-[#5F4E75]">
+                                                        {formatInventoryBalance(variant.reservedStock)}
                                                     </td>
                                                     <td className="px-2 py-2 text-center text-[#5F4E75]">
                                                         {formatDate(

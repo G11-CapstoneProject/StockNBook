@@ -430,10 +430,15 @@ function normalizeLimit(value) {
     return Number.isFinite(parsed) ? parsed : null;
 }
 // Paid subscriptions remain usable through their displayed expiration date.
-// A single eligible payment submitted before expiry can retain paid access for
-// up to 48 hours while the administrator reviews it. No records are deleted.
+// On the following day an unrenewed Growth/Scale subscription is reverted to
+// the active Starter plan (revertExpiredPaidSubscriptionToStarter), so paid
+// features can never outlive expires_at, even when the scheduled job has not
+// run yet. The previous 48-hour pending-review grace period is intentionally
+// no longer applied: a renewal submitted before expiry still becomes effective
+// when the Platform Administrator approves it. No records are deleted.
 async function getActivePlan(connection, storeId) {
     await processDueSubscriptionPlanChange(connection, Number(storeId));
+    await revertExpiredPaidSubscriptionToStarter(connection, Number(storeId));
     const [rows] = await connection.execute(
         `SELECT p.id, p.plan_name AS name, p.price, p.max_inventory, p.max_bookings,
                 p.max_staff, p.max_branches, p.has_low_stock_alerts,
@@ -462,26 +467,9 @@ async function getActivePlan(connection, storeId) {
     if (paid && !Number(paid.is_past_expiry)) {
         return normalized(paid, 'PAID');
     }
-    if (paid && Number(paid.price) > 0) {
-        // Two calendar days after the expiration day, pending review only.
-        // A submission made after expiration cannot create a new grace period.
-        const paymentColumns = await getPlanColumnsForOwner(connection);
-        // Older payment schemas may call this column submitted_at or payment_date.
-        // Never grant grace without verifiable pre-expiry submission time.
-        if (paymentColumns.createdAt) {
-            const [eligible] = await connection.execute(
-                `SELECT p.id FROM subscription_payments p
-                 WHERE p.store_id = ? AND UPPER(p.status) = 'PENDING'
-                   AND DATE(p.${paymentColumns.createdAt}) <= DATE(?)
-                   AND CURDATE() <= DATE_ADD(DATE(?), INTERVAL 2 DAY)
-                 ORDER BY p.id ASC LIMIT 1`,
-                [Number(storeId), paid.expires_at, paid.expires_at]
-            );
-            if (eligible.length > 0) {
-                return normalized(paid, 'GRACE');
-            }
-        }
-    }
+    // A paid row past expires_at is never returned as an entitlement. The
+    // revert above normally converts it to Starter; this fallback also covers
+    // cancelled subscriptions and stores without a subscription record.
     const [starterRows] = await connection.execute(
         `SELECT id, plan_name AS name, price, max_inventory, max_bookings, max_staff,
                 max_branches, has_low_stock_alerts, has_analytics,
@@ -770,9 +758,17 @@ function securityError(statusCode, message, code, retryAfter) {
     return error;
 }
 function passwordPolicy(password) {
-    return typeof password === "string" && Array.from(password).length >= 15 && Buffer.byteLength(password, "utf8") <= 72;
+    return typeof password === "string" && Array.from(password).length >= 8 &&
+        /[A-Z]/.test(password) && /[a-z]/.test(password) && /[0-9]/.test(password) &&
+        /[\x21-\x2F\x3A-\x40\x5B-\x60\x7B-\x7E]/.test(password) &&
+        Buffer.byteLength(password, "utf8") <= 72;
 }
-const PASSWORD_POLICY_MESSAGE = "Use at least 15 characters and at most 72 UTF-8 bytes.";
+const PASSWORD_POLICY_MESSAGE = "Use at least 8 characters, including uppercase and lowercase letters, a number, and a special character.";
+function passwordPolicyError(password) {
+    return typeof password === "string" && Buffer.byteLength(password, "utf8") > 72
+        ? "Your password is too long. Please use a shorter password."
+        : PASSWORD_POLICY_MESSAGE;
+}
 // Named locks serialize related operations across all instances on the same MySQL primary.
 // The handler releases all acquired locks before returning its pooled connection.
 const heldAuthLocks = new WeakMap();
@@ -968,7 +964,8 @@ async function recoveryAction(connection, action, body, headers) {
     }
     if (action === "reset_password") {
         const token = String(body.reset_token || ""); const password = body.new_password;
-        if (!passwordPolicy(password) || password !== body.confirm_password) return respond(400, { error: PASSWORD_POLICY_MESSAGE + " Passwords must match." });
+        if (!passwordPolicy(password)) return respond(400, { error: passwordPolicyError(password) });
+        if (password !== body.confirm_password) return respond(400, { error: "Passwords do not match." });
         if (!/^[a-f0-9]{64}$/.test(token)) throw securityError(400, "Invalid or expired password reset authorization.", "RESET_INVALID");
         await authLock(connection, `account:${email}`);
         await authLock(connection, otpScope("password_reset", email).key);
@@ -1102,10 +1099,8 @@ async function getManagerInviteRecord(connection, inviteToken) {
             branch_name: manager.branch_name || "",
             role: "manager",
             status: manager.status || "pending",
-            permissions:
-                typeof manager.permissions === "string"
-                    ? JSON.parse(manager.permissions || "{}")
-                    : manager.permissions || {},
+            // Managers receive the Manager role modules on activation.
+            permissions: effectiveEmployeePermissions(manager.permissions, "manager"),
         },
     };
 }
@@ -1462,21 +1457,59 @@ function sanitizeEmailHeader(value) {
         .trim();
 }
 
-// Only the Owner can grant Manager-level modules. Dashboard and the
-// read-only branch Settings information are not optional role grants.
-function normalizeManagerRolePermissions(raw) {
-    const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
-    const enabled = (key) => source[key] === true;
-    return {
-        dashboard: true,
-        bookings: enabled("bookings"),
-        packages: enabled("packages"),
-        packages_manage: enabled("packages") && enabled("packages_manage"),
-        inventory: enabled("inventory"),
-        pos: enabled("pos"),
-        reports: enabled("reports"), // Existing backend key for Audit Logs.
-        staff_management: enabled("staff_management"),
-    };
+// Branch Managers receive every Manager-role module automatically once their
+// account is active. Access is decided by the role, never by an Owner toggle
+// or a client-supplied permission object; the Manager still remains limited to
+// the assigned store/branch, and paid features still follow the store's
+// effective subscription plan (enforced separately by the plan gates).
+// Owner-only functions (branches, Branch Managers, subscription management)
+// and Platform Administrator functions are not part of this set.
+const MANAGER_ROLE_PERMISSIONS = Object.freeze({
+    dashboard: true,
+    bookings: true,
+    packages: true,
+    packages_manage: true,
+    inventory: true,
+    pos: true,
+    reports: true, // Existing backend key for Audit Logs (assigned branch only).
+    staff_management: true,
+    analytics: true, // Still subject to the plan's has_analytics flag.
+    forecasting: true, // Still subject to the plan's has_forecasting flag.
+});
+
+// Kept under its existing name for every caller. The argument (an older stored
+// permission object or a request body) is intentionally ignored so legacy
+// Manager rows with disabled modules receive the corrected role access without
+// any database change or account re-creation.
+function normalizeManagerRolePermissions() {
+    return { ...MANAGER_ROLE_PERMISSIONS };
+}
+
+// Business-module backends (Bookings, Inventory, Rental Inventory, POS,
+// Packages, Categories, Analytics, Audit Logs) still read users.permissions
+// for Managers. Since the Owner no longer toggles Manager modules, the stored
+// value is kept equal to the Manager role grant so those checks agree with
+// role-based access. Existing Managers saved with disabled modules are
+// corrected on their next login or session refresh, without re-creating the
+// account. Branch, store and account-status checks are unaffected.
+async function syncStoredManagerRolePermissions(connection, managerId, storedRaw) {
+    const id = Number(managerId);
+    if (!Number.isInteger(id) || id <= 0) return false;
+    let stored = storedRaw;
+    if (typeof stored === "string") {
+        try { stored = JSON.parse(stored); } catch { stored = {}; }
+    }
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) stored = {};
+    const differs = Object.entries(MANAGER_ROLE_PERMISSIONS)
+        .some(([key, value]) => stored[key] !== value);
+    if (!differs) return false;
+    // users.updated_at is preserved: this aligns a derived value only.
+    await connection.execute(
+        `UPDATE users SET permissions = ?, updated_at = updated_at
+         WHERE id = ? AND role = 'manager'`,
+        [JSON.stringify(normalizeManagerRolePermissions()), id]
+    );
+    return true;
 }
 
 // Staff permissions are an explicit allowlist. A Manager cannot delegate
@@ -2334,6 +2367,179 @@ function getBearerTokenFromEvent(event) {
     return String(authHeader).replace(/^Bearer\s+/i, "").trim();
 }
 
+// A valid JWT alone is not enough: the account must still be active in the
+// same store, and a Manager/Staff account must still belong to the branch in
+// its session. A deactivated or reassigned employee is rejected even before
+// the session expires.
+async function findActiveStoreAccount(connection, decoded) {
+    const role = String(decoded?.role || "").toLowerCase();
+    const storeId = Number(decoded?.store_id);
+    if (!Number.isInteger(storeId) || storeId <= 0) return null;
+
+    if (role === "owner") {
+        const ownerId = Number(decoded?.user_id);
+        const [rows] = await connection.execute(
+            `SELECT id FROM users
+             WHERE store_id = ? AND role = 'owner' AND LOWER(status) = 'active'
+               AND (? = 0 OR id = ?)
+                 LIMIT 1`,
+            [storeId, Number.isInteger(ownerId) && ownerId > 0 ? 1 : 0, Number.isInteger(ownerId) && ownerId > 0 ? ownerId : 0]
+        );
+        return rows[0] || null;
+    }
+
+    if (role === "manager" || role === "staff") {
+        const accountId = Number(role === "manager" ? decoded?.manager_id : decoded?.staff_id);
+        const branchId = Number(decoded?.branch_id);
+        if (!Number.isInteger(accountId) || accountId <= 0 ||
+            !Number.isInteger(branchId) || branchId <= 0) return null;
+        const [rows] = await connection.execute(
+            `SELECT id FROM users
+             WHERE id = ? AND store_id = ? AND branch_id = ? AND role = ?
+               AND LOWER(status) = 'active'
+                 LIMIT 1`,
+            [accountId, storeId, branchId, role]
+        );
+        return rows[0] || null;
+    }
+
+    return null;
+}
+
+/*
+ * Owner Branch Manager management helpers.
+ * The Owner manages a Manager's account information, branch assignment,
+ * invitation and access. The Owner can never read or set the Manager's
+ * password, and a verified login email is never replaced without first
+ * verifying the new address.
+ */
+const MANAGER_EMAIL_CHANGE_OTP_EXPIRY_SECONDS = OTP_EXPIRY_SECONDS;
+
+async function requireOwnerForManagerManagement(connection, event) {
+    const token = getBearerTokenFromEvent(event);
+    if (!token) throw securityError(401, "Missing token", "AUTH_REQUIRED");
+    let decoded;
+    try {
+        decoded = jwt.verify(token, JWT_SECRET);
+    } catch {
+        throw securityError(401, "Invalid token", "AUTH_INVALID_TOKEN");
+    }
+    if (decoded.role !== "owner" || !Number(decoded.store_id)) {
+        throw securityError(403, "Only the store owner can manage branch managers.", "OWNER_REQUIRED");
+    }
+    if (!(await findActiveStoreAccount(connection, decoded))) {
+        throw securityError(403, "Owner account could not be verified.", "OWNER_REQUIRED");
+    }
+    return decoded;
+}
+
+function maskEmailAddress(value) {
+    const [local = "", domain = ""] = String(value || "").split("@");
+    if (!domain) return "***";
+    return `${local.slice(0, Math.min(3, local.length))}***@${domain}`;
+}
+
+// Issues a brand-new invitation token for a pending Manager. The stored hash
+// is replaced, so every earlier invitation link stops working, and earlier
+// invitation OTPs for the old/new address are invalidated. Must run inside the
+// caller's transaction; the email is delivered after commit.
+async function rotatePendingManagerInvitation(connection, { managerId, storeId, previousEmails = [] }) {
+    const [rows] = await connection.execute(
+        `SELECT managers.id, managers.full_name AS manager_name, managers.email AS manager_email,
+                managers.branch_id, managers.status, branches.branch_name, stores.store_name
+         FROM users managers
+                  JOIN branches ON branches.id = managers.branch_id AND branches.store_id = managers.store_id
+                  JOIN stores ON stores.id = managers.store_id
+         WHERE managers.id = ? AND managers.store_id = ? AND managers.role = 'manager'
+             LIMIT 1`,
+        [managerId, storeId]
+    );
+    const manager = rows[0];
+    if (!manager || String(manager.status || "").toLowerCase() !== "pending") {
+        throw securityError(409, "Only pending manager invitations can be re-issued.", "INVITE_NOT_PENDING");
+    }
+
+    const inviteToken = jwt.sign(
+        {
+            store_id: storeId,
+            branch_id: Number(manager.branch_id),
+            email: manager.manager_email,
+            type: "manager_invite",
+        },
+        JWT_SECRET,
+        { expiresIn: "7d" }
+    );
+
+    await connection.execute(
+        `UPDATE users
+         SET invite_token_hash = SHA2(?, 256)
+         WHERE id = ? AND store_id = ? AND role = 'manager' AND status = 'pending'`,
+        [inviteToken, managerId, storeId]
+    );
+
+    const emails = [...new Set([manager.manager_email, ...previousEmails]
+        .map((item) => String(item || "").trim().toLowerCase())
+        .filter(Boolean))];
+    for (const email of emails) {
+        await connection.execute(
+            `UPDATE otp_codes
+             SET used_at = COALESCE(used_at, UTC_TIMESTAMP()), invalidated_at = UTC_TIMESTAMP()
+             WHERE purpose = 'manager_invite' AND email = ? AND invalidated_at IS NULL`,
+            [email]
+        );
+    }
+
+    const inviteLink = `${APP_BASE_URL}/accept-invite?token=${encodeURIComponent(inviteToken)}`;
+    return {
+        inviteLink,
+        invitation: {
+            manager_email: manager.manager_email,
+            manager_name: manager.manager_name,
+            store_name: manager.store_name || "StockNBook Store",
+            branch_name: manager.branch_name || "Assigned Branch",
+            invite_link: inviteLink,
+            permissions: normalizeManagerRolePermissions(),
+        },
+    };
+}
+
+async function deliverRotatedManagerInvitation(invitation) {
+    return deliverInvitationEmail({
+        role: "Manager",
+        email: invitation.manager_email,
+        name: invitation.manager_name,
+        storeName: invitation.store_name,
+        branchName: invitation.branch_name,
+        inviteLink: invitation.invite_link,
+        send: () => sendManagerInvitationEmail(invitation),
+    });
+}
+
+function buildManagerEmailChangeOtpEmail(managerName, storeName, otp) {
+    const safeName = escapeHtml(managerName || "Manager");
+    const safeStore = escapeHtml(storeName || "StockNBook");
+    const safeOtp = escapeHtml(otp);
+    return `<div style="font-family:Arial,Helvetica,sans-serif;color:#1A1220;line-height:1.6;max-width:520px;margin:0 auto;padding:24px;">
+<h2 style="margin:0 0 12px;color:#2B174C;">Confirm your new StockNBook login email</h2>
+<p>Hello ${safeName},</p>
+<p>The owner of <strong>${safeStore}</strong> requested to change your manager account's login email to this address.</p>
+<p>Give this verification code to the store owner only if you requested or agreed to this change:</p>
+<p style="font-size:28px;font-weight:700;letter-spacing:6px;color:#2B174C;margin:16px 0;">${safeOtp}</p>
+<p>The code expires in ${Math.round(MANAGER_EMAIL_CHANGE_OTP_EXPIRY_SECONDS / 60)} minutes. If you did not expect this, ignore this email and your login email will not change.</p>
+</div>`;
+}
+
+async function sendManagerEmailChangeOtp(toEmail, managerName, storeName, otp) {
+    if (LOCAL_OTP_CONSOLE_ONLY) {
+        return deliverOtpToLocalTerminal("Manager email change", toEmail, otp, MANAGER_EMAIL_CHANGE_OTP_EXPIRY_SECONDS);
+    }
+    return sendRecoveryMail(
+        toEmail,
+        "Confirm your new StockNBook login email",
+        buildManagerEmailChangeOtpEmail(managerName, storeName, otp)
+    );
+}
+
 // Subscription payment submissions are stored in subscription_payments.
 async function getPlanColumnsForOwner() {
     return {
@@ -2512,6 +2718,160 @@ function serializeSubscriptionPlanChange(row) {
     };
 }
 
+/*
+ * Subscription lifecycle helpers.
+ *
+ * subscriptions (one row per store, uq_store_subscription) joined to plans is
+ * the authoritative current subscription. stores.plan and users.plan are
+ * cached copies of plans.plan_code for the business (users.plan is the same
+ * store-level value on every Owner, Manager and Staff row). No code grants or
+ * denies features from these cached columns; they are kept consistent inside
+ * the same transaction whenever the effective plan changes.
+ */
+async function getStarterPlanRecord(connection) {
+    const [rows] = await connection.execute(
+        `SELECT id, plan_code, plan_name
+         FROM plans
+         WHERE LOWER(plan_code) = 'starter'
+         ORDER BY is_archived ASC, id ASC
+             LIMIT 1`
+    );
+    return rows[0] || null;
+}
+
+async function syncStorePlanCode(connection, storeId, planCode) {
+    const code = String(planCode || "").trim().toLowerCase();
+    if (!code || !Number(storeId)) return;
+    await connection.execute(
+        `UPDATE stores SET plan = ? WHERE id = ? AND plan <> ?`,
+        [code, Number(storeId), code]
+    );
+    // users.updated_at is preserved: the account itself did not change.
+    await connection.execute(
+        `UPDATE users SET plan = ?, updated_at = updated_at WHERE store_id = ? AND plan <> ?`,
+        [code, Number(storeId), code]
+    );
+}
+
+// Creates the free Starter subscription for a newly registered store. The
+// unique store_id key makes repeated calls a no-op, so a retried request can
+// never create a second subscription or overwrite an existing paid one.
+async function ensureStarterSubscription(connection, storeId) {
+    const starter = await getStarterPlanRecord(connection);
+    if (!starter) {
+        throw Object.assign(
+            new Error("The Starter plan is not configured. Registration cannot be completed."),
+            { statusCode: 500, code: "PLAN_NOT_CONFIGURED" }
+        );
+    }
+    await connection.execute(
+        `INSERT INTO subscriptions
+         (store_id, plan_id, status, started_at, expires_at, last_renewed_at,
+          scheduled_plan_id, scheduled_change_at)
+         VALUES (?, ?, 'active', NOW(), NULL, NULL, NULL, NULL)
+             ON DUPLICATE KEY UPDATE id = id`,
+        [Number(storeId), Number(starter.id)]
+    );
+    await syncStorePlanCode(connection, storeId, starter.plan_code);
+    return starter;
+}
+
+// A Growth/Scale subscription is usable through its expiration date. From
+// the next day, if no renewal was approved, the same subscription row reverts
+// to the active Starter plan. Safe to call repeatedly and concurrently:
+//  - a cheap probe avoids opening a transaction on every request;
+//  - the row is re-read FOR UPDATE, so an approval that extended expires_at
+//    (subscription-admin approvePayment also locks this row) is never
+//    overwritten, and an approval that runs afterwards starts a new period;
+//  - the EXPIRED notice is queued with INSERT IGNORE (uniq_expiry_notice), so
+//    the expiry email is still delivered once by the scheduled job;
+//  - subscription_payments rows are never touched.
+// Callers must not hold an open transaction on this connection (same rule as
+// processDueSubscriptionPlanChange).
+async function revertExpiredPaidSubscriptionToStarter(connection, storeId) {
+    const id = Number(storeId);
+    if (!Number.isInteger(id) || id <= 0) return false;
+
+    const [probe] = await connection.execute(
+        `SELECT s.id
+         FROM subscriptions s
+                  INNER JOIN plans p ON p.id = s.plan_id
+         WHERE s.store_id = ?
+           AND p.price > 0
+           AND s.expires_at IS NOT NULL
+           AND DATE(s.expires_at) < CURDATE()
+           AND LOWER(s.status) IN ('active', 'expiring', 'expired')
+             LIMIT 1`,
+        [id]
+    );
+    if (!probe.length) return false;
+
+    const starter = await getStarterPlanRecord(connection);
+    if (!starter) {
+        throw Object.assign(
+            new Error("The Starter plan is not configured."),
+            { statusCode: 500, code: "PLAN_NOT_CONFIGURED" }
+        );
+    }
+
+    await connection.beginTransaction();
+    try {
+        const [rows] = await connection.execute(
+            `SELECT s.id, s.status, s.expires_at, p.price,
+                    CASE WHEN s.expires_at IS NOT NULL AND DATE(s.expires_at) < CURDATE()
+                 THEN 1 ELSE 0 END AS is_past_expiry
+             FROM subscriptions s
+                      INNER JOIN plans p ON p.id = s.plan_id
+             WHERE s.store_id = ?
+                 LIMIT 1
+             FOR UPDATE`,
+            [id]
+        );
+        const current = rows[0] || null;
+        const stillExpiredPaid =
+            current &&
+            Number(current.price) > 0 &&
+            Number(current.is_past_expiry) === 1 &&
+            ["active", "expiring", "expired"].includes(String(current.status || "").toLowerCase());
+
+        if (!stillExpiredPaid) {
+            await connection.commit();
+            return false;
+        }
+
+        await connection.execute(
+            `INSERT IGNORE INTO subscription_expiry_notices
+                 (subscription_id, expires_on, notice_type, delivery_status)
+            SELECT id, DATE(expires_at), 'EXPIRED', 'PENDING'
+            FROM subscriptions WHERE id = ? AND expires_at IS NOT NULL`,
+            [Number(current.id)]
+        );
+
+        // Starter becomes effective the day after the paid expiration date.
+        await connection.execute(
+            `UPDATE subscriptions
+             SET plan_id = ?,
+                 status = 'active',
+                 started_at = DATE_ADD(DATE(expires_at), INTERVAL 1 DAY),
+                 expires_at = NULL,
+                 last_renewed_at = NULL,
+                 scheduled_plan_id = NULL,
+                 scheduled_change_at = NULL
+             WHERE id = ?
+               AND expires_at IS NOT NULL
+               AND DATE(expires_at) < CURDATE()`,
+            [Number(starter.id), Number(current.id)]
+        );
+
+        await syncStorePlanCode(connection, id, starter.plan_code);
+        await connection.commit();
+        return true;
+    } catch (error) {
+        await connection.rollback();
+        throw error;
+    }
+}
+
 async function processDueSubscriptionPlanChange(connection, storeId) {
     const change = await getPendingSubscriptionPlanChange(connection, storeId);
     if (!change) return null;
@@ -2573,23 +2933,35 @@ async function processDueSubscriptionPlanChange(connection, storeId) {
             );
         }
 
+        // Re-check under the row lock: an approved payment clears the scheduled
+        // change, and that newer approval must never be overwritten.
+        const stillScheduled =
+            Number(subscription.scheduled_plan_id) === Number(targetPlan.id) &&
+            subscription.scheduled_change_at &&
+            dateOnlyUtc(subscription.scheduled_change_at) <= dateOnlyUtc();
+
+        if (!stillScheduled) {
+            await connection.commit();
+            return null;
+        }
+
         await connection.execute(
             `UPDATE subscriptions
              SET plan_id = ?,
                  status = 'active',
                  started_at = ?,
                  expires_at = NULL,
+                 last_renewed_at = NULL,
                  scheduled_plan_id = NULL,
                  scheduled_change_at = NULL
              WHERE id = ?`,
             [targetPlan.id, effectiveAt, subscription.id]
         );
 
+        // Keep the cached store/user plan code consistent in the same transaction.
+        await syncStorePlanCode(connection, storeId, targetPlan.plan_code);
+
         // The UPDATE above applied the plan and cleared the scheduled change.
-        await connection.execute(
-            "UPDATE stores SET plan = ? WHERE id = ?",
-            [targetPlan.plan_code, storeId]
-        );
         await connection.commit();
         return null;
     } catch (error) {
@@ -2759,6 +3131,9 @@ async function getStoreSubscriptionSnapshot(connection, storeId) {
 
 async function getOwnerSubscription(connection, storeId) {
     await processDueSubscriptionPlanChange(connection, storeId);
+    // Apply an expired paid plan's Starter reversion before the snapshot so the
+    // Subscription / Plan & Usage pages show the current effective record.
+    await revertExpiredPaidSubscriptionToStarter(connection, storeId);
 
     const snapshot = await getStoreSubscriptionSnapshot(connection, storeId);
     const pendingChange = await getPendingSubscriptionPlanChange(connection, storeId);
@@ -3057,6 +3432,9 @@ async function submitOwnerPlanPayment(connection, decoded, body) {
     }
 
     await processDueSubscriptionPlanChange(connection, storeId);
+    // An expired paid plan is first reverted to Starter, so the requested paid
+    // plan is evaluated against the store's real effective plan.
+    await revertExpiredPaidSubscriptionToStarter(connection, storeId);
 
     const [planRows] = await connection.execute(
         `SELECT *, plan_name AS name FROM plans WHERE id = ? AND is_archived = 0 LIMIT 1`,
@@ -3235,7 +3613,7 @@ module.exports.handler = async (event) => {
             if (authenticatedAccount) action = "platform_admin_login";
             else if (action === "login") authenticatedAccount = await authenticateAccount(connection, "users", email, password);
             if (!authenticatedAccount) {
-                // Keep the dummy bcrypt check; no fake account records.
+                // A dummy bcrypt check reduces registration timing differences; no fake account records.
                 await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
                 if (action === "login") {
                     throw securityError(401, "No account found with this email address. Please check your email.", "ACCOUNT_NOT_FOUND");
@@ -3267,6 +3645,19 @@ module.exports.handler = async (event) => {
                     body: JSON.stringify({
                         error: "You do not have access to this store's plan and usage details.",
                         code: "SUBSCRIPTION_VIEW_FORBIDDEN",
+                    }),
+                };
+            }
+
+            // The Analytics/Forecasting API gates also use this action, so a
+            // deactivated or reassigned account must not pass it.
+            if (!(await findActiveStoreAccount(connection, decoded))) {
+                return {
+                    statusCode: 403,
+                    headers,
+                    body: JSON.stringify({
+                        error: "Your account is inactive or its branch assignment changed. Please sign in again.",
+                        code: "ACCOUNT_SESSION_INVALID",
                     }),
                 };
             }
@@ -3707,7 +4098,7 @@ module.exports.handler = async (event) => {
                 return {
                     statusCode: 400,
                     headers,
-                    body: JSON.stringify({ error: PASSWORD_POLICY_MESSAGE }),
+                    body: JSON.stringify({ error: passwordPolicyError(accountPassword) }),
                 };
             }
 
@@ -3853,7 +4244,7 @@ module.exports.handler = async (event) => {
                 return {
                     statusCode: 400,
                     headers,
-                    body: JSON.stringify({ error: PASSWORD_POLICY_MESSAGE }),
+                    body: JSON.stringify({ error: passwordPolicyError(accountPassword) }),
                 };
             }
 
@@ -3904,6 +4295,10 @@ module.exports.handler = async (event) => {
                     [result.insertId, ownerName, emailAddress, hashed, phoneNumber]
                 );
                 ownerUserId = ownerResult.insertId;
+                // Every business starts with an active free Starter subscription
+                // (no expiry, no payment record). Created in this same transaction,
+                // so a failure leaves no partial store/owner registration behind.
+                await ensureStarterSubscription(connection, result.insertId);
                 await connection.commit();
             } catch (signupError) {
                 await connection.rollback();
@@ -4595,7 +4990,7 @@ module.exports.handler = async (event) => {
                     return {
                         statusCode: 400,
                         headers,
-                        body: JSON.stringify({ error: "Enter a valid Philippine mobile number (e.g. 0912 345 6789)." }),
+                        body: JSON.stringify({ error: "Enter a valid 11-digit Philippine mobile number starting with 09." }),
                     };
                 }
 
@@ -4645,7 +5040,7 @@ module.exports.handler = async (event) => {
                     return {
                         statusCode: 400,
                         headers,
-                        body: JSON.stringify({ error: "Enter a valid Philippine mobile number (e.g. 0912 345 6789)." }),
+                        body: JSON.stringify({ error: "Enter a valid 11-digit Philippine mobile number starting with 09." }),
                     };
                 }
 
@@ -4668,7 +5063,7 @@ module.exports.handler = async (event) => {
                         headers,
                         body: JSON.stringify({
                             error:
-                            PASSWORD_POLICY_MESSAGE,
+                                passwordPolicyError(accountPassword),
                         }),
                     };
                 }
@@ -4680,11 +5075,14 @@ module.exports.handler = async (event) => {
                     10
                 );
 
+                // Activation stores the canonical Manager role grant. Authorization
+                // itself is role-based and does not depend on this stored value.
                 const [result] = await connection.execute(
                     `UPDATE users
                      SET full_name = ?,
                          phone = ?,
                          password_hash = ?,
+                         permissions = ?,
                          status = 'active',
                          email_verified_at = UTC_TIMESTAMP(),
                          invite_token_hash = NULL
@@ -4697,6 +5095,7 @@ module.exports.handler = async (event) => {
                         finalManagerName,
                         phoneNumber,
                         hashedPassword,
+                        JSON.stringify(normalizeManagerRolePermissions()),
                         manager.manager_id,
                         inviteToken,
                         manager.manager_email,
@@ -4866,9 +5265,8 @@ module.exports.handler = async (event) => {
             const manager = managerRows[0];
 
             const managerPermissions =
-                typeof manager.permissions === "string"
-                    ? JSON.parse(manager.permissions || "{}")
-                    : manager.permissions || {};
+                // Role-based Manager access; legacy stored values are not consulted.
+                effectiveEmployeePermissions(manager.permissions, "manager");
 
             if (!managerPermissions.staff_management) {
                 return {
@@ -5200,6 +5598,9 @@ module.exports.handler = async (event) => {
                         }),
                     };
                 }
+
+                // Align the stored Manager permissions with the Manager role.
+                await syncStoredManagerRolePermissions(connection, manager.id, manager.permissions);
 
                 const token = jwt.sign(
                     {
@@ -5538,7 +5939,7 @@ module.exports.handler = async (event) => {
                     return {
                         statusCode: 400,
                         headers,
-                        body: JSON.stringify({ error: "Enter a valid Philippine mobile number (e.g. 0912 345 6789)." }),
+                        body: JSON.stringify({ error: "Enter a valid 11-digit Philippine mobile number starting with 09." }),
                     };
                 }
 
@@ -5588,7 +5989,7 @@ module.exports.handler = async (event) => {
                     return {
                         statusCode: 400,
                         headers,
-                        body: JSON.stringify({ error: "Enter a valid Philippine mobile number (e.g. 0912 345 6789)." }),
+                        body: JSON.stringify({ error: "Enter a valid 11-digit Philippine mobile number starting with 09." }),
                     };
                 }
 
@@ -5611,7 +6012,7 @@ module.exports.handler = async (event) => {
                         headers,
                         body: JSON.stringify({
                             error:
-                            PASSWORD_POLICY_MESSAGE,
+                                passwordPolicyError(accountPassword),
                         }),
                     };
                 }
@@ -5805,9 +6206,8 @@ module.exports.handler = async (event) => {
             }
 
             const managerPermissions =
-                typeof managerRows[0].permissions === "string"
-                    ? JSON.parse(managerRows[0].permissions || "{}")
-                    : managerRows[0].permissions || {};
+                // Role-based Manager access; legacy stored values are not consulted.
+                effectiveEmployeePermissions(managerRows[0].permissions, "manager");
 
             if (!managerPermissions.staff_management) {
                 return {
@@ -5978,13 +6378,8 @@ module.exports.handler = async (event) => {
             }
 
             const managerPermissions =
-                typeof managerRows[0].permissions ===
-                "string"
-                    ? JSON.parse(
-                        managerRows[0].permissions ||
-                        "{}"
-                    )
-                    : managerRows[0].permissions || {};
+                // Role-based Manager access; legacy stored values are not consulted.
+                effectiveEmployeePermissions(managerRows[0].permissions, "manager");
 
             if (!managerPermissions.staff_management) {
                 return {
@@ -6163,9 +6558,8 @@ module.exports.handler = async (event) => {
             }
 
             const managerPermissions =
-                typeof managerRows[0].permissions === "string"
-                    ? JSON.parse(managerRows[0].permissions || "{}")
-                    : managerRows[0].permissions || {};
+                // Role-based Manager access; legacy stored values are not consulted.
+                effectiveEmployeePermissions(managerRows[0].permissions, "manager");
 
             if (!managerPermissions.staff_management) {
                 return {
@@ -6345,9 +6739,8 @@ module.exports.handler = async (event) => {
             const manager = managerRows[0];
 
             const managerPermissions =
-                typeof manager.permissions === "string"
-                    ? JSON.parse(manager.permissions || "{}")
-                    : manager.permissions || {};
+                // Role-based Manager access; legacy stored values are not consulted.
+                effectiveEmployeePermissions(manager.permissions, "manager");
 
             if (!managerPermissions.staff_management) {
                 return {
@@ -6848,10 +7241,7 @@ module.exports.handler = async (event) => {
                 [inviteToken, manager.id, storeId]
             );
 
-            const permissions =
-                typeof manager.permissions === "string"
-                    ? JSON.parse(manager.permissions || "{}")
-                    : manager.permissions || {};
+            const permissions = effectiveEmployeePermissions(manager.permissions, "manager");
 
             const invitation = {
                 manager_email: manager.manager_email,
@@ -6917,7 +7307,9 @@ module.exports.handler = async (event) => {
                 };
             }
 
-            if (!decoded.store_id) {
+            // The list exposes every branch's manager contact details, so it is
+            // limited to the store Owner (Managers/Staff cannot list it).
+            if (decoded.role !== "owner" || !decoded.store_id) {
                 return {
                     statusCode: 403,
                     headers,
@@ -6934,8 +7326,12 @@ module.exports.handler = async (event) => {
                      managers.employee_code AS employeeCode,
                      managers.full_name AS name,
                      managers.email AS email,
+                     managers.phone,
                      managers.status,
                      managers.permissions,
+                     managers.branch_id,
+                     managers.email_verified_at,
+                     managers.created_at,
                      branches.branch_name AS branch
                  FROM users managers
                           JOIN branches ON managers.branch_id = branches.id
@@ -6954,13 +7350,484 @@ module.exports.handler = async (event) => {
                         employee_code: manager.employeeCode || "",
                         name: manager.name || "Unnamed manager",
                         email: manager.email || "",
+                        phone: manager.phone || "",
                         branch: manager.branch || "No branch assigned",
+                        branch_id: Number(manager.branch_id) || null,
                         status: manager.status || "pending",
-                        permissions:
-                            typeof manager.permissions === "string"
-                                ? JSON.parse(manager.permissions || "{}")
-                                : manager.permissions || {},
+                        email_verified: Boolean(manager.email_verified_at),
+                        created_at: manager.created_at || null,
+                        // Manager access is determined by the Manager role.
+                        permissions: effectiveEmployeePermissions(manager.permissions, "manager"),
                     })),
+                }),
+            };
+        }
+
+        // UPDATE MANAGER DETAILS (Owner): name, phone and branch assignment.
+        // Login email changes use request/confirm_manager_email_change below.
+        if (action === "update_manager_details") {
+            const decoded = await requireOwnerForManagerManagement(connection, event);
+            const storeId = Number(decoded.store_id);
+            const managerId = Number(body.manager_id);
+            const fullName = String(body.full_name ?? body.manager_name ?? "").trim();
+            const hasPhone = Object.prototype.hasOwnProperty.call(body, "phone");
+            const rawPhone = hasPhone ? String(body.phone ?? "").trim() : "";
+            const phoneNumber = hasPhone && rawPhone ? normalizePhilippineMobile(rawPhone) : null;
+            const rawBranchId = body.branch_id;
+            const requestedBranchId =
+                rawBranchId === undefined || rawBranchId === null || rawBranchId === ""
+                    ? null
+                    : Number(rawBranchId);
+
+            if (!Number.isInteger(managerId) || managerId <= 0) {
+                throw securityError(400, "Select a valid manager.", "INVALID_MANAGER");
+            }
+            if (fullName.length < 2 || fullName.length > 120) {
+                throw securityError(400, "Enter a valid manager name.", "INVALID_NAME");
+            }
+            if (hasPhone && rawPhone && !phoneNumber) {
+                throw securityError(400, "Enter a valid 11-digit Philippine mobile number starting with 09.", "INVALID_PHONE");
+            }
+            if (requestedBranchId !== null && (!Number.isInteger(requestedBranchId) || requestedBranchId <= 0)) {
+                throw securityError(400, "Select a valid branch.", "INVALID_BRANCH");
+            }
+
+            let rotated = null;
+            let branchChanged = false;
+            let managerStatus = "";
+            let branchName = "";
+
+            await connection.beginTransaction();
+            try {
+                const [managerRows] = await connection.execute(
+                    `SELECT managers.id, managers.branch_id, managers.status, branches.branch_name
+                     FROM users managers
+                              JOIN branches ON branches.id = managers.branch_id AND branches.store_id = managers.store_id
+                     WHERE managers.id = ? AND managers.store_id = ? AND managers.role = 'manager'
+                         LIMIT 1
+                     FOR UPDATE`,
+                    [managerId, storeId]
+                );
+                const manager = managerRows[0];
+                if (!manager) throw securityError(404, "Manager not found.", "MANAGER_NOT_FOUND");
+                managerStatus = String(manager.status || "").toLowerCase();
+                branchName = manager.branch_name || "";
+
+                branchChanged = requestedBranchId !== null && requestedBranchId !== Number(manager.branch_id);
+
+                if (branchChanged) {
+                    // The target branch must belong to this Owner's store.
+                    const [branchRows] = await connection.execute(
+                        `SELECT id, branch_name FROM branches WHERE id = ? AND store_id = ? LIMIT 1 FOR UPDATE`,
+                        [requestedBranchId, storeId]
+                    );
+                    if (!branchRows.length) {
+                        throw securityError(404, "The selected branch was not found.", "BRANCH_NOT_FOUND");
+                    }
+                    // Existing rule: one assigned or pending manager per branch.
+                    const [occupiedRows] = await connection.execute(
+                        `SELECT id FROM users
+                         WHERE store_id = ? AND branch_id = ? AND role = 'manager' AND id <> ?
+                             LIMIT 1
+                         FOR UPDATE`,
+                        [storeId, requestedBranchId, managerId]
+                    );
+                    if (occupiedRows.length) {
+                        throw securityError(409, "This branch already has an assigned or pending manager.", "BRANCH_HAS_MANAGER");
+                    }
+                    // Staff belong to their branch and are managed by that branch's
+                    // manager. Moving a manager with assigned staff would leave them
+                    // unmanaged, so this is blocked instead of silently moving them.
+                    const [staffRows] = await connection.execute(
+                        `SELECT COUNT(*) AS total FROM users
+                         WHERE store_id = ? AND role = 'staff' AND manager_id = ?
+                           AND LOWER(status) IN ('active', 'pending')`,
+                        [storeId, managerId]
+                    );
+                    const assignedStaff = Number(staffRows[0]?.total || 0);
+                    if (assignedStaff > 0) {
+                        throw securityError(
+                            409,
+                            `This manager still has ${assignedStaff} active or pending staff ${assignedStaff === 1 ? "account" : "accounts"} in ${manager.branch_name || "the current branch"}. Deactivate or remove those staff accounts before changing the manager's branch.`,
+                            "MANAGER_HAS_STAFF"
+                        );
+                    }
+                    branchName = branchRows[0].branch_name || "";
+                }
+
+                await connection.execute(
+                    `UPDATE users
+                     SET full_name = ?,
+                         phone = IF(? = 1, ?, phone),
+                         branch_id = ?
+                     WHERE id = ? AND store_id = ? AND role = 'manager'`,
+                    [
+                        fullName,
+                        hasPhone ? 1 : 0,
+                        phoneNumber,
+                        branchChanged ? requestedBranchId : Number(manager.branch_id),
+                        managerId,
+                        storeId,
+                    ]
+                );
+
+                // A pending invitation is bound to its branch: re-issue it so the
+                // previous link (for the old branch) can no longer be used.
+                if (branchChanged && managerStatus === "pending") {
+                    rotated = await rotatePendingManagerInvitation(connection, { managerId, storeId });
+                }
+
+                await connection.commit();
+            } catch (updateError) {
+                await connection.rollback();
+                throw updateError;
+            }
+
+            const delivery = rotated ? await deliverRotatedManagerInvitation(rotated.invitation) : null;
+            securityEvent("manager_details_updated", {
+                account_id: String(managerId),
+                branch_changed: branchChanged,
+            });
+
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                    message: branchChanged
+                        ? managerStatus === "pending"
+                            ? "Manager updated. A new invitation for the new branch was issued; the previous link no longer works."
+                            : "Manager updated. The manager must sign in again and can now access only the new branch."
+                        : "Manager details updated.",
+                    manager: {
+                        id: managerId,
+                        name: fullName,
+                        branch_id: branchChanged ? requestedBranchId : null,
+                        branch: branchName,
+                        status: managerStatus,
+                    },
+                    branch_changed: branchChanged,
+                    ...(rotated ? {
+                        invite_link: rotated.inviteLink,
+                        email_sent: delivery.email_sent,
+                        email_status: delivery.email_status,
+                        email_error: delivery.email_error,
+                    } : {}),
+                }),
+            };
+        }
+
+        // REQUEST MANAGER EMAIL CHANGE (Owner)
+        // Pending invitation: the address is replaced and a new invitation is
+        // issued (the previous link stops working). Activated account: the new
+        // address must first receive and confirm a one-time code.
+        if (action === "request_manager_email_change") {
+            const decoded = await requireOwnerForManagerManagement(connection, event);
+            const storeId = Number(decoded.store_id);
+            const managerId = Number(body.manager_id);
+            const newEmail = String(body.new_email ?? body.email ?? "").trim().toLowerCase();
+
+            if (!Number.isInteger(managerId) || managerId <= 0) {
+                throw securityError(400, "Select a valid manager.", "INVALID_MANAGER");
+            }
+            if (!newEmail || newEmail.length > 255 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) {
+                throw securityError(400, "Enter a valid email address.", "INVALID_EMAIL");
+            }
+
+            // Serialize with signup/invitations that may claim the same address.
+            await authLock(connection, `account:${newEmail}`);
+
+            const [managerRows] = await connection.execute(
+                `SELECT managers.id, managers.full_name AS manager_name, managers.email,
+                        managers.status, stores.store_name
+                 FROM users managers
+                          JOIN stores ON stores.id = managers.store_id
+                 WHERE managers.id = ? AND managers.store_id = ? AND managers.role = 'manager'
+                     LIMIT 1`,
+                [managerId, storeId]
+            );
+            const manager = managerRows[0];
+            if (!manager) throw securityError(404, "Manager not found.", "MANAGER_NOT_FOUND");
+            const currentEmail = String(manager.email || "").trim().toLowerCase();
+            const status = String(manager.status || "").toLowerCase();
+
+            if (newEmail === currentEmail) {
+                throw securityError(400, "The manager already uses this email address.", "EMAIL_UNCHANGED");
+            }
+
+            const [existingRows] = await connection.execute(
+                `SELECT id FROM users WHERE email = ? UNION ALL SELECT id FROM platform_admins WHERE email = ? LIMIT 1`,
+                [newEmail, newEmail]
+            );
+            if (existingRows.length) {
+                throw securityError(409, "This email address is already used by another account.", "EMAIL_IN_USE");
+            }
+
+            if (status === "pending") {
+                let rotated;
+                await connection.beginTransaction();
+                try {
+                    const [updateResult] = await connection.execute(
+                        `UPDATE users SET email = ?
+                         WHERE id = ? AND store_id = ? AND role = 'manager'
+                           AND status = 'pending' AND email = ?`,
+                        [newEmail, managerId, storeId, currentEmail]
+                    );
+                    if (updateResult.affectedRows !== 1) {
+                        throw securityError(409, "The invitation changed. Refresh and try again.", "INVITE_CHANGED");
+                    }
+                    rotated = await rotatePendingManagerInvitation(connection, {
+                        managerId,
+                        storeId,
+                        previousEmails: [currentEmail],
+                    });
+                    await connection.commit();
+                } catch (changeError) {
+                    await connection.rollback();
+                    throw changeError;
+                }
+
+                const delivery = await deliverRotatedManagerInvitation(rotated.invitation);
+                securityEvent("manager_invite_email_replaced", { account_id: String(managerId) });
+
+                return {
+                    statusCode: 200,
+                    headers,
+                    body: JSON.stringify({
+                        message: delivery.email_sent
+                            ? "Invitation email updated. A new invitation was sent and the previous link no longer works."
+                            : "Invitation email updated and a new link was issued, but the email could not be delivered. Copy the backup link or use Resend later.",
+                        verification_required: false,
+                        email_changed: true,
+                        manager_id: managerId,
+                        manager_email: newEmail,
+                        invite_link: rotated.inviteLink,
+                        email_sent: delivery.email_sent,
+                        email_status: delivery.email_status,
+                        email_error: delivery.email_error,
+                    }),
+                };
+            }
+
+            if (status !== "active" && status !== "inactive") {
+                throw securityError(409, "This manager account cannot change its email right now.", "MANAGER_STATUS_INVALID");
+            }
+
+            const scope = otpScope("manager_email_change", newEmail);
+            await guardOtpSend(connection, scope);
+
+            const otp = generateOtp();
+            const otpHash = hashOtp(otp);
+
+            // Only the latest request for this manager can be confirmed.
+            await connection.execute(
+                `UPDATE otp_codes
+                 SET used_at = COALESCE(used_at, UTC_TIMESTAMP()), invalidated_at = UTC_TIMESTAMP()
+                 WHERE purpose = 'manager_email_change' AND user_id = ? AND invalidated_at IS NULL`,
+                [managerId]
+            );
+            await connection.execute(
+                `INSERT INTO otp_codes
+                     (purpose, email, store_id, user_id, otp_hash, expires_at, created_at)
+                 VALUES ('manager_email_change', ?, ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), UTC_TIMESTAMP())`,
+                [newEmail, storeId, managerId, otpHash, MANAGER_EMAIL_CHANGE_OTP_EXPIRY_SECONDS]
+            );
+
+            try {
+                await sendManagerEmailChangeOtp(newEmail, manager.manager_name, manager.store_name, otp);
+            } catch (emailError) {
+                await connection.execute(
+                    `UPDATE otp_codes SET used_at = UTC_TIMESTAMP()
+                     WHERE purpose = 'manager_email_change' AND user_id = ? AND otp_hash = ? AND used_at IS NULL`,
+                    [managerId, otpHash]
+                );
+                console.error("[stocknbook-auth] Manager email-change code delivery failed:", {
+                    code: emailError?.code || "EMAIL_SEND_FAILED",
+                });
+                throw securityError(
+                    502,
+                    "The verification code could not be sent to the new email address. Check the address and try again later.",
+                    "EMAIL_CHANGE_OTP_FAILED"
+                );
+            }
+
+            securityEvent("manager_email_change_requested", { account_id: String(managerId) });
+
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                    message: LOCAL_OTP_CONSOLE_ONLY
+                        ? "Verification code generated for local testing. Check the IDE terminal."
+                        : `A verification code was sent to ${maskEmailAddress(newEmail)}. The login email changes only after that code is confirmed.`,
+                    verification_required: true,
+                    email_changed: false,
+                    manager_id: managerId,
+                    pending_email: newEmail,
+                    expires_in: MANAGER_EMAIL_CHANGE_OTP_EXPIRY_SECONDS,
+                    resend_in: OTP_RESEND_SECONDS,
+                }),
+            };
+        }
+
+        // CONFIRM MANAGER EMAIL CHANGE (Owner enters the code the manager received)
+        if (action === "confirm_manager_email_change") {
+            const decoded = await requireOwnerForManagerManagement(connection, event);
+            const storeId = Number(decoded.store_id);
+            const managerId = Number(body.manager_id);
+            const newEmail = String(body.new_email ?? body.email ?? "").trim().toLowerCase();
+            const otp = String(body.otp ?? "").trim();
+
+            if (!Number.isInteger(managerId) || managerId <= 0) {
+                throw securityError(400, "Select a valid manager.", "INVALID_MANAGER");
+            }
+            if (!newEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) {
+                throw securityError(400, "Enter a valid email address.", "INVALID_EMAIL");
+            }
+
+            await authLock(connection, `account:${newEmail}`);
+
+            const [managerRows] = await connection.execute(
+                `SELECT id, email, status FROM users
+                 WHERE id = ? AND store_id = ? AND role = 'manager'
+                     LIMIT 1`,
+                [managerId, storeId]
+            );
+            const manager = managerRows[0];
+            if (!manager) throw securityError(404, "Manager not found.", "MANAGER_NOT_FOUND");
+            const status = String(manager.status || "").toLowerCase();
+            if (status !== "active" && status !== "inactive") {
+                throw securityError(409, "This manager account cannot change its email right now.", "MANAGER_STATUS_INVALID");
+            }
+            const previousEmail = String(manager.email || "").trim().toLowerCase();
+
+            const otpRecord = await checkOtp(connection, otpScope("manager_email_change", newEmail), otp, false);
+            const [otpRows] = await connection.execute(
+                `SELECT store_id, user_id FROM otp_codes WHERE id = ? LIMIT 1`,
+                [otpRecord.id]
+            );
+            if (Number(otpRows[0]?.user_id) !== managerId || Number(otpRows[0]?.store_id) !== storeId) {
+                throw securityError(400, "Invalid or expired verification code. Request a new code.", "OTP_INVALID");
+            }
+
+            const [existingRows] = await connection.execute(
+                `SELECT id FROM users WHERE email = ? AND id <> ?
+                 UNION ALL SELECT id FROM platform_admins WHERE email = ? LIMIT 1`,
+                [newEmail, managerId, newEmail]
+            );
+            if (existingRows.length) {
+                throw securityError(409, "This email address is already used by another account.", "EMAIL_IN_USE");
+            }
+
+            await connection.beginTransaction();
+            try {
+                await connection.execute(
+                    "UPDATE otp_codes SET used_at = UTC_TIMESTAMP(), verified_at = UTC_TIMESTAMP() WHERE id = ?",
+                    [otpRecord.id]
+                );
+                const [updateResult] = await connection.execute(
+                    `UPDATE users
+                     SET email = ?, email_verified_at = UTC_TIMESTAMP()
+                     WHERE id = ? AND store_id = ? AND role = 'manager' AND email = ?`,
+                    [newEmail, managerId, storeId, previousEmail]
+                );
+                if (updateResult.affectedRows !== 1) {
+                    throw securityError(409, "The manager account changed. Refresh and try again.", "MANAGER_CHANGED");
+                }
+                // Recovery codes issued to the previous address can no longer be used.
+                await connection.execute(
+                    `UPDATE otp_codes
+                     SET invalidated_at = UTC_TIMESTAMP(), used_at = COALESCE(used_at, UTC_TIMESTAMP()), reset_token_hash = NULL
+                     WHERE purpose = 'password_reset' AND user_id = ? AND invalidated_at IS NULL`,
+                    [managerId]
+                );
+                await connection.commit();
+            } catch (confirmError) {
+                await connection.rollback();
+                throw confirmError;
+            }
+
+            securityEvent("manager_email_changed", { account_id: String(managerId) });
+
+            if (!LOCAL_OTP_CONSOLE_ONLY && previousEmail) {
+                try {
+                    await sendRecoveryMail(
+                        previousEmail,
+                        "StockNBook login email changed",
+                        `<p>The login email for your StockNBook manager account was changed to ${escapeHtml(maskEmailAddress(newEmail))} by the store owner after the new address was verified.</p><p>If you did not expect this change, contact the store owner immediately.</p>`
+                    );
+                } catch {
+                    securityEvent("manager_email_change_notification_failed", { account_id: String(managerId) });
+                }
+            }
+
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                    message: "The manager's login email was verified and updated.",
+                    manager_id: managerId,
+                    manager_email: newEmail,
+                }),
+            };
+        }
+
+        // CANCEL PENDING MANAGER INVITATION (Owner)
+        // Only an unaccepted invitation (no password, status pending) is removed;
+        // its link and OTPs stop working and the branch becomes available again.
+        if (action === "cancel_manager_invite") {
+            const decoded = await requireOwnerForManagerManagement(connection, event);
+            const storeId = Number(decoded.store_id);
+            const managerId = Number(body.manager_id);
+
+            if (!Number.isInteger(managerId) || managerId <= 0) {
+                throw securityError(400, "Select a pending manager invitation.", "INVALID_MANAGER");
+            }
+
+            await connection.beginTransaction();
+            try {
+                const [rows] = await connection.execute(
+                    `SELECT id, email, status, password_hash
+                     FROM users
+                     WHERE id = ? AND store_id = ? AND role = 'manager'
+                         LIMIT 1
+                     FOR UPDATE`,
+                    [managerId, storeId]
+                );
+                const manager = rows[0];
+                if (!manager) throw securityError(404, "Pending manager invitation not found.", "MANAGER_NOT_FOUND");
+                if (String(manager.status || "").toLowerCase() !== "pending" || manager.password_hash) {
+                    throw securityError(409, "Only pending invitations can be cancelled. Use Deactivate Access for activated managers.", "INVITE_NOT_PENDING");
+                }
+
+                await connection.execute(
+                    `UPDATE otp_codes
+                     SET used_at = COALESCE(used_at, UTC_TIMESTAMP()), invalidated_at = UTC_TIMESTAMP()
+                     WHERE purpose = 'manager_invite' AND email = ? AND invalidated_at IS NULL`,
+                    [String(manager.email || "").toLowerCase()]
+                );
+                const [deleteResult] = await connection.execute(
+                    `DELETE FROM users
+                     WHERE id = ? AND store_id = ? AND role = 'manager'
+                       AND status = 'pending' AND password_hash IS NULL`,
+                    [managerId, storeId]
+                );
+                if (deleteResult.affectedRows !== 1) {
+                    throw securityError(409, "The invitation changed. Refresh and try again.", "INVITE_CHANGED");
+                }
+                await connection.commit();
+            } catch (cancelError) {
+                await connection.rollback();
+                throw cancelError;
+            }
+
+            securityEvent("manager_invite_cancelled", { account_id: String(managerId) });
+
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                    message: "Invitation cancelled. The invitation link can no longer be used.",
+                    manager_id: managerId,
                 }),
             };
         }
@@ -7044,6 +7911,10 @@ module.exports.handler = async (event) => {
                 [storeId]
             );
 
+            // Managers and Staff use this list only for branch names. Other
+            // branches' manager contact details are returned to the Owner only.
+            const isOwnerRequest = decoded.role === "owner";
+
             return {
                 statusCode: 200,
                 headers,
@@ -7061,16 +7932,16 @@ module.exports.handler = async (event) => {
                             branch.inactive_reason || "",
                         branch_inactive_reason:
                             branch.inactive_reason || "",
-                        manager_name: branch.manager_name || "",
-                        manager_email: branch.manager_email || "",
-                        manager_status: branch.manager_status || "setup_pending",
+                        manager_name: isOwnerRequest ? (branch.manager_name || "") : "",
+                        manager_email: isOwnerRequest ? (branch.manager_email || "") : "",
+                        manager_status: isOwnerRequest ? (branch.manager_status || "setup_pending") : "",
                         staff_count: Number(branch.staff_count || 0),
                         revenue: 0,
                         bookings: 0,
                         permissions:
-                            typeof branch.permissions === "string"
-                                ? JSON.parse(branch.permissions || "{}")
-                                : branch.permissions || {},
+                            isOwnerRequest && branch.manager_email
+                                ? effectiveEmployeePermissions(branch.permissions, "manager")
+                                : {},
                     }))
                 }),
             };
@@ -7126,9 +7997,10 @@ module.exports.handler = async (event) => {
                 branch_inactive_reason,
                 manager_name,
                 manager_email,
-                permissions = {},
             } = body;
-            const validatedManagerPermissions = normalizeManagerRolePermissions(permissions);
+            // Manager access is role-based; branch edits never change it.
+            const validatedManagerPermissions = normalizeManagerRolePermissions();
+            const requestedManagerEmail = String(manager_email || "").trim().toLowerCase();
 
             if (!branch_id || !branch_name) {
                 return {
@@ -7181,6 +8053,30 @@ module.exports.handler = async (event) => {
                 };
             }
 
+            // A manager's login email is never replaced from the branch form.
+            // Email changes go through the Branch Managers module, which
+            // re-verifies an active account's new address (or re-issues a
+            // pending invitation) before the change becomes effective.
+            if (requestedManagerEmail) {
+                const [assignedManagerRows] = await connection.execute(
+                    `SELECT email FROM users
+                     WHERE branch_id = ? AND store_id = ? AND role = 'manager'
+                         LIMIT 1`,
+                    [branch_id, storeId]
+                );
+                const assignedEmail = String(assignedManagerRows[0]?.email || "").trim().toLowerCase();
+                if (assignedManagerRows.length > 0 && assignedEmail !== requestedManagerEmail) {
+                    return {
+                        statusCode: 409,
+                        headers,
+                        body: JSON.stringify({
+                            error: "Change the manager's email from Branch Managers. The new address must be verified first.",
+                            code: "MANAGER_EMAIL_CHANGE_REQUIRES_VERIFICATION",
+                        }),
+                    };
+                }
+            }
+
             await connection.beginTransaction();
 
             try {
@@ -7212,18 +8108,16 @@ module.exports.handler = async (event) => {
                     };
                 }
 
+                // Only the display name can change here; an empty value keeps the
+                // existing name. Email and permissions are not modified.
                 const [managerResult] = await connection.execute(
                     `UPDATE users
-                     SET full_name = COALESCE(?, ''),
-                         email = COALESCE(?, email),
-                         permissions = ?
+                     SET full_name = COALESCE(NULLIF(TRIM(?), ''), full_name)
                      WHERE branch_id = ?
                        AND store_id = ?
                        AND role = 'manager'`,
                     [
-                        manager_name || null,
-                        manager_email || null,
-                        JSON.stringify(validatedManagerPermissions),
+                        String(manager_name || "").slice(0, 150),
                         branch_id,
                         storeId,
                     ]
@@ -7502,10 +8396,15 @@ module.exports.handler = async (event) => {
                 );
 
                 if (!managerRows.length) {
+                    // The session's branch no longer matches (branch reassignment)
+                    // or the account was removed: the old session must end.
                     return {
-                        statusCode: 404,
+                        statusCode: 401,
                         headers,
-                        body: JSON.stringify({ error: "Manager not found" }),
+                        body: JSON.stringify({
+                            error: "Manager not found. Your branch assignment may have changed. Please sign in again.",
+                            code: "SESSION_INVALIDATED",
+                        }),
                     };
                 }
 
@@ -7523,6 +8422,10 @@ module.exports.handler = async (event) => {
                         }),
                     };
                 }
+
+                // Existing active Managers saved with disabled modules receive the
+                // Manager role access on their next session refresh.
+                await syncStoredManagerRolePermissions(connection, manager.id, manager.permissions);
 
                 return {
                     statusCode: 200,
@@ -7566,10 +8469,14 @@ module.exports.handler = async (event) => {
                 );
 
                 if (!staffRows.length) {
+                    // Deactivated, removed, or moved to another branch.
                     return {
-                        statusCode: 404,
+                        statusCode: 401,
                         headers,
-                        body: JSON.stringify({ error: "Staff not found" }),
+                        body: JSON.stringify({
+                            error: "Staff not found. Your account access may have changed. Please sign in again.",
+                            code: "SESSION_INVALIDATED",
+                        }),
                     };
                 }
 
@@ -7729,7 +8636,7 @@ module.exports.handler = async (event) => {
             body: JSON.stringify({ error: "Invalid action" }),
         };
     } catch (err) {
-        const securityAction = /^(login|platform_admin_login|request_password_reset|verify_password_reset_otp|reset_password|send_signup_otp|verify_signup_otp|send_manager_invite_otp|verify_manager_invite_otp|send_staff_invite_otp|verify_staff_invite_otp|send_payment_otp|verify_payment_otp|submit_subscription_payment)$/.test(String(action));
+        const securityAction = /^(login|platform_admin_login|request_password_reset|verify_password_reset_otp|reset_password|send_signup_otp|verify_signup_otp|send_manager_invite_otp|verify_manager_invite_otp|send_staff_invite_otp|verify_staff_invite_otp|send_payment_otp|verify_payment_otp|submit_subscription_payment|request_manager_email_change|confirm_manager_email_change)$/.test(String(action));
         if (!securityAction) {
             console.error("[stocknbook-auth] Error:", { action, message: err?.message, code: err?.code, stack: err?.stack });
             return { statusCode: Number(err?.statusCode) || 500, headers, body: JSON.stringify({ error: err?.message || "Internal server error", code: err?.code || "UNKNOWN_ERROR" }) };

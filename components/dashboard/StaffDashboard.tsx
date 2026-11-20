@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { AlertTriangle, Box, CalendarClock, ClipboardCheck, CornerUpLeft, RefreshCw, Wrench, PieChart, BarChart3, ShoppingCart, Package, ShieldCheck, CheckCircle2, Clock3 } from "lucide-react";
 
-type TaskStatus = "To Prepare" | "For Release" | "Expected Return";
+type TaskStatus = "To Prepare" | "For Release" | "Checking Return";
 type Task = {key:string; reference:string;customer:string;scheduledDate:string;status:TaskStatus};
 type Alert = {key:string;product:string;available:number;status:"Low Stock"|"Out of Stock"};
 type Repair = {key:string;equipmentNo:string;product:string;units:number;status:"Under Repair"};
@@ -14,8 +14,8 @@ type ConsumableHealth = {healthy:number;lowStock:number;outOfStock:number};
 type InventoryAlertSummary = {expiring:number;expired:number;lowStock:number;outOfStock:number;underRepair:number};
 type RentalHealth = {serviceable:number;underRepair:number;otherUnavailable?:number};
 type Summary = {success:true;access:Access;today:string;branchId:number;staffId:string;tasks:Task[]|null;alerts:Alert[]|null;repair:Repair[]|null;condition:RentalHealth|null;consumableHealth?:ConsumableHealth|null;inventoryAlertSummary?:InventoryAlertSummary|null;walkIn:Hour[]|null;errors:string[]};
-const statuses:TaskStatus[]=["To Prepare","For Release","Expected Return"];
-const statusColors:Record<TaskStatus,string>={"To Prepare":"#6C3AD6","For Release":"#25865B","Expected Return":"#2169CF"};
+const statuses:TaskStatus[]=["To Prepare","For Release","Checking Return"];
+const statusColors:Record<TaskStatus,string>={"To Prepare":"#6C3AD6","For Release":"#25865B","Checking Return":"#2169CF"};
 const cardClass = "min-w-0 rounded-2xl border border-[#E7DFEC] bg-white shadow-sm";
 const headerClass = "flex min-h-[64px] min-w-0 items-center gap-2.5 px-4 py-3.5";
 const iconClass = "flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px]";
@@ -65,7 +65,7 @@ function TablePanel({title,description,icon,tone,headers,rows,empty,unavailable,
         </div>{footer&&<PanelFooter {...footer}/>}</section>;
 }
 type Slice = {label:string;value:number;color:string};
-function Donut({title,description,icon,tone,slices,unavailable,selected,onSelect,totalLabel='Total Tasks'}:{title:string;description:string;icon:ReactNode;tone:string;slices:Slice[];unavailable:boolean;selected?:string;onSelect?:(label:string)=>void;totalLabel?:string}) {
+function Donut({title,description,icon,tone,slices,unavailable,selected,onSelect,totalLabel='Tasks'}:{title:string;description:string;icon:ReactNode;tone:string;slices:Slice[];unavailable:boolean;selected?:string;onSelect?:(label:string)=>void;totalLabel?:string}) {
     const total = slices.reduce((sum, slice) => sum + slice.value, 0);
     const radius = 54, circumference = 2 * Math.PI * radius;
     const segments = slices.map((slice, index) => ({
@@ -76,7 +76,7 @@ function Donut({title,description,icon,tone,slices,unavailable,selected,onSelect
     const legendBackgrounds: Record<string, string> = {
         'To Prepare': 'bg-[#F6F0FF]',
         'For Release': 'bg-[#ECFAF4]',
-        'Expected Return': 'bg-[#E8F1FF]',
+        'Checking Return': 'bg-[#E8F1FF]',
     };
     return <section className={`${cardClass} flex min-h-[220px] flex-col overflow-hidden`}>
         <Title {...{title,description,icon,tone}}/>
@@ -213,7 +213,7 @@ export default function StaffDashboard() {
     const openRental=()=>router.push('/inventory?tab=rental');
     const openPOS=()=>router.push('/pos');
     const metrics:ReactNode[]=[];
-    if(B){metrics.push(...counts.map((s,i)=><Metric key={s.label} label={s.label==='Expected Return'?'Expected Returns':s.label} value={data?.tasks===null?null:s.value} helper={['Due within two days or outstanding','Due today or outstanding','Due today or outstanding'][i]} icon={[<ClipboardCheck key="p" size={23}/>,<Box key="r" size={23}/>,<CornerUpLeft key="e" size={23}/>][i]} tone={(['violet','green','blue'] as const)[i]} loading={false} onClick={openBookings}/>));}
+    if(B){metrics.push(...counts.map((s,i)=><Metric key={s.label} label={s.label==='Checking Return'?'Checking Returns':s.label} value={data?.tasks===null?null:s.value} helper={['Due within two days or outstanding','Inspect Product Return','Inspect Product Return'][i]} icon={[<ClipboardCheck key="p" size={23}/>,<Box key="r" size={23}/>,<CornerUpLeft key="e" size={23}/>][i]} tone={(['violet','green','blue'] as const)[i]} loading={false} onClick={openBookings}/>));}
     if(I){
         if(!B&&!P)metrics.push(<Metric key="healthy" label="Healthy Stock" value={consumable?.healthy??null} helper="Stock records above alert level" icon={<CheckCircle2 size={23}/>} tone="green" loading={false} onClick={openInventory}/>);
         metrics.push(<Metric key="stock" label="Stock Alerts" value={data?.alerts===null?null:alerts.length} helper="Low or out-of-stock items" icon={<AlertTriangle size={23}/>} tone="orange" loading={false} onClick={openInventory}/>);

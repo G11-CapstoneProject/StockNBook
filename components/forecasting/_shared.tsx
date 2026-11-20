@@ -12,7 +12,7 @@ import {
     TriangleAlert,
 } from "lucide-react";
 
-export type ForecastTab = "inventory" | "seasonal";
+export type ForecastTab = "inventory" | "seasonal" | "booking";
 
 export type SeasonalDateRange = {
     startMonth: string;
@@ -451,11 +451,11 @@ function seasonalityClass(seasonality: ItemSeasonality | undefined) {
         return "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]";
     }
 
-    return "border-[#CFE8DA] bg-[#F1FBF5] text-[#138342]";
+    return seasonality ? "border-[#CFE8DA] bg-[#F1FBF5] text-[#138342]" : "border-[#E6DDF0] bg-[#FBF9FD] text-[#6B5B78]";
 }
 
 function seasonalityLabel(seasonality: ItemSeasonality | undefined) {
-    if (!seasonality) return "Seasonal signal loading";
+    if (!seasonality) return "Product seasonality unavailable";
 
     return safeText(seasonality.label, "No seasonal signal yet");
 }
@@ -1461,8 +1461,10 @@ export function ProductDemandSummaryCards({
                                               data,
                                               seasonalData,
                                               seasonalLoading = false,
+                                              canViewInventory = true,
                                           }: {
     data: ForecastApiResponse;
+    canViewInventory?: boolean;
     seasonalData?: SeasonalApiResponse | null;
     seasonalLoading?: boolean;
 }) {
@@ -1487,10 +1489,10 @@ export function ProductDemandSummaryCards({
         : "all branches";
 
     return (
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
             <SummaryCard
                 icon={<PackageSearch size={18} />}
-                title="30-Day Product Demand"
+                title={`${periodDays}-Day Product Demand`}
                 value={`${formatNumber(data.summary.projectedDemand)} units`}
                 detail={`Total projected product demand for ${scopeLabel} in the next ${periodDays} days.`}
                 tone="purple"
@@ -1503,12 +1505,12 @@ export function ProductDemandSummaryCards({
                 }`}
                 detail={
                     highDemandItems > 0
-                        ? `Top ${Math.min(3, highDemandItems)} are shown in Product Demand below. View all to see every high-demand product.`
+                        ? `See the product forecast table below for details.`
                         : "No products are currently classified as high demand."
                 }
                 tone="green"
             />
-            <SummaryCard
+            {canViewInventory && <SummaryCard
                 icon={<TriangleAlert size={18} />}
                 title="Stock Planning Actions"
                 value={`${formatNumber(stockActionCount)} action item${
@@ -1516,24 +1518,8 @@ export function ProductDemandSummaryCards({
                 }`}
                 detail="Products needing restock or stock attention after bookings and projected demand."
                 tone="gold"
-            />
-            <SummaryCard
-                icon={<CalendarDays size={18} />}
-                title="Peak Demand Months"
-                value={
-                    seasonalLoading && !seasonalData
-                        ? "Loading..."
-                        : `${formatNumber(peakDemandMonths)} month${
-                            peakDemandMonths === 1 ? "" : "s"
-                        }`
-                }
-                detail={
-                    peakDemandMonths > 0
-                        ? "Calendar months with the highest completed POS item demand in the selected seasonal period."
-                        : "No peak month is available yet. Open Seasonal Patterns to check whether enough monthly POS history exists."
-                }
-                tone="purple"
-            />
+            />}
+
         </div>
     );
 }
@@ -1554,184 +1540,57 @@ function InventoryForecastPanel({
     const demandItems = getDemandItems(data.items);
     const stockActionItems = getStockActionItems(data.items);
 
-    /*
-      The KPI, preview cards, and View all list must use the same HIGH-demand
-      collection. This keeps the number in “High-Demand Products” connected to
-      the products shown below it.
-    */
-    const highDemandProductItems = demandItems.filter(
-        (item) => String(item.demandLevel || "").toUpperCase() === "HIGH"
-    );
-    const previewLimit = 3;
-    const topHighDemandItems = highDemandProductItems.slice(0, previewLimit);
-    const highDemandItems = highDemandProductItems.length;
-    const [isShowingAllHighDemandProducts, setIsShowingAllHighDemandProducts] =
-        useState(false);
-    const displayedHighDemandItems = isShowingAllHighDemandProducts
-        ? highDemandProductItems
-        : topHighDemandItems;
-    const hasMoreHighDemandProducts =
-        highDemandProductItems.length > previewLimit;
-
     const periodDays = data.scope.periodDays || 30;
-    const [isProductDemandInfoOpen, setIsProductDemandInfoOpen] = useState(false);
+    const [showAllProducts, setShowAllProducts] = useState(false);
 
     return (
         <div className="space-y-4">
+            <div className="rounded-xl border border-[#E6DDF0] bg-[#FBF8FF] px-4 py-3 text-xs leading-5 text-[#5F4E75]">
+                <span className="font-semibold text-[#2B174C]">Forecast horizon: next {periodDays} days.</span>{" "}
+                Quantities are projections based on recorded POS demand, not confirmed future sales.
+                {data.scope.historyWeeks > 0
+                    ? ` Based on up to ${data.scope.historyWeeks} weeks of sales history.`
+                    : " Historical coverage is not specified by the forecast service."}
+                {data.items.length === 0 && " No products were returned for this scope."}
+                {!canViewInventory && " Inventory quantities and replenishment actions are restricted for this role."}
+            </div>
             {showSummaryCards && (
                 <ProductDemandSummaryCards
                     data={data}
                     seasonalData={seasonalData}
                     seasonalLoading={seasonalLoading}
+                    canViewInventory={canViewInventory}
                 />
-            )}
-
-            <section className="rounded-[14px] border border-[#D8CBE7] bg-[#F7F1FF] p-4">
-                <button
-                    type="button"
-                    onClick={() =>
-                        setIsProductDemandInfoOpen((isOpen) => !isOpen)
-                    }
-                    aria-expanded={isProductDemandInfoOpen}
-                    className="flex w-full items-center justify-between gap-3 text-left"
-                >
-                    <h3 className="text-sm font-semibold text-[#2B174C]">
-                        What is Product Demand Forecast?
-                    </h3>
-                    <ChevronDown
-                        size={18}
-                        className={`shrink-0 text-[#4E2C66] transition-transform ${
-                            isProductDemandInfoOpen ? "rotate-180" : ""
-                        }`}
-                    />
-                </button>
-
-                {isProductDemandInfoOpen && (
-                    <p className="mt-3 text-sm leading-6 text-[#5F4E75]">
-                        This view summarizes projected customer demand, high-demand
-                        products, stock planning actions, and peak-season signals.
-                        Demand Level compares each product&apos;s projected 30-day demand
-                        with other items in the same branch. Demand Trend compares
-                        recent four-week sales with the four weeks before it.
-                        Seasonality compares the current month with the product&apos;s
-                        own monthly POS history.
-                    </p>
-                )}
-            </section>
-
-            {highDemandProductItems.length > 0 ? (
-                <section aria-labelledby="highest-projected-products-title">
-                    <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-                        <div>
-                            <h3
-                                id="highest-projected-products-title"
-                                className="text-[16px] font-bold text-[#1A1220]"
-                            >
-                                {isShowingAllHighDemandProducts
-                                    ? "All High-Demand Products"
-                                    : `Top ${Math.min(previewLimit, highDemandItems)} Highest Projected Products`}
-                            </h3>
-                            <p className="mt-1 text-xs leading-5 text-[#7A6A84]">
-                                {isShowingAllHighDemandProducts
-                                    ? `Showing all ${formatNumber(highDemandItems)} high-demand products, ranked by projected ${periodDays}-day demand.`
-                                    : `Showing the top ${Math.min(previewLimit, highDemandItems)} of ${formatNumber(highDemandItems)} high-demand products, ranked by projected ${periodDays}-day demand.`}
-                            </p>
-                        </div>
-
-                        {hasMoreHighDemandProducts && (
-                            <button
-                                type="button"
-                                onClick={() =>
-                                    setIsShowingAllHighDemandProducts((showingAll) => !showingAll)
-                                }
-                                aria-expanded={isShowingAllHighDemandProducts}
-                                aria-controls="high-demand-products-list"
-                                className="inline-flex h-9 w-fit items-center justify-center gap-1.5 rounded-xl border border-[#D8CBE7] bg-white px-3 text-xs font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#7B3FE4] focus-visible:ring-offset-2"
-                            >
-                                {isShowingAllHighDemandProducts
-                                    ? `Show top ${previewLimit} only`
-                                    : `View all ${formatNumber(highDemandItems)} products`}
-                                <ChevronDown
-                                    size={15}
-                                    className={`transition-transform ${
-                                        isShowingAllHighDemandProducts ? "rotate-180" : ""
-                                    }`}
-                                />
-                            </button>
-                        )}
-                    </div>
-
-                    <div
-                        id="high-demand-products-list"
-                        className="grid gap-3 xl:grid-cols-3"
-                    >
-                        {displayedHighDemandItems.map((item) => (
-                            <ProductDemandCard
-                                key={item.id}
-                                item={item}
-                                canViewInventory={canViewInventory}
-                            />
-                        ))}
-                    </div>
-                </section>
-            ) : demandItems.length > 0 ? (
-                <section aria-labelledby="highest-projected-products-title">
-                    <div className="mb-3">
-                        <h3
-                            id="highest-projected-products-title"
-                            className="text-[16px] font-bold text-[#1A1220]"
-                        >
-                            Top {Math.min(previewLimit, demandItems.length)} Highest Projected Products
-                        </h3>
-                        <p className="mt-1 text-xs leading-5 text-[#7A6A84]">
-                            No products are currently classified as high demand. These are the products with the highest projected {periodDays}-day demand.
-                        </p>
-                    </div>
-
-                    <div className="grid gap-3 xl:grid-cols-3">
-                        {demandItems.slice(0, previewLimit).map((item) => (
-                            <ProductDemandCard
-                                key={item.id}
-                                item={item}
-                                canViewInventory={canViewInventory}
-                            />
-                        ))}
-                    </div>
-                </section>
-            ) : (
-                <ForecastEmptyState />
             )}
 
             <section className="overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
                 <div className="flex flex-col gap-2 border-b border-[#E6DDF0] px-4 py-3.5 md:flex-row md:items-center md:justify-between">
                     <div>
                         <h3 className="text-[16px] font-bold text-[#1A1220]">
-                            All Demand Signals by Product
+                            Product Demand Forecast
                         </h3>
                         <p className="mt-1 text-xs leading-5 text-[#7A6A84]">
-                            This complete table includes every product with projected demand: High, Moderate, and Lower demand. The cards above are a focused high-demand preview.
+                            Predicted demand by product. Review stock actions in the section below.
                         </p>
                     </div>
                     <span className="w-fit rounded-full border border-[#D8CBE7] bg-[#F7F1FF] px-2.5 py-1 text-xs font-semibold text-[#4E2C66]">
-                        All projected products · next {data.scope.periodDays} days
+                        Next {periodDays} days
                     </span>
                 </div>
 
                 {demandItems.length > 0 ? (
                     <div className="max-h-[420px] overflow-auto">
-                        <table className="w-full min-w-[1120px] border-collapse">
+                        <table className="w-full min-w-[720px] border-collapse">
                             <thead className="sticky top-0 z-10 bg-[#FFFCF7]">
                             <tr className="border-b border-[#E6DDF0]">
                                 <ForecastTableHeader>Product</ForecastTableHeader>
                                 <ForecastTableHeader>Demand Level</ForecastTableHeader>
                                 <ForecastTableHeader>Demand Trend</ForecastTableHeader>
-                                <ForecastTableHeader>Seasonal Signal</ForecastTableHeader>
-                                <ForecastTableHeader>30-Day Demand</ForecastTableHeader>
-                                <ForecastTableHeader>Movement</ForecastTableHeader>
+                                <ForecastTableHeader>{periodDays}-Day Demand</ForecastTableHeader>
                             </tr>
                             </thead>
                             <tbody>
-                            {demandItems.slice(0, 30).map((item) => (
+                            {(showAllProducts ? demandItems : demandItems.slice(0, 30)).map((item) => (
                                 <tr
                                     key={item.id}
                                     className="border-b border-[#EEE7F2] last:border-b-0"
@@ -1754,26 +1613,8 @@ function InventoryForecastPanel({
                                             className={growthTrendClass(item)}
                                         />
                                     </ForecastTableCell>
-                                    <ForecastTableCell>
-                                        <div>
-                                            <SignalBadge
-                                                label={seasonalityLabel(item.seasonality)}
-                                                className={seasonalityClass(item.seasonality)}
-                                            />
-                                            <p className="mt-1 max-w-[260px] text-xs leading-5 text-[#806A8C]">
-                                                {item.seasonality?.peakMonths?.length
-                                                    ? `Highest recorded months: ${item.seasonality.peakMonths
-                                                        .slice(0, 2)
-                                                        .join(", ")}`
-                                                    : "No item-level seasonal pattern yet"}
-                                            </p>
-                                        </div>
-                                    </ForecastTableCell>
                                     <ForecastTableCell strong>
                                         {formatNumber(item.forecastedDemand)} items expected
-                                    </ForecastTableCell>
-                                    <ForecastTableCell>
-                                        {movementLabel(item.movementClass)}
                                     </ForecastTableCell>
                                 </tr>
                             ))}
@@ -1786,9 +1627,14 @@ function InventoryForecastPanel({
                         window.
                     </div>
                 )}
+                {demandItems.length > 30 && (
+                    <button type="button" onClick={() => setShowAllProducts((value) => !value)} className="m-3 rounded-lg border border-[#D8CBE7] bg-[#FBF8FF] px-3 py-2 text-xs font-semibold text-[#4E2C66]">
+                        {showAllProducts ? "Show first 30 products" : `View all ${formatNumber(demandItems.length)} products`}
+                    </button>
+                )}
             </section>
 
-            <section className="overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
+            {canViewInventory && <section className="overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
                 <div className="flex flex-col gap-2 border-b border-[#E6DDF0] px-4 py-3.5 md:flex-row md:items-center md:justify-between">
                     <div>
                         <h3 className="text-[16px] font-bold text-[#1A1220]">
@@ -1816,7 +1662,7 @@ function InventoryForecastPanel({
                                 <ForecastTableHeader>Stock Risk</ForecastTableHeader>
                                 <ForecastTableHeader>Available After Bookings</ForecastTableHeader>
                                 <ForecastTableHeader>Stockout Estimate</ForecastTableHeader>
-                                <ForecastTableHeader>30-Day Demand</ForecastTableHeader>
+                                <ForecastTableHeader>{periodDays}-Day Demand</ForecastTableHeader>
                                 <ForecastTableHeader>Suggested Stock Action</ForecastTableHeader>
                             </tr>
                             </thead>
@@ -1863,11 +1709,10 @@ function InventoryForecastPanel({
                     </div>
                 ) : (
                     <div className="p-6 text-center text-sm text-[#7A6A84]">
-                        Current stock can cover the recorded demand signal. No stock
-                        action is required right now.
+                        No products are currently flagged for a stock planning action.
                     </div>
                 )}
-            </section>
+            </section>}
         </div>
     );
 }
@@ -2198,7 +2043,7 @@ function SeasonalBreakdownTable({
                     Monthly Demand Breakdown
                 </h3>
                 <p className="mt-1 text-xs text-[#7A6A84]">
-                    Every value is based on completed POS item quantities. The source year for each calendar month is shown below the month name.
+                    Historical POS item quantities. "Vs average" compares each month with the selected period's overall monthly mean; the demand-level badges use relative thresholds. The source year is shown below each month.
                 </p>
             </div>
 
@@ -2547,22 +2392,19 @@ function SeasonalPanelHeader({
                 </div>
                 <div>
                     <h2 className="text-[17px] font-bold text-[#1A1220]">
-                        Branch Seasonal Demand Overview
+                        Seasonal Demand
                     </h2>
                     <p className="mt-1 max-w-3xl text-sm leading-6 text-[#7A6A84]">
-                        Understand how customer demand changes throughout the year
-                        based on the quantity of completed POS items sold. This view
-                        shows item quantity, not peso revenue and not the number of
-                        orders.
+                        Prepare for upcoming busy and quiet months using recorded POS demand. Historical patterns below are evidence, not confirmed future predictions.
                     </p>
                 </div>
             </div>
 
-            <SeasonalPeriodPicker
-                range={range}
-                onApply={onApplyRange}
-                loading={loading}
-            />
+            <details className="relative shrink-0 rounded-xl border border-[#E6DDF0] bg-white px-3 py-2">
+                <summary className="cursor-pointer text-xs font-semibold text-[#5F4E75]">Historical basis · change source period</summary>
+                <p className="mt-2 max-w-xs text-xs leading-5 text-[#806A8C]">This controls past sales records, not how far ahead the system predicts. Prefer complete months and up to 36 months of history.</p>
+                <div className="mt-2"><SeasonalPeriodPicker range={range} onApply={onApplyRange} loading={loading} /></div>
+            </details>
         </div>
     );
 }
@@ -2683,7 +2525,6 @@ function SeasonalForecastPanel({
         .filter((month) => month.observations > 0)
         .sort((first, second) => first.monthNumber - second.monthNumber)
         .map((month, index, allMonths) => {
-            const average = numberValue(month.averageUnits);
             const previous = index > 0 ? numberValue(allMonths[index - 1].totalUnits) : null;
 
             return {
@@ -2692,10 +2533,8 @@ function SeasonalForecastPanel({
                     month.monthNumber,
                     seasonal.monthlyHistory
                 ),
-                changeFromAverage: seasonalPercentageDifference(
-                    numberValue(month.totalUnits),
-                    average
-                ),
+                // Filled after the overall period mean is calculated below.
+                changeFromAverage: null,
                 changeFromPrevious:
                     previous === null
                         ? null
@@ -2711,6 +2550,21 @@ function SeasonalForecastPanel({
             ? rows.reduce((total, row) => total + numberValue(row.totalUnits), 0) /
             rows.length
             : 0;
+
+    // Compare every calendar month against the SAME selected-period mean.
+    // Previously this compared each month with its own averageUnits, causing
+    // misleading +0% results when only one observation existed per month.
+    rows.forEach((row) => {
+        row.changeFromAverage = seasonalPercentageDifference(
+            numberValue(row.totalUnits),
+            averageMonthlyItems
+        );
+    });
+
+    const latestMonthKey = new Date().toISOString().slice(0, 7);
+    const includesCurrentPartialMonth = seasonal.monthlyHistory.some(
+        (month) => month.monthKey === latestMonthKey
+    );
 
     const peakRows = [...rows]
         .sort((first, second) => second.totalUnits - first.totalUnits)
@@ -2750,148 +2604,126 @@ function SeasonalForecastPanel({
                 </div>
             )}
 
+            <section className="mt-4 rounded-xl border border-[#D9C9F4] bg-[#F7F1FF] p-4">
+                <h3 className="text-sm font-bold text-[#2B174C]">Upcoming monthly demand forecast</h3>
+                <p className="mt-1 text-sm leading-6 text-[#5F4E75]">Not available yet. The current API returns historical POS patterns, not validated predictions for the next 3, 6 or 12 months or product/category seasonal projections. We will add a future-month selector when that calculation is implemented.</p>
+                <p className="mt-2 text-xs text-[#806A8C]">For now, use the recorded peak and low months below as planning clues only, not as next-year forecasts.</p>
+            </section>
+
+            {includesCurrentPartialMonth && (
+                <div className="mt-3 rounded-xl border border-[#F4D79A] bg-[#FFF8E8] px-3 py-2 text-xs leading-5 text-[#8A5A06]">
+                    <span className="font-semibold">Partial-month caution:</span>{" "}
+                    The current calendar month is included in the backend results. Its sales are incomplete,
+                    so low-month rankings, monthly averages, and recent-trend figures may be misleading.
+                    Select a range ending in the previous completed month for a fair comparison.
+                </div>
+            )}
+
             {seasonalLoading && (
                 <p className="mt-3 text-xs font-medium text-[#6D3DF5]">
                     Updating the selected sales period...
                 </p>
             )}
 
-            <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-                <InsightValue
-                    label="Peak demand months"
-                    value={peakNames || "No peak month yet"}
-                    detail="Highest completed POS item quantities"
-                    accent="purple"
-                />
-                <InsightValue
-                    label="Lowest demand months"
-                    value={lowestNames || "No low month yet"}
-                    detail="Lowest completed POS item quantities"
-                    accent="blue"
-                />
-                <InsightValue
-                    label="Recent demand trend"
-                    value={recentTrendValue}
-                    detail="Latest 3 months compared with previous 3 months"
-                    accent={
-                        String(seasonal.recentTrend || "").toUpperCase() === "GROWING"
-                            ? "green"
-                            : "purple"
-                    }
-                />
-                <InsightValue
-                    label="Average monthly items sold"
-                    value={`${formatNumber(Math.round(averageMonthlyItems))} items`}
-                    detail="Average across this selected sales period"
-                    accent="purple"
-                />
-                <InsightValue
-                    label="Seasonality strength"
-                    value={oneYearOnly ? `Preliminary · ${seasonality.label}` : seasonality.label}
-                    detail={
-                        oneYearOnly
-                            ? "One 12-month sales period analysed"
-                            : seasonality.detail
-                    }
-                    accent="purple"
-                />
-            </div>
-
-            <div className="mt-4 grid items-stretch gap-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,0.8fr)]">
-                <section className="flex min-h-[420px] flex-col rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                        <div>
-                            <h3 className="text-[16px] font-bold text-[#1A1220]">
-                                Monthly Demand Pattern
-                            </h3>
-                            <p className="mt-1 text-xs text-[#7A6A84]">
-                                Completed POS item quantities across {periodLabel}.
-                            </p>
-                        </div>
-                        <div className="flex flex-wrap gap-x-4 gap-y-2 text-[11px] font-medium text-[#6A5976]">
+            <details className="mt-4 rounded-xl border border-[#E6DDF0] bg-white p-4">
+                <summary className="cursor-pointer text-sm font-semibold text-[#2B174C]">View historical monthly patterns and planning clues</summary>
+                <div className="mt-4 grid items-stretch gap-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,0.8fr)]">
+                    <section className="flex min-h-[420px] flex-col rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                            <div>
+                                <h3 className="text-[16px] font-bold text-[#1A1220]">
+                                    Monthly Demand Pattern
+                                </h3>
+                                <p className="mt-1 text-xs text-[#7A6A84]">
+                                    Completed POS item quantities across {periodLabel}.
+                                </p>
+                            </div>
+                            <div className="flex flex-wrap gap-x-4 gap-y-2 text-[11px] font-medium text-[#6A5976]">
                             <span className="inline-flex items-center gap-1.5">
                                 <span className="h-0.5 w-5 rounded bg-[#6D3DF5]" />
                                 Items sold per month
                             </span>
-                            <span className="inline-flex items-center gap-1.5">
+                                <span className="inline-flex items-center gap-1.5">
                                 <span className="h-0 w-5 border-t-2 border-dashed border-[#B9A7D8]" />
                                 12-month average
                             </span>
-                        </div>
-                    </div>
-                    <div className="mt-3 flex min-h-0 flex-1 items-end">
-                        <SeasonalDemandChart rows={rows} average={averageMonthlyItems} />
-                    </div>
-                </section>
-
-                <section className="flex min-h-[420px] flex-col rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
-                    <h3 className="text-[16px] font-bold text-[#1A1220]">
-                        Seasonal Insights
-                    </h3>
-                    <div className="mt-3 space-y-2.5">
-                        <div className="flex gap-2.5">
-                            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#EDFBF1] text-[#138342]">
-                                <TrendingUp size={15} />
-                            </div>
-                            <div>
-                                <p className="text-[13px] font-semibold text-[#2B174C]">Peak Demand Months</p>
-                                <p className="mt-0.5 text-[11px] leading-4 text-[#5F4E75]">
-                                    {peakNames || "No peak month"} had the highest recorded demand. The highest month was {highestVsAverage === null ? "—" : `${formatSeasonalPercentage(highestVsAverage)} above`} the selected-period average.
-                                </p>
                             </div>
                         </div>
+                        <div className="mt-3 flex min-h-0 flex-1 items-end">
+                            <SeasonalDemandChart rows={rows} average={averageMonthlyItems} />
+                        </div>
+                    </section>
 
-                        <div className="flex gap-2.5">
-                            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#F2ECFF] text-[#5C35CC]">
-                                <TrendingUp size={15} />
+                    <section className="flex min-h-[420px] flex-col rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
+                        <h3 className="text-[16px] font-bold text-[#1A1220]">
+                            Seasonal Insights
+                        </h3>
+                        <div className="mt-3 space-y-2.5">
+                            <div className="flex gap-2.5">
+                                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#EDFBF1] text-[#138342]">
+                                    <TrendingUp size={15} />
+                                </div>
+                                <div>
+                                    <p className="text-[13px] font-semibold text-[#2B174C]">Peak Demand Months</p>
+                                    <p className="mt-0.5 text-[11px] leading-4 text-[#5F4E75]">
+                                        {peakNames || "No peak month"} had the highest recorded demand. The highest month was {highestVsAverage === null ? "—" : `${formatSeasonalPercentage(highestVsAverage)} above`} the selected-period average.
+                                    </p>
+                                </div>
                             </div>
-                            <div>
-                                <p className="text-[13px] font-semibold text-[#2B174C]">Recent Demand Change</p>
-                                <p className="mt-0.5 text-[11px] leading-4 text-[#5F4E75]">
-                                    {recentTrendValue}. This compares recent completed POS item sales with the three months before them.
-                                </p>
+
+                            <div className="flex gap-2.5">
+                                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#F2ECFF] text-[#5C35CC]">
+                                    <TrendingUp size={15} />
+                                </div>
+                                <div>
+                                    <p className="text-[13px] font-semibold text-[#2B174C]">Recent Demand Change</p>
+                                    <p className="mt-0.5 text-[11px] leading-4 text-[#5F4E75]">
+                                        {recentTrendValue}. This compares recent completed POS item sales with the three months before them.
+                                    </p>
+                                </div>
+                            </div>
+
+                            <div className="flex gap-2.5">
+                                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#F1F8FF] text-[#3376B1]">
+                                    <TriangleAlert size={15} />
+                                </div>
+                                <div>
+                                    <p className="text-[13px] font-semibold text-[#2B174C]">Lower Demand Months</p>
+                                    <p className="mt-0.5 text-[11px] leading-4 text-[#5F4E75]">
+                                        {lowestNames || "No lower-demand month"} had the lowest completed POS item quantities in this sales period.
+                                    </p>
+                                </div>
+                            </div>
+
+                            <div className="flex gap-2.5">
+                                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#FFF4D8] text-[#A56607]">
+                                    <CalendarDays size={15} />
+                                </div>
+                                <div>
+                                    <p className="text-[13px] font-semibold text-[#2B174C]">Planning Recommendation</p>
+                                    <p className="mt-0.5 text-[11px] leading-4 text-[#5F4E75]">
+                                        Review product availability and booking capacity 2–3 weeks before peak months, especially for products with high-demand or low-stock signals.
+                                    </p>
+                                </div>
                             </div>
                         </div>
 
-                        <div className="flex gap-2.5">
-                            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#F1F8FF] text-[#3376B1]">
-                                <TriangleAlert size={15} />
-                            </div>
-                            <div>
-                                <p className="text-[13px] font-semibold text-[#2B174C]">Lower Demand Months</p>
-                                <p className="mt-0.5 text-[11px] leading-4 text-[#5F4E75]">
-                                    {lowestNames || "No lower-demand month"} had the lowest completed POS item quantities in this sales period.
-                                </p>
-                            </div>
+                        <div className="mt-auto rounded-xl border border-[#E5DCF5] bg-[#F7F1FF] p-2.5">
+                            <p className="text-[10px] font-semibold uppercase tracking-[0.07em] text-[#6D3DF5]">
+                                Key takeaway
+                            </p>
+                            <p className="mt-1 text-xs leading-4 text-[#4D3862]">
+                                This branch shows a {oneYearOnly ? "preliminary " : ""}{seasonality.label.toLowerCase()} seasonal demand pattern. {peakNames || "The highest-demand months"} recorded the most completed POS item sales during {periodLabel}.
+                            </p>
                         </div>
+                    </section>
+                </div>
 
-                        <div className="flex gap-2.5">
-                            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#FFF4D8] text-[#A56607]">
-                                <CalendarDays size={15} />
-                            </div>
-                            <div>
-                                <p className="text-[13px] font-semibold text-[#2B174C]">Planning Recommendation</p>
-                                <p className="mt-0.5 text-[11px] leading-4 text-[#5F4E75]">
-                                    Review product availability and booking capacity 2–3 weeks before peak months, especially for products with high-demand or low-stock signals.
-                                </p>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div className="mt-auto rounded-xl border border-[#E5DCF5] bg-[#F7F1FF] p-2.5">
-                        <p className="text-[10px] font-semibold uppercase tracking-[0.07em] text-[#6D3DF5]">
-                            Key takeaway
-                        </p>
-                        <p className="mt-1 text-xs leading-4 text-[#4D3862]">
-                            This branch shows a {oneYearOnly ? "preliminary " : ""}{seasonality.label.toLowerCase()} seasonal demand pattern. {peakNames || "The highest-demand months"} recorded the most completed POS item sales during {periodLabel}.
-                        </p>
-                    </div>
-                </section>
-            </div>
-
-            <div className="mt-4">
-                <SeasonalBreakdownTable rows={rows} average={averageMonthlyItems} />
-            </div>
+            </details>
+            <details className="mt-4 rounded-xl border border-[#E6DDF0] bg-white p-4">
+                <summary className="cursor-pointer text-sm font-semibold text-[#2B174C]">View detailed historical month breakdown</summary>
+                <div className="mt-3"><SeasonalBreakdownTable rows={rows} average={averageMonthlyItems} /></div>
+            </details>
 
             <div className="mt-4 rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-4 py-3 text-xs leading-5 text-[#5F4E75]">
                 <p className="font-semibold text-[#2B174C]">Data clarity</p>
@@ -2905,6 +2737,82 @@ function SeasonalForecastPanel({
                 )}
             </div>
         </section>
+    );
+}
+
+function BookingDemandPanel({
+                                bookingData, bookingLoading, bookingError,
+                            }: {
+    bookingData?: BookingApiResponse | null;
+    bookingLoading?: boolean;
+    bookingError?: string | null;
+}) {
+    if (bookingLoading && !bookingData) return <PanelLoading label="Rental and booking demand" />;
+    if (bookingError && !bookingData) return <PanelError title="Booking data unavailable" message={bookingError} />;
+    const booking = bookingData?.booking;
+    if (!booking) return <p className="rounded-xl border border-[#E6DDF0] p-5 text-sm text-[#6B5B78]">Booking demand information is not available for this scope.</p>;
+    const packages = booking.topPackages ?? [];
+    const allocations = booking.allocationSummary;
+    return (
+        <div className="space-y-4">
+            <div className="rounded-xl border border-[#E6DDF0] bg-[#FBF8FF] px-4 py-3 text-xs leading-5 text-[#5F4E75]">
+                <strong className="text-[#2B174C]">Recorded bookings · next {booking.periodDays} days.</strong>{" "}
+                These counts describe bookings already recorded, not a statistical prediction of new bookings. Individual rental demand and capacity forecasts require item-level rental schedules and availability data.
+            </div>
+            <div className="grid gap-3 sm:grid-cols-3">
+                <InsightValue label="Upcoming bookings" value={formatNumber(booking.expectedBookings)} detail="Existing bookings in the selected period" />
+                <InsightValue label="Confirmed" value={formatNumber(booking.confirmedBookings)} detail="Confirmed bookings" />
+                <InsightValue label="Preparing" value={formatNumber(booking.preparingBookings)} detail="Bookings in preparation" />
+            </div>
+            <section className="rounded-xl border border-[#E6DDF0] bg-white p-4">
+                <h3 className="text-sm font-bold text-[#2B174C]">Recorded package bookings</h3>
+                {packages.length ? (
+                    <div className="mt-3 divide-y divide-[#EEE7F2]">
+                        {packages.slice(0, 10).map((pkg) => (
+                            <div key={pkg.packageName} className="flex items-center justify-between gap-3 py-2 text-sm">
+                                <span className="text-[#4D3862]">{pkg.packageName}</span>
+                                <strong className="text-[#2B174C]">{formatNumber(pkg.bookings)} bookings</strong>
+                            </div>
+                        ))}
+                    </div>
+                ) : <p className="mt-2 text-sm text-[#7A6A84]">No package booking breakdown is available.</p>}
+            </section>
+            <section className="rounded-xl border border-[#E6DDF0] bg-white p-4">
+                <h3 className="text-sm font-bold text-[#2B174C]">Individual rentals & capacity readiness</h3>
+                <p className="mt-2 text-sm leading-6 text-[#6B5B78]">
+                    {allocations && bookingData?.scope.branchId === null ? `${formatNumber(allocations.allocatedUnits)} item units are linked to bookings across branches. ` : ""}
+                    Individual rental demand, date-overlap availability, and capacity shortages cannot be calculated reliably from this response. No shortage is assumed.
+                </p>
+                {allocations?.bookingsWithoutAllocation > 0 && (
+                    <p className="mt-2 text-xs text-[#A56607]">{formatNumber(allocations.bookingsWithoutAllocation)} bookings have no linked item allocation; verify requirements before confirming availability.</p>
+                )}
+            </section>
+        </div>
+    );
+}
+
+function ForecastAccuracyPanel({ data }: { data: ForecastApiResponse }) {
+    return (
+        <div className="space-y-4">
+            <section className="rounded-xl border border-[#E6DDF0] bg-[#FBF8FF] p-4">
+                <h3 className="text-sm font-bold text-[#2B174C]">Forecast method and evaluation</h3>
+                <p className="mt-2 text-sm leading-6 text-[#6B5B78]">The current service provides projected demand based on up to {formatNumber(data.scope.historyWeeks)} weeks of recorded sales. The exact model configuration and its validation must be verified in the backend before being presented as a confirmed mathematical method.</p>
+            </section>
+            <div className="grid gap-3 sm:grid-cols-2">
+                <InsightValue label="MAE" value="Not available" detail="Requires historical out-of-sample predictions and actual results" />
+                <InsightValue label="RMSE" value="Not available" detail="Requires historical out-of-sample predictions and actual results" />
+            </div>
+            <section className="rounded-xl border border-[#E6DDF0] bg-white p-4">
+                <h3 className="text-sm font-bold text-[#2B174C]">Actual vs. predicted demand</h3>
+                <p className="mt-2 text-sm leading-6 text-[#6B5B78]">A comparison chart will appear after time-aligned historical predictions and actual sales are available. Current live projections cannot be used as evidence of forecast accuracy.</p>
+                <details className="mt-3 rounded-lg bg-[#FBF8FF] p-3 text-sm text-[#5F4E75]">
+                    <summary className="cursor-pointer font-semibold text-[#2B174C]">View error computations</summary>
+                    <p className="mt-2">MAE = average of absolute differences between actual and predicted demand.</p>
+                    <p className="mt-1">RMSE = square root of the average squared prediction errors.</p>
+                    <p className="mt-1">Both require historical backtesting, with predictions generated without using future observations.</p>
+                </details>
+            </section>
+        </div>
     );
 }
 
@@ -2956,13 +2864,15 @@ export function ForecastDetails({
                     <ForecastTabButton
                         active={activeTab === "inventory"}
                         onClick={() => onTabChange("inventory")}
-                        label="Product Demand"
+                        label="Product & Inventory"
                     />
                     <ForecastTabButton
                         active={activeTab === "seasonal"}
                         onClick={() => onTabChange("seasonal")}
-                        label="Seasonal Patterns"
+                        label="Seasonal Demand"
                     />
+                    <ForecastTabButton active={activeTab === "booking"} onClick={() => onTabChange("booking")} label="Rental & Booking" />
+
                 </div>
             </div>
 
@@ -2986,6 +2896,13 @@ export function ForecastDetails({
                         onApplySeasonalRange={applySeasonalRange}
                     />
                 )}
+                {activeTab === "booking" && (
+                    <BookingDemandPanel bookingData={bookingData} bookingLoading={bookingLoading} bookingError={bookingError} />
+                )}
+                <details className="mt-5 rounded-xl border border-[#E6DDF0] bg-[#FCFBFE] p-4">
+                    <summary className="cursor-pointer text-xs font-semibold text-[#5F4E75]">How forecasts are calculated and evaluated (technical reference)</summary>
+                    <div className="mt-3"><ForecastAccuracyPanel data={data} /></div>
+                </details>
 
             </div>
         </section>

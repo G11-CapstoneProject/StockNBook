@@ -425,7 +425,7 @@ export default function SetupScreen() {
                                                 <div className="mt-5 space-y-4">
                                                     <TextInput
                                                         label="Branch name"
-                                                        placeholder="e.g. Main Branch"
+                                                        placeholder="Main Branch"
                                                         value={
                                                             branches[index]
                                                                 ?.branch_name || ""
@@ -442,7 +442,7 @@ export default function SetupScreen() {
                                                     <div className="grid gap-4 sm:grid-cols-2">
                                                         <TextInput
                                                             label="Branch contact number"
-                                                            placeholder="e.g. 0912 345 6789"
+                                                            placeholder="0912 345 6789"
                                                             value={
                                                                 branches[index]
                                                                     ?.contact_number ||
@@ -495,7 +495,7 @@ export default function SetupScreen() {
                                                         <div className="mt-4 grid gap-4 sm:grid-cols-2">
                                                             <TextInput
                                                                 label="Manager name"
-                                                                placeholder="e.g. Ana Cruz"
+                                                                placeholder="Ana Cruz"
                                                                 value={
                                                                     branches[index]
                                                                         ?.manager_name ||

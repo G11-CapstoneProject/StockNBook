@@ -3,7 +3,7 @@
 import * as React from "react";
 import {
     BarChart3, Boxes, CalendarClock, ChevronDown,
-    Download, RefreshCw, Search, ShoppingCart, X,
+    Download, RefreshCw, Search, ShoppingCart, X, CalendarDays, Calculator, Info,
 } from "lucide-react";
 import { useRentalInventory, type RentalEquipment } from "@/hooks/useRentalInventory";
 import { normalizeProduct, type Product, type ProductVariant } from "./_shared";
@@ -17,6 +17,8 @@ type RentalPerformance = { key: string; name: string; revenue: number; share: nu
 // The Owner product list is read from the existing authenticated get_products action.
 // Sold counts come separately from the selected date-range performance report.
 type OwnerStockLine = {
+    totalStock: Amount;
+    reservedStock: Amount;
     availableStock: number | null;
     // Match Manager status calculation; keep missing sellable quantities distinct in the table.
     statusStock: number | null;
@@ -31,6 +33,8 @@ function ownerSellableStock(value: number | null | undefined): number | null {
 }
 function ownerStockLine(line: Product | ProductVariant): OwnerStockLine {
     return {
+        totalStock: ownerSellableStock(line.branchStock),
+        reservedStock: ownerSellableStock(line.reservedStock),
         availableStock: ownerSellableStock(line.sellableStock),
         // Manager displays sellable stock for status and falls back to catalog stock
         // when the API omits sellableStock. Never use this fallback as the Owner's
@@ -105,10 +109,10 @@ function ownerProductStatus(product: OwnerCatalogProduct, now = new Date()): Own
 }
 // Owner reports show current availability (today), not availability on historical sales dates.
 type OwnerRentalStatus = "Available" | "Unavailable";
-function ownerRentalStatusGroup(item: RentalEquipment): OwnerRentalStatus | null {
+function ownerRentalStatusGroup(item: RentalEquipment, available: Amount = item.bookableToday): OwnerRentalStatus | null {
     // Missing availability is not a confirmed zero; archived items are excluded from the list.
-    if (!item.active || item.bookableToday == null || !Number.isFinite(item.bookableToday)) return null;
-    return item.bookableToday > 0 ? "Available" : "Unavailable";
+    if (!item.active || available == null || !Number.isFinite(available)) return null;
+    return available > 0 ? "Available" : "Unavailable";
 }
 function OwnerConsumableStatusText({status}: {status: OwnerConsumableStatus}) {
     const color: Record<OwnerConsumableStatus, string> = {
@@ -148,12 +152,56 @@ type DateRange = { startDate: string; endDate: string };
 type DatePreset = "Today" | "This Week" | "This Month" | "This Year" | "All Time" | "Custom Date Range";
 const datePresets: DatePreset[] = ["Today", "This Week", "This Month", "This Year", "All Time", "Custom Date Range"];
 type OwnerKpi = { label: string; value: Amount | undefined; unit: "money" | "count" };
+type InventoryKpiTone = "purple" | "green" | "blue" | "amber";
+type InventoryKpiDetail = {
+    kpi: OwnerKpi;
+    tone: InventoryKpiTone;
+    icon: React.ReactNode;
+    period: string;
+    scope: string;
+    filters: string;
+    formula: string;
+    items: Array<{ key: string; label: string; value: Amount | undefined; note?: string }>;
+    description: string;
+};
+const inventoryKpiTones = {
+    purple: { icon: "bg-[#F3EBFF] text-[#6C3AD6]", surface: "border-[#E6DDF0] bg-[#F8F4FE] text-[#543099]" },
+    green: { icon: "bg-[#EAF7F0] text-[#25865B]", surface: "border-[#D7EBDF] bg-[#F0FAF4] text-[#206B49]" },
+    amber: { icon: "bg-[#FFF7E9] text-[#B7832E]", surface: "border-[#F3E2C2] bg-[#FFFAF0] text-[#8C601F]" },
+    blue: { icon: "bg-[#E8F1FF] text-[#2169CF]", surface: "border-[#D6E5FC] bg-[#F2F7FF] text-[#205AA8]" },
+} as const;
+function inventoryKpiTone(index: number): InventoryKpiTone {
+    return index === 1 ? "amber" : index === 3 ? "blue" : index === 2 ? "green" : "purple";
+}
+function inventoryKpiIcon(index: number, isConsumable: boolean) {
+    return index === 0 ? (isConsumable ? <ShoppingCart size={20}/> : <Boxes size={20}/>) : index === 2 ? <BarChart3 size={20}/> : <Boxes size={20}/>;
+}
+function inventoryKpiDate(key: string) {
+    return new Date(`${key}T00:00:00Z`).toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" });
+}
+type RentalTodayBalance = { available: number; reserved: number };
+type RentalTodaySnapshot = { date: string; balances: Record<number, RentalTodayBalance> };
 type RentalBranchData = {
+    today: RentalTodaySnapshot | null;
     items: RentalEquipment[];
     loading: boolean;
     error: string;
 };
-type RentalListRow = { branchId: number; branchName: string; item: RentalEquipment };
+type RentalListRow = { branchId: number; branchName: string; item: RentalEquipment; available: Amount; reserved: Amount };
+function inventoryBalanceText(value: Amount) { return value == null ? "—" : formatNumber(value); }
+function validBalance(value: unknown): value is number {
+    return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+function normalizeRentalToday(response: { availability?: unknown }): Record<number, RentalTodayBalance> {
+    if (!Array.isArray(response.availability)) throw new Error("Rental reservation data unavailable.");
+    const balances: Record<number, RentalTodayBalance> = {};
+    for (const row of response.availability) {
+        if (!row || !validBalance(row.equipmentId) || row.equipmentId <= 0 ||
+            !validBalance(row.availableUnits) || !validBalance(row.reservedUnits)) continue;
+        balances[row.equipmentId] = { available: row.availableUnits, reserved: row.reservedUnits };
+    }
+    return balances;
+}
 
 const cardClass = "min-w-0 overflow-hidden rounded-[16px] border border-[#E7DFEC] bg-white shadow-sm";
 const scrollPanel = "min-h-0 w-full overflow-auto overscroll-contain border-t border-[#E9E1EE]";
@@ -227,17 +275,14 @@ function SectionHeading({ icon, title, subtitle }: { icon: React.ReactNode; titl
             {subtitle && <p className="mt-0.5 text-[11px] text-[#86778F]">{subtitle}</p>}</div>
     </div>;
 }
-function MetricCard({ label, value, helper, icon, loading = false, tone = "purple" }: {
+function MetricCard({ label, value, helper, icon, loading = false, tone = "purple", onClick }: {
     label: string; value: string; helper: string; icon: React.ReactNode;
-    loading?: boolean; tone?: "purple" | "green" | "blue" | "amber";
+    loading?: boolean; tone?: InventoryKpiTone; onClick: () => void;
 }) {
-    const iconClassName = {
-        purple: "bg-[#F3EBFF] text-[#6C3AD6]",
-        green: "bg-[#EAF7F0] text-[#25865B]",
-        blue: "bg-[#E8F1FF] text-[#2169CF]",
-        amber: "bg-[#FFF7E9] text-[#B7832E]",
-    }[tone];
-    return <section aria-busy={loading} className="flex min-h-[108px] min-w-0 w-full items-center gap-3 rounded-[16px] border border-[#E6DDF0] bg-white px-3.5 py-3 text-left shadow-sm">
+    const iconClassName = inventoryKpiTones[tone].icon;
+    return <button type="button" disabled={loading} aria-busy={loading} aria-haspopup="dialog"
+                   aria-label={`View how ${label} is calculated`} title={`View ${label} breakdown`} onClick={onClick}
+                   className="flex min-h-[108px] min-w-0 w-full items-center gap-3 rounded-[16px] border border-[#E6DDF0] bg-white px-3.5 py-3 text-left shadow-sm transition enabled:cursor-pointer enabled:hover:border-[#B6A1D4] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#7651BA] disabled:cursor-wait">
         {loading ? <>
             <span className="h-12 w-12 shrink-0 animate-pulse rounded-xl bg-[#EEE8F3]" aria-hidden="true"/>
             <span className="min-w-0 flex-1 space-y-2" role="status" aria-label={`Loading ${label}`}>
@@ -253,7 +298,87 @@ function MetricCard({ label, value, helper, icon, loading = false, tone = "purpl
                 <span className="mt-1 block text-[11px] leading-4 text-[#806A8C]">{helper}</span>
             </span>
         </>}
-    </section>;
+    </button>;
+}
+function InventoryKpiDetailModal({ detail, onClose }: { detail: InventoryKpiDetail; onClose: () => void }) {
+    const dialogRef = React.useRef<HTMLDialogElement>(null);
+    const tone = inventoryKpiTones[detail.tone];
+    const amountText = (amount: Amount | undefined) => amount == null || !Number.isFinite(amount)
+        ? "Unavailable" : shownKpi({ ...detail.kpi, value: amount });
+    const isLoss = detail.kpi.label === "Consumable Gross Profit" && detail.kpi.value != null && detail.kpi.value < 0;
+    const resultLabel = isLoss ? "Gross Loss" : detail.kpi.label;
+
+    React.useEffect(() => {
+        const dialog = dialogRef.current;
+        if (!dialog) return;
+        const trigger = document.activeElement;
+        if (!dialog.open) dialog.showModal();
+        return () => {
+            if (dialog.open) dialog.close();
+            if (trigger instanceof HTMLElement && trigger.isConnected) trigger.focus({preventScroll:true});
+        };
+    }, []);
+
+    return (
+        <dialog ref={dialogRef} aria-labelledby="inventory-kpi-detail-title"
+                aria-describedby="inventory-kpi-detail-period"
+                onCancel={event=>{event.preventDefault();onClose();}}
+                onClick={event=>{if(event.target===event.currentTarget)onClose();}}
+                className="fixed inset-0 m-auto max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-[540px] overflow-y-auto rounded-[20px] border border-[#E6DDF0] bg-white p-0 text-[#25153D] shadow-2xl backdrop:bg-[#170B29]/55 backdrop:backdrop-blur-[2px]">
+            <div className="font-sans">
+                <header className="flex items-center gap-3 border-b border-[#EEE7F5] px-5 py-4 sm:px-6">
+                    <span className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl ${tone.icon}`} aria-hidden="true">{detail.icon}</span>
+                    <div className="min-w-0 flex-1">
+                        <h2 id="inventory-kpi-detail-title" className="text-[18px] font-bold leading-tight text-[#25153D]">{detail.kpi.label}</h2>
+                        <p className="mt-1 text-[11px] text-[#806A8C]">Calculation breakdown</p>
+                    </div>
+                    <button type="button" aria-label="Close calculation" onClick={onClose}
+                            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#E6DDF0] text-[#806A8C] transition hover:bg-[#F6F0FC] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#7651BA]"><X size={18}/></button>
+                </header>
+                <div className="space-y-4 px-5 py-5 sm:px-6">
+                    <div className={`rounded-2xl border px-4 py-4 ${tone.surface}`}>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="text-[11px] font-semibold uppercase tracking-wide">{resultLabel}</p>
+                            <span className="flex items-center gap-1.5 rounded-lg bg-white/75 px-2 py-1 text-[10px] font-medium"><CalendarDays size={13} aria-hidden="true"/><span id="inventory-kpi-detail-period">{detail.period}</span></span>
+                        </div>
+                        <p className={`mt-2 break-words text-[30px] font-bold leading-tight tracking-tight tabular-nums ${isLoss?"text-[#B42318]":"text-[#25153D]"}`}>{amountText(detail.kpi.value)}</p>
+                        <p className="mt-1 text-[11px] text-[#806A8C]">{detail.scope}</p>
+                        <p className="mt-1 break-words text-[11px] text-[#806A8C]">{detail.filters}</p>
+                    </div>
+                    <section aria-label="Formula" className="rounded-xl border border-[#E9E1EE] bg-[#FAF8FC] px-4 py-3">
+                        <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-[#806A8C]"><Calculator size={15} aria-hidden="true"/>Formula</div>
+                        <p className="mt-2 break-words text-[13px] font-semibold leading-5 text-[#392648]">{detail.formula}</p>
+                    </section>
+                    <section aria-label="Calculation details" className="overflow-hidden rounded-xl border border-[#E6DDF0]">
+                        <div className="flex justify-between gap-2 bg-[#FFFCF8] px-4 py-2.5 text-[10px] font-semibold uppercase tracking-wide text-[#806A8C]"><span>Breakdown</span><span>{detail.kpi.unit === "count" ? "Units" : "Amount"}</span></div>
+                        <dl className="divide-y divide-[#F1ECF4]">
+                            {detail.items.map(item => (
+                                <div key={item.key} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-4 py-3 text-[12px]">
+                                    <dt className="min-w-0 flex-1 break-words text-[#5F4E75]">{item.label}{item.note && <span className="mt-1 block text-[10px] text-[#806A8C]">{item.note}</span>}</dt>
+                                    <dd className="break-words text-right font-semibold tabular-nums text-[#25153D]">{amountText(item.value)}</dd>
+                                </div>
+                            ))}
+                            {detail.items.length === 0 && <div className="px-4 py-3 text-[12px] text-[#806A8C]">{detail.kpi.value == null ? "Calculation data unavailable." : "No items match the selected filters."}</div>}
+                            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 bg-[#F8F5FC] px-4 py-3">
+                                <dt className="text-[12px] font-bold text-[#25153D]">{isLoss?"Gross Loss":"Total"}</dt>
+                                <dd className={`break-words text-right text-[17px] font-bold tabular-nums ${isLoss?"text-[#B42318]":"text-[#25153D]"}`}>{amountText(detail.kpi.value)}</dd>
+                            </div>
+                        </dl>
+                    </section>
+                    <div className="flex items-start gap-2 rounded-xl bg-[#FAF8FC] px-3 py-3">
+                        <Info size={15} className="mt-0.5 shrink-0 text-[#806A8C]" aria-hidden="true"/>
+                        <div className="min-w-0">
+                            <p className="text-[11px] font-semibold text-[#5F4E75]">How this is calculated</p>
+                            <p className="mt-1 text-[11px] leading-[1.6] text-[#6C5E76]">{detail.description}</p>
+                        </div>
+                    </div>
+                </div>
+                <footer className="flex justify-end border-t border-[#EEE7F5] px-5 py-3 sm:px-6">
+                    <button type="button" onClick={onClose} className="rounded-xl bg-[#2B174C] px-5 py-2.5 text-[12px] font-semibold text-white transition hover:bg-[#1B0D31] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#7651BA]">Close</button>
+                </footer>
+            </div>
+        </dialog>
+    );
 }
 function OwnerTableLoadingRow({ columns, label }: { columns: number; label: string }) {
     return <tr><td colSpan={columns} className="px-4 py-10 text-center text-xs text-[#86778F]" role="status">{label}</td></tr>;
@@ -298,8 +423,9 @@ function ExportMenu({ disabled, onExport }: { disabled: boolean; onExport: () =>
 // Uses the EXISTING authorized owner read on the rental Lambda through the
 // working rental hook. This does not add or modify any backend inventory action.
 // Each branch has its own hook because hooks cannot be called inside a loop.
-function RentalBranchFeed({ branchId, onUpdate }: {
+function RentalBranchFeed({ branchId, today, onUpdate }: {
     branchId: number;
+    today: string;
     onUpdate: (branchId: number, change: Partial<RentalBranchData>) => void;
 }) {
     const rental = useRentalInventory(branchId);
@@ -310,6 +436,22 @@ function RentalBranchFeed({ branchId, onUpdate }: {
             error: rental.error || "",
         });
     }, [branchId, onUpdate, rental.equipment, rental.loading, rental.error]);
+    // Current reservation counts must come from the allocation ledger, not a
+    // subtraction of physical stock (which also includes holds and checked-out units).
+    React.useEffect(() => {
+        onUpdate(branchId, { today: null });
+        if (rental.loading || rental.refreshing || rental.error || !rental.connected) return;
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), 20000);
+        void ownerRequest<{ availability?: unknown }>("/api/rental-inventory", {
+            action: "check_availability", branch_id: branchId, start_date: today, end_date: today,
+        }, controller.signal).then(response => {
+            if (!controller.signal.aborted) onUpdate(branchId, { today: { date: today, balances: normalizeRentalToday(response) } });
+        }).catch(() => {
+            // Leave the new fields unknown if the request fails; never invent a zero.
+        }).finally(() => window.clearTimeout(timeout));
+        return () => { controller.abort(); window.clearTimeout(timeout); };
+    }, [branchId, today, onUpdate, rental.equipment, rental.loading, rental.refreshing, rental.error, rental.connected]);
     return null;
 }
 
@@ -325,14 +467,13 @@ export default function OwnerInventory() {
         update(); const timer = window.setInterval(update, 30_000); return () => window.clearInterval(timer);
     }, []);
     const [activeTab, setActiveTab] = React.useState<"consumable" | "rental">("consumable");
+    const [selectedKpi, setSelectedKpi] = React.useState<InventoryKpiDetail | null>(null);
     const [consumableBranch, setConsumableBranch] = React.useState("");
     const [rentalBranch, setRentalBranch] = React.useState("");
-    const [consumableCategory, setConsumableCategory] = React.useState("All Categories");
     const [consumablePreset, setConsumablePreset] = React.useState<DatePreset>("This Month");
     const [rentalPreset, setRentalPreset] = React.useState<DatePreset>("This Month");
     const [consumableCustom, setConsumableCustom] = React.useState<DateRange>(monthToDateRange);
     const [rentalCustom, setRentalCustom] = React.useState<DateRange>(monthToDateRange);
-    const [rentalCategory, setRentalCategory] = React.useState("All Categories");
     const [consumableStatus, setConsumableStatus] = React.useState("All Status");
     const [rentalStatus, setRentalStatus] = React.useState("All Status");
     const [consumableSearch, setConsumableSearch] = React.useState("");
@@ -366,6 +507,7 @@ export default function OwnerInventory() {
             // Avoid an effect -> parent state -> effect render loop.
             const unchanged = (Object.keys(change) as Array<keyof RentalBranchData>).every(key => {
                 if (key === "items") return JSON.stringify(existing.items || []) === JSON.stringify(change.items || []);
+                if (key === "today") return JSON.stringify(existing.today ?? null) === JSON.stringify(change.today ?? null);
                 return existing[key] === change[key];
             });
             if (unchanged) return previous;
@@ -417,7 +559,7 @@ export default function OwnerInventory() {
     }, [refresh]);
 
     // One financial request for the active tab, branch and reporting period.
-    // Category and search are applied to branch/item breakdowns below.
+    // Status and search are applied to branch/item breakdowns below.
     React.useEffect(() => {
         if (!rangeValid) return;
         const abort = new AbortController();
@@ -477,7 +619,6 @@ export default function OwnerInventory() {
     const rentalBranchName = rentalBranch
         ? branches?.find(item => String(item.id) === rentalBranch)?.branchName || "Selected branch" : "All branches";
     const activeBranchName = isConsumable ? consumableBranchName : rentalBranchName;
-    const activeCategory = isConsumable ? consumableCategory : rentalCategory;
     const activeStatus = isConsumable ? consumableStatus : rentalStatus;
     const productPerformance = new Map((consumableSource?.branchConsumables || []).map(item => [`${item.branchId}:${item.key}`, item]));
     const variantSalesAvailable = Array.isArray(consumableSource?.branchVariantUnits);
@@ -494,25 +635,23 @@ export default function OwnerInventory() {
         const row = productPerformance.get(`${product.branchId}:product:${product.id}`);
         return { ...product, unitsSold: !consumableSource ? null : row ? row.unitsSold : 0 };
     });
-    const consumableCategories = [...new Set(consumables
-        .filter(item => !consumableBranch || String(item.branchId) === consumableBranch)
-        .map(item => item.category).filter((value): value is string => Boolean(value)))]
-        .sort((a, b) => a.localeCompare(b));
     const visibleConsumables = consumables.filter(item =>
         (!consumableBranch || String(item.branchId) === consumableBranch) &&
-        (consumableCategory === "All Categories" || item.category === consumableCategory) &&
         (consumableStatus === "All Status" || ownerProductStatus(item) === consumableStatus) &&
         [item.name, item.productNumber, item.category, item.branchName,
             ...item.variants.flatMap(variant => [variant.name, variant.variantNumber])].join(" ").toLowerCase().includes(consumableSearch.toLowerCase().trim()));
+    const stockDate = businessDateString();
     const rentalRows: RentalListRow[] = selectedBranches.flatMap(selected => {
         const data = rentalByBranch[selected.id];
         const activeItems = [...new Map((data?.items || []).filter(item => item.active).map(item => [item.id, item])).values()];
-        return activeItems.map(item => ({ branchId: selected.id, branchName: selected.branchName, item }));
+        return activeItems.map(item => {
+            const balance = data?.today?.date === stockDate ? data.today.balances[item.id] : undefined;
+            return { branchId: selected.id, branchName: selected.branchName, item,
+                available: balance?.available ?? null, reserved: balance?.reserved ?? null };
+        });
     });
-    const categories = [...new Set(rentalRows.map(row => row.item.category))].sort((a, b) => a.localeCompare(b));
     const visibleRentals = rentalRows.filter(row =>
-        (rentalCategory === "All Categories" || row.item.category === rentalCategory) &&
-        (rentalStatus === "All Status" || ownerRentalStatusGroup(row.item) === rentalStatus) &&
+        (rentalStatus === "All Status" || ownerRentalStatusGroup(row.item, row.available ?? row.item.bookableToday) === rentalStatus) &&
         [row.item.equipmentNumber, row.item.name, row.item.category, row.branchName]
             .join(" ").toLowerCase().includes(rentalSearch.toLowerCase().trim()));
     const rentalRangeValid = rangeValid && validDateRange(from, to);
@@ -550,7 +689,7 @@ export default function OwnerInventory() {
         ? sumKnown(matchedProducts.map(row => row ? row.unitsSold : 0), false) : null;
     const currentRentalStock = [...new Map(visibleRentals.map(row => [`${row.branchId}:${row.item.id}`, row.item])).values()];
     // Current stock value is an investment measure, not a rental transaction expense.
-    const equipmentCost = ready && !isConsumable ? sumKnown(currentRentalStock.map(item => {
+    const equipmentStockCost = (item: RentalEquipment): Amount => {
         const units = item.totalUnits;
         const cost = item.averageUnitCost;
         if (!Number.isSafeInteger(units) || units < 0) return null;
@@ -558,7 +697,8 @@ export default function OwnerInventory() {
         if (cost == null || !Number.isFinite(cost) || cost < 0) return null;
         const cents = Math.round(cost * 100) * units;
         return Number.isSafeInteger(cents) ? cents / 100 : null;
-    })) : null;
+    };
+    const equipmentCost = ready && !isConsumable ? sumKnown(currentRentalStock.map(equipmentStockCost)) : null;
     const totalOwnedUnits = ready && !isConsumable ? sumKnown(currentRentalStock.map(item =>
         Number.isSafeInteger(item.totalUnits) && item.totalUnits >= 0 ? item.totalUnits : null), false) : null;
     // Count actual releases, not peak reserved units. Older API versions must not look like zero activity.
@@ -578,36 +718,112 @@ export default function OwnerInventory() {
     const kpiDescriptions = isConsumable
         ? ["Sales for the selected period", "Cost of items sold", "Sales less product cost", "Units sold in the selected period"]
         : ["Rental revenue for the selected period", "Current equipment stock value", "Total owned equipment units", "Units released in the selected period"];
+    // Capture the card and its exact calculation inputs together when opened.
+    // No extra request and no independent calculation that can drift from the card.
+    const openKpi = (index: number) => {
+        if (kpiLoading) return;
+        const kpi = kpis[index];
+        if (!kpi) return;
+        const currentStock = !isConsumable && (index === 1 || index === 2);
+        const period = currentStock ? `Current stock · ${inventoryKpiDate(businessDateString())}`
+            : validDateRange(from, to) ? `${inventoryKpiDate(from)} – ${inventoryKpiDate(to)}` : "Date range unavailable";
+        const detail: InventoryKpiDetail = {
+            kpi, tone: inventoryKpiTone(index), icon: inventoryKpiIcon(index, isConsumable), period,
+            scope: `${activeBranchName} · ${currentStock ? "Current inventory" : activePreset}`,
+            filters: `${activeStatus}${(isConsumable ? consumableSearch : rentalSearch).trim() ? ` · Search: ${(isConsumable ? consumableSearch : rentalSearch).trim()}` : ""}`,
+            formula: "", items: [], description: "",
+        };
+        const productRows = [...new Map(visibleConsumables.map(row => [`${row.branchId}:product:${row.id}`, row])).entries()];
+        const equipmentRows = [...new Map(visibleRentals.map(row => [`${row.branchId}:equipment:${row.item.id}`, row])).entries()];
+        const productItems = (metric: "sales" | "unitsSold") => ready ? productRows.map(([key, row]) => {
+            const recorded = productPerformance.get(key);
+            return { key, label: row.name, note: `${row.branchName || "Unassigned branch"} · ${row.productNumber || `Product #${row.id}`}`,
+                value: recorded ? recorded[metric] : 0 };
+        }) : [];
+        const equipmentItems = (valueFor: (row: RentalListRow, key: string) => Amount | undefined,
+                                noteFor?: (row: RentalListRow) => string) => ready ? equipmentRows.map(([key, row]) => ({
+            key, label: row.item.name,
+            note: `${row.branchName} · ${row.item.equipmentNumber || `Equipment #${row.item.id}`}${noteFor ? ` · ${noteFor(row)}` : ""}`,
+            value: valueFor(row, key),
+        })) : [];
+        const salesCostItems = (forCost: boolean) => ready ? [
+            { key: "sales", label: "Consumable Sales", value: kpiSales },
+            { key: forCost ? "profit" : "cost", label: forCost ? "Less: Consumable Gross Profit" : "Less: Consumable Cost",
+                value: forCost ? consumableGross : consumableCost },
+        ] : [];
+        if (isConsumable) {
+            if (index === 0) {
+                detail.formula = "Consumable Sales = Sum of recorded POS item sales";
+                detail.items = productItems("sales");
+                detail.description = "Adds saved order-item line totals for the visible products and branches, using the selected order dates. Includes recorded Cash, GCash and Bank Transfer POS orders that are not voided. Unallocated order adjustments and items outside the current filters are excluded.";
+            } else if (index === 1) {
+                detail.formula = "Consumable Cost = Consumable Sales − Consumable Gross Profit";
+                detail.items = salesCostItems(true);
+                detail.description = "The existing KPI derives cost of sold products by subtracting recorded gross profit from sales. Historical gross profit uses the cost price saved at the time of each sale multiplied by quantity sold, not today's catalog price. Missing historical costs leave the result unavailable.";
+            } else if (index === 2) {
+                detail.formula = "Consumable Gross Profit = Consumable Sales − Consumable Cost";
+                detail.items = salesCostItems(false);
+                detail.description = "The report calculates gross profit from recorded item sales less historical item costs (cost price at sale × quantity sold), summed for the visible products. This is gross profit, not net profit; other business expenses are not deducted.";
+            } else {
+                detail.formula = "Units Sold = Sum of recorded quantities sold";
+                detail.items = productItems("unitsSold");
+                detail.description = "Adds the recorded POS item quantities for the visible products during the selected order dates. Product totals include recorded variant quantities (including archived variants linked to the product) without counting expanded variant rows again.";
+            }
+        } else if (index === 0) {
+            detail.formula = "Rental Sales = Sum of recorded rental-item charges";
+            detail.items = equipmentItems((_row, key) => performance?.totals.rentalRevenue == null ? null : rentalPerformance.has(key) ? rentalPerformance.get(key)!.revenue : 0);
+            detail.description = "Uses saved booking-item line totals for rental items marked returned, cleaning, damaged or cleared. The report uses the return date, or rental end date, or event date when earlier fields are missing. Only equipment matching the current filters is included; pending reservations and current rental rates are not revenue.";
+        } else if (index === 1) {
+            detail.formula = "Equipment Cost = Sum of (Total Units × Average Unit Cost)";
+            detail.items = equipmentItems(row => equipmentStockCost(row.item), row =>
+                `${formatNumber(row.item.totalUnits)} units × ${row.item.averageUnitCost == null ? "unavailable cost" : shownMoney(row.item.averageUnitCost)}`);
+            detail.description = "Values current owned equipment using its recorded average unit cost (rounded to cents) multiplied by current total units, for each matching equipment and branch. It is an inventory investment measure, not a rental transaction expense or historical stock value. The selected sales dates do not change current stock quantities.";
+        } else if (index === 2) {
+            detail.formula = "Total Units = Sum of current owned equipment units";
+            detail.items = equipmentItems(row => Number.isSafeInteger(row.item.totalUnits) && row.item.totalUnits >= 0 ? row.item.totalUnits : null);
+            detail.description = "Adds the current total owned units of matching active equipment in each branch, not just units available for booking. The selected sales dates do not reconstruct past stock levels.";
+        } else {
+            detail.formula = "Units Rented = Sum of quantities actually released";
+            detail.items = equipmentItems(row => rentedUnitsFor(row));
+            detail.description = "Adds recorded rental booking-item quantities by release date in the selected period. A reservation without a release is not counted. Returned equipment remains part of historical release activity; the same unit can be rented more than once during the period.";
+        }
+        if (kpi.value == null) {
+            const reason = !ready ? (isConsumable ? consumablesError : [performanceError, ...rentalErrors].filter(Boolean).join(" · "))
+                : !isConsumable && index === 3 && !hasRentalUnits ? "Update the Products Lambda to return release counts." : "One or more required source values are unavailable.";
+            detail.description += ` Calculation unavailable. ${reason || "The required report or inventory data could not be loaded."}`;
+        }
+        setSelectedKpi(detail);
+    };
     const exportList = (type: "consumables" | "rentals") => {
         const isRental = type === "rentals";
         if (!ready || !rangeValid || isRental === isConsumable) return;
         const title = isRental ? "Rental Equipment List" : "Consumable Product List";
-        const headers = isRental ? ["Equipment No.", "Rental Product", "Category", "Branch", "Total Units", "Units Rented", "Current Status"]
-            : ["Product No.", "Product", "Branch", "Category", "Available Stock", "Sold", "Current Status"];
+        const headers = isRental ? ["Equipment No.", "Rental Product", "Category", "Branch", "Total Units", "Available", "Reserved", "Units Rented", "Current Status"]
+            : ["Product No.", "Product", "Branch", "Category", "Total Stock", "Available", "Reserved", "Sold", "Current Status"];
         const rows = isRental ? visibleRentals.map(row => [row.item.equipmentNumber || "—", row.item.name, row.item.category, row.branchName,
-                String(row.item.totalUnits), String(rentedUnitsFor(row) ?? "—"), ownerRentalStatusGroup(row.item) ?? "—"])
+                String(row.item.totalUnits), String(row.available ?? "—"), String(row.reserved ?? "—"), String(rentedUnitsFor(row) ?? "—"), ownerRentalStatusGroup(row.item, row.available ?? row.item.bookableToday) ?? "—"])
             : visibleConsumables.flatMap(item => {
                 const parent = [item.productNumber || "—", item.name, item.branchName || "—", item.category || "—",
-                    String(item.availableStock ?? "—"), item.variants.length ? "" : String(item.unitsSold ?? "—"), ownerProductStatus(item)];
+                    String(item.totalStock ?? "—"), String(item.availableStock ?? "—"), String(item.reservedStock ?? "—"), item.variants.length ? "" : String(item.unitsSold ?? "—"), ownerProductStatus(item)];
                 return [parent, ...item.variants.map(variant => [variant.variantNumber || "—", `${item.name} - ${variant.name}`,
-                    item.branchName || "—", item.category || "—", String(variant.availableStock ?? "—"),
+                    item.branchName || "—", item.category || "—", String(variant.totalStock ?? "—"), String(variant.availableStock ?? "—"), String(variant.reservedStock ?? "—"),
                     String(soldForVariant(item, variant) ?? "—"), ownerLineStatus(variant)])];
             });
         try {
             downloadInventoryPdf({title, headers, rows}, {
                 storeName: performance?.storeName || sessionStorage.getItem("store_name") || "StockNBook", branch: activeBranchName,
                 dateRange: `${activePreset} (${from} to ${to})`,
-                filters: [`Category: ${activeCategory} | Current Status: ${activeStatus}`, `Stock as of: ${inventoryTodayLabel()}`],
+                filters: [`Current Status: ${activeStatus}`, `Stock as of: ${inventoryTodayLabel()}`],
                 kpis: kpis.map((kpi, index): InventoryPdfKpi => ({ label: kpi.label, value: shownKpi(kpi),
                     tone: index === 0 ? "purple" : index === 1 ? "amber" : index === 2 ? "green" : "blue" })),
                 kpiTitle: "Inventory Summary",
-                summary: [isRental ? "Equipment cost and total units: current stock. Rental sales and units rented: selected dates."
-                    : "Stock: current sellable units. Sales and units sold: selected dates. Unallocated adjustments excluded.",
+                summary: [isRental ? "Total units, available, and reserved: today. Reserved includes confirmed unreleased allocations for today. Rental sales and units rented: selected dates."
+                    : "Total, available, and reserved stock: current quantities. Sales and units sold: selected dates. Unallocated adjustments excluded.",
                     ...(!isRental && visibleConsumables.some(item => item.variants.length > 0) ? [
                         "Variant rows show individual sales. Parent sold totals are omitted. Totals may include archived variants.",
                         ...(!variantSalesAvailable ? ["Variant sales unavailable; update the Products backend."] : []),
                     ] : []),
-                    ...(kpis.some(kpi => kpi.value == null) ? ["- = data unavailable."] : [])],
+                    ...(kpis.some(kpi => kpi.value == null) || (isRental ? visibleRentals.some(row => row.available == null || row.reserved == null) : visibleConsumables.some(row => [row, ...row.variants].some(line => line.totalStock == null || line.availableStock == null || line.reservedStock == null))) ? ["- = data unavailable."] : [])],
             }, isRental ? "stocknbook_rental_equipment_list" : "stocknbook_consumable_product_list");
         } catch (error) {
             setNotice(error instanceof Error ? `Export failed: ${error.message}` : "Unable to export list.");
@@ -655,24 +871,21 @@ export default function OwnerInventory() {
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 {kpis.map((kpi, index) => <MetricCard key={kpi.label} label={kpi.label} value={shownKpi(kpi)} loading={kpiLoading}
                                                       helper={kpi.value == null ? (!isConsumable && index === 3 && !Array.isArray(performance?.branchRentalUnits) && ready ? "Update Products Lambda" : "Data unavailable") : kpiDescriptions[index]}
-                                                      icon={index === 0 ? (isConsumable ? <ShoppingCart size={20}/> : <Boxes size={20}/>) : index === 2 ? <BarChart3 size={20}/> : <Boxes size={20}/>}
-                                                      tone={index === 1 ? "amber" : index === 3 ? "blue" : index === 2 ? "green" : "purple"}/>)}
+                                                      icon={inventoryKpiIcon(index, isConsumable)}
+                                                      tone={inventoryKpiTone(index)} onClick={() => openKpi(index)}/>)}
             </div>
             {performance?.warnings?.length ? <p role="note" className="text-[11px] text-[#806A8C]">{performance.warnings.join(" ")}</p> : null}
             {activeTab === "consumable" ? <section role="tabpanel" aria-label="Consumable products" className={cardClass}>
                 <div className="flex flex-col gap-3 px-4 py-3.5 xl:flex-row xl:items-center xl:justify-between">
-                    <SectionHeading icon={<ShoppingCart/>} title="Consumable Product List" subtitle="Current sellable stock and status; units sold in the selected period"/>
+                    <SectionHeading icon={<ShoppingCart/>} title="Consumable Product List" subtitle="Current physical, available, and reserved stock; units sold in the selected period"/>
                     <div className="flex flex-wrap items-center gap-2">
-                        <FilterSelect label="Filter consumable category" value={consumableCategory} onChange={setConsumableCategory} width="w-[154px]">
-                            <option>All Categories</option>{consumableCategories.map(category => <option key={category}>{category}</option>)}
-                        </FilterSelect>
-                        <FilterSelect label="Filter consumable branch" value={consumableBranch} onChange={value => { setConsumableBranch(value); setConsumableCategory("All Categories"); }} width="w-[155px]">
-                            <option value="">All Branches</option>{branches?.map(item => <option key={item.id} value={item.id}>{item.branchName}</option>)}
-                        </FilterSelect>
                         <FilterSelect label="Filter consumable current status" value={consumableStatus} onChange={setConsumableStatus} width="w-[140px]">
                             {ownerConsumableStatusOptions.map(status => <option key={status}>{status}</option>)}
                         </FilterSelect>
                         <DatePresetFilter preset={consumablePreset} onPreset={setConsumablePreset} custom={consumableCustom} onCustom={setConsumableCustom} label="Consumable"/>
+                        <FilterSelect label="Filter consumable branch" value={consumableBranch} onChange={setConsumableBranch} width="w-[155px]">
+                            <option value="">All Branches</option>{branches?.map(item => <option key={item.id} value={item.id}>{item.branchName}</option>)}
+                        </FilterSelect>
                         <ExportMenu disabled={!ready} onExport={() => exportList("consumables")}/>
                     </div>
                 </div>
@@ -687,11 +900,11 @@ export default function OwnerInventory() {
                     <p role="status" className="border-t border-[#E9E1EE] px-4 py-2 text-[11px] text-[#806A8C]">Variant sales are unavailable. Update the Products backend.</p>}
                 {consumablesError && <p role="alert" className="border-t border-[#F2C4C4] bg-[#FFF0F0] px-4 py-2 text-xs text-[#C32F2F]">{consumablesError}</p>}
                 <div className={`${scrollPanel} max-h-[360px]`} role="region" aria-label="Consumable inventory list" tabIndex={0}>
-                    <table className="w-full min-w-0 table-auto text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_td]:leading-snug">
-                        <colgroup><col className="w-[16%]"/><col className="w-[20%]"/><col className="w-[15%]"/>
-                            <col className="w-[15%]"/><col className="w-[12%]"/><col className="w-[10%]"/><col className="w-[12%]"/></colgroup>
+                    <table className="w-full min-w-[850px] table-auto text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_td]:leading-snug">
+                        <colgroup><col className="w-[17%]"/><col className="w-[16%]"/><col className="w-[12%]"/>
+                            <col className="w-[13%]"/><col className="w-[9%]"/><col className="w-[8%]"/><col className="w-[8%]"/><col className="w-[7%]"/><col className="w-[10%]"/></colgroup>
                         <thead className="sticky top-0 z-10 border-b border-[#E9E1EE] bg-[#FFFCF8]"><tr>
-                            {(["Product No.", "Product", "Branch", "Category", "Available Stock", "Sold", "Current Status"] as const).map(label => <th key={label} className={headerCell}>{label}</th>)}
+                            {(["Product No.", "Product", "Branch", "Category", "Total Stock", "Available", "Reserved", "Sold", "Current Status"] as const).map(label => <th key={label} className={headerCell}>{label}</th>)}
                         </tr></thead>
                         <tbody>{visibleConsumables.map(row => {
                             const productKey = `${row.branchId ?? "none"}-${row.id}`;
@@ -713,7 +926,9 @@ export default function OwnerInventory() {
                                     <td className="break-words px-2 py-2 font-semibold text-[#2B174C]">{row.name}</td>
                                     <td className={bodyCell}>{row.branchName || "—"}</td>
                                     <td className={bodyCell}>{row.category || "—"}</td>
-                                    <td className={`${bodyCell} tabular-nums`}>{row.availableStock == null ? "—" : formatNumber(row.availableStock)}</td>
+                                    <td className={`${bodyCell} tabular-nums`}>{inventoryBalanceText(row.totalStock)}</td>
+                                    <td className={`${bodyCell} tabular-nums`}>{inventoryBalanceText(row.availableStock)}</td>
+                                    <td className={`${bodyCell} tabular-nums`}>{inventoryBalanceText(row.reservedStock)}</td>
                                     <td className={`${bodyCell} tabular-nums`}>{expandable ? "" : row.unitsSold == null ? "—" : formatNumber(row.unitsSold)}</td>
                                     <td className={bodyCell}><OwnerConsumableStatusText status={ownerProductStatus(row)}/></td>
                                 </tr>
@@ -722,34 +937,33 @@ export default function OwnerInventory() {
                                     <td className="break-words px-2 py-2 text-[10px] font-semibold text-[#5F3D82]">↳ {variant.name}</td>
                                     <td className={bodyCell}>{row.branchName || "—"}</td>
                                     <td className={bodyCell}>{row.category || "—"}</td>
-                                    <td className={`${bodyCell} tabular-nums`}>{variant.availableStock == null ? "—" : formatNumber(variant.availableStock)}</td>
+                                    <td className={`${bodyCell} tabular-nums`}>{inventoryBalanceText(variant.totalStock)}</td>
+                                    <td className={`${bodyCell} tabular-nums`}>{inventoryBalanceText(variant.availableStock)}</td>
+                                    <td className={`${bodyCell} tabular-nums`}>{inventoryBalanceText(variant.reservedStock)}</td>
                                     <td className={`${bodyCell} tabular-nums`} title={!variantSalesAvailable ? "Variant sales unavailable. Update the Products backend." : undefined}>{soldForVariant(row, variant) == null ? "—" : formatNumber(soldForVariant(row, variant)!)}</td>
                                     <td className={bodyCell}><OwnerConsumableStatusText status={ownerLineStatus(variant)}/></td>
                                 </tr>)}
                             </React.Fragment>;
                         })}
-                        {visibleConsumables.length === 0 && (consumablesLoading ? <OwnerTableLoadingRow columns={7} label="Loading consumable products..."/> :
-                            <tr><td colSpan={7} className="px-4 py-12 text-xs text-[#806A8C]">{consumablesError ? "Unable to load consumable report." : "No consumable products match these filters."}</td></tr>)}
+                        {visibleConsumables.length === 0 && (consumablesLoading ? <OwnerTableLoadingRow columns={9} label="Loading consumable products..."/> :
+                            <tr><td colSpan={9} className="px-4 py-12 text-xs text-[#806A8C]">{consumablesError ? "Unable to load consumable report." : "No consumable products match these filters."}</td></tr>)}
                         </tbody>
                     </table>
                 </div>
             </section> : <section role="tabpanel" aria-label="Rental equipment" className={cardClass}>
                 {/* Existing authorized read-only rental hook for each selected branch. */}
-                {selectedBranches.map(item => <RentalBranchFeed key={`${item.id}-${refresh}-${rentalBranch}`} branchId={item.id}
+                {selectedBranches.map(item => <RentalBranchFeed key={`${item.id}-${refresh}-${rentalBranch}`} branchId={item.id} today={stockDate}
                                                                 onUpdate={onRentalUpdate}/>)}
                 <div className="flex flex-col gap-3 px-4 py-3.5 xl:flex-row xl:items-center xl:justify-between">
-                    <SectionHeading icon={<Boxes/>} title="Rental Equipment List" subtitle="Current rental availability status; units rented in the selected period"/>
+                    <SectionHeading icon={<Boxes/>} title="Rental Equipment List" subtitle="Current stock and today's availability and reservations; units rented in the selected period"/>
                     <div className="flex flex-wrap items-center gap-2">
-                        <FilterSelect label="Filter rental equipment category" value={rentalCategory} onChange={setRentalCategory} width="w-[154px]">
-                            <option>All Categories</option>{categories.map(category => <option key={category}>{category}</option>)}
-                        </FilterSelect>
-                        <FilterSelect label="Filter rental equipment branch" value={rentalBranch} onChange={value => { setRentalByBranch({}); setRentalBranch(value); setRentalCategory("All Categories"); }} width="w-[155px]">
-                            <option value="">All Branches</option>{branches?.map(item => <option key={item.id} value={item.id}>{item.branchName}</option>)}
-                        </FilterSelect>
                         <FilterSelect label="Filter rental current status" value={rentalStatus} onChange={setRentalStatus} width="w-[140px]">
                             {ownerRentalStatusOptions.map(status => <option key={status}>{status}</option>)}
                         </FilterSelect>
                         <DatePresetFilter preset={rentalPreset} onPreset={setRentalPreset} custom={rentalCustom} onCustom={setRentalCustom} label="Rental"/>
+                        <FilterSelect label="Filter rental equipment branch" value={rentalBranch} onChange={value => { setRentalByBranch({}); setRentalBranch(value); }} width="w-[155px]">
+                            <option value="">All Branches</option>{branches?.map(item => <option key={item.id} value={item.id}>{item.branchName}</option>)}
+                        </FilterSelect>
                         <ExportMenu disabled={!ready} onExport={() => exportList("rentals")}/>
                     </div>
                 </div>
@@ -759,14 +973,15 @@ export default function OwnerInventory() {
                            className="h-[44px] w-full rounded-xl border border-[#E3D8EA] bg-white pl-11 pr-4 text-sm text-[#1A1220] shadow-sm outline-none placeholder:text-[#9B8AAA] focus:border-[#2B174C]"/>
                 </div></div>
                 {!rangeValid && <p role="alert" className="bg-[#FFF4F4] px-4 py-2 text-[11px] text-[#C32F2F]">Choose a valid custom date range of 366 days or fewer.</p>}
+                {visibleRentals.some(row => row.reserved == null || row.available == null) && <p role="status" className="border-t border-[#E9E1EE] px-4 py-2 text-[11px] text-[#806A8C]">Today’s availability and reservations are shown when verified; — means data is not yet available.</p>}
                 {rentalErrors.length > 0 && <p role="alert" className="bg-[#FFF4F4] px-4 py-2 text-[11px] text-[#C32F2F]">{rentalErrors.join(" · ")}</p>}
                 <div className={`${scrollPanel} max-h-[360px]`} role="region" aria-label="Rental equipment inventory list" tabIndex={0}>
-                    <table className="w-full min-w-0 table-auto text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_td]:leading-snug">
-                        <colgroup><col className="w-[17%]"/><col className="w-[20%]"/><col className="w-[14%]"/>
-                            <col className="w-[15%]"/><col className="w-[10%]"/><col className="w-[12%]"/><col className="w-[12%]"/></colgroup>
+                    <table className="w-full min-w-[850px] table-auto text-center text-[11px] [&_th]:align-middle [&_td]:align-middle [&_td]:leading-snug">
+                        <colgroup><col className="w-[17%]"/><col className="w-[16%]"/><col className="w-[12%]"/>
+                            <col className="w-[12%]"/><col className="w-[9%]"/><col className="w-[8%]"/><col className="w-[8%]"/><col className="w-[8%]"/><col className="w-[10%]"/></colgroup>
                         <thead className="sticky top-0 z-10 border-b border-[#E9E1EE] bg-[#FFFCF8]"><tr>
-                            {(["Equipment No.", "Rental Product", "Category", "Branch", "Total Units", "Units Rented", "Current Status"] as const)
-                                .map(label => <th key={label} title={label === "Units Rented" ? "Total units released during the selected period, including repeat rentals" : undefined} className={headerCell}>{label}</th>)}
+                            {(["Equipment No.", "Rental Product", "Category", "Branch", "Total Units", "Available", "Reserved", "Units Rented", "Current Status"] as const)
+                                .map(label => <th key={label} title={label === "Units Rented" ? "Total units released during the selected period, including repeat rentals" : label === "Reserved" ? "Confirmed unreleased reservations for today" : label === "Available" ? "Bookable units today" : undefined} className={headerCell}>{label}</th>)}
                         </tr></thead>
                         <tbody>{visibleRentals.map(row => <tr key={`${row.branchId}-${row.item.id}`} className="h-12 border-b border-[#EFE8F2] last:border-0 hover:bg-[#FFFCF8]">
                             <td className={firstBodyCell}>{row.item.equipmentNumber || "—"}</td>
@@ -774,16 +989,19 @@ export default function OwnerInventory() {
                             <td className={bodyCell}>{row.item.category}</td>
                             <td className={bodyCell}>{row.branchName}</td>
                             <td className={`${bodyCell} tabular-nums`}>{formatNumber(row.item.totalUnits)}</td>
+                            <td className={`${bodyCell} tabular-nums`} title="Available for today's rental dates">{inventoryBalanceText(row.available)}</td>
+                            <td className={`${bodyCell} tabular-nums`} title="Confirmed, unreleased rental units overlapping today">{inventoryBalanceText(row.reserved)}</td>
                             <td className={`${bodyCell} tabular-nums`}>{rentedUnitsFor(row) == null ? "—" : formatNumber(rentedUnitsFor(row)!)}</td>
-                            <td className={bodyCell}><OwnerRentalStatusText status={ownerRentalStatusGroup(row.item)}/></td>
+                            <td className={bodyCell}><OwnerRentalStatusText status={ownerRentalStatusGroup(row.item, row.available ?? row.item.bookableToday)}/></td>
                         </tr>)}
-                        {visibleRentals.length === 0 && (rentalsLoading ? <OwnerTableLoadingRow columns={7} label="Loading rental equipment..."/> :
-                            <tr><td colSpan={7} className="px-4 py-12 text-xs text-[#806A8C]">{rentalErrors.length ? "Rental inventory unavailable for the selected branches." : "No rental equipment matches these filters."}</td></tr>)}
+                        {visibleRentals.length === 0 && (rentalsLoading ? <OwnerTableLoadingRow columns={9} label="Loading rental equipment..."/> :
+                            <tr><td colSpan={9} className="px-4 py-12 text-xs text-[#806A8C]">{rentalErrors.length ? "Rental inventory unavailable for the selected branches." : "No rental equipment matches these filters."}</td></tr>)}
                         </tbody>
                     </table>
                 </div>
             </section>}
         </main>
+        {selectedKpi && <InventoryKpiDetailModal detail={selectedKpi} onClose={() => setSelectedKpi(null)}/>}
         {notice && <div role="status" aria-live="polite" className="fixed bottom-5 right-5 z-[150] flex max-w-[min(420px,calc(100vw-40px))] items-start gap-3 rounded-xl border border-[#E6DDF0] bg-white p-4 text-sm text-[#5F4E75] shadow-xl">
             <p>{notice}</p><button type="button" onClick={() => setNotice("")} aria-label="Dismiss notification"><X size={16}/></button>
         </div>}

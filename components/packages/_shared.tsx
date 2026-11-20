@@ -1,4 +1,4 @@
-import { CalendarDays, ChevronDown, Download, ImagePlus, Package2, RefreshCw, Search, Truck, X } from "lucide-react";
+import { CalendarDays, ChevronDown, Download, Package2, RefreshCw, Search, Truck, X } from "lucide-react";
 import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -56,6 +56,7 @@ export type ProductVariant = {
     variantValues?: Record<string, string> | string;
     variant_values?: Record<string, string> | string;
     stock: number;
+    sellableStock?: number;
     alertLevel?: number;
     alert_level?: number;
     originalPrice?: number;
@@ -73,6 +74,7 @@ export type Product = {
     salesPrice?: number;
     sales_price?: number;
     stock?: number;
+    sellableStock?: number;
     hasVariants?: boolean;
     has_variants?: boolean;
     variants?: ProductVariant[];
@@ -90,6 +92,7 @@ export type PackageSelectableItem = {
     category?: string;
     salesPrice: number;
     stock: number;
+    totalUnits?: number;
     branchId?: number | null;
 };
 
@@ -107,7 +110,6 @@ export type PackageItem = {
     duration: string;
     status: "Active" | "Inactive";
     category?: PackageFormCategory;
-    cover_image?: string;
     inclusions: PackageInclusion[];
 };
 
@@ -281,7 +283,7 @@ export function buildPackageSelectableItems(
                     displayName: `${product.name} — ${variantName}`,
                     category: product.category,
                     salesPrice,
-                    stock: Number(variant.stock || 0),
+                    stock: Math.max(0, Number(variant.sellableStock ?? 0) || 0),
                     branchId: productBranchId,
                 };
             });
@@ -297,7 +299,7 @@ export function buildPackageSelectableItems(
                 displayName: product.name,
                 category: product.category,
                 salesPrice: Number(product.salesPrice ?? product.sales_price ?? 0),
-                stock: Number(product.stock || 0),
+                stock: Math.max(0, Number(product.sellableStock ?? 0) || 0),
                 branchId: productBranchId,
             },
         ];
@@ -475,26 +477,6 @@ export function PageHeader({
     );
 }
 
-function getPackageCoverImage(pkg: PackageItem) {
-    if (pkg.cover_image) {
-        return pkg.cover_image;
-    }
-
-    const packageText = `${pkg.name} ${pkg.description || ""}`.toLowerCase();
-
-    return packageText.includes("wedding")
-        ? "https://images.unsplash.com/photo-1519167758481-83f550bb49b3?auto=format&fit=crop&w=900&q=85"
-        : packageText.includes("birthday")
-            ? "https://images.unsplash.com/photo-1530103862676-de8c9debad1d?auto=format&fit=crop&w=900&q=85"
-            : packageText.includes("graduation")
-                ? "https://images.unsplash.com/photo-1523580494863-6f3031224c94?auto=format&fit=crop&w=900&q=85"
-                : packageText.includes("christening") || packageText.includes("baby")
-                    ? "https://images.unsplash.com/photo-1519710164239-da123dc03ef4?auto=format&fit=crop&w=900&q=85"
-                    : packageText.includes("corporate")
-                        ? "https://images.unsplash.com/photo-1492684223066-81342ee5ff30?auto=format&fit=crop&w=900&q=85"
-                        : "https://images.unsplash.com/photo-1507504031003-b417219a0fde?auto=format&fit=crop&w=900&q=85";
-}
-
 /**
  * Export saved package information to a downloadable A4 PDF, without adding a
  * package or changing the Packages API. Canvas rendering preserves names and
@@ -512,13 +494,21 @@ export async function downloadPackagesPdf(
     if (typeof window === "undefined") throw new Error("PDF export is only available in the browser.");
 
     const storeName = sessionStorage.getItem("store_name") ||
-        localStorage.getItem("store_name") || "StockNBook Store";
+        localStorage.getItem("store_name") || sessionStorage.getItem("stocknbook_store_name") ||
+        localStorage.getItem("stocknbook_store_name") || "StockNBook";
+    // A single-package download uses its actual branch, not the UI's "Selected Package" label.
+    const scope = options.scopeLabel === "Selected Package" && packages.length === 1
+        ? options.branchNameForPackage?.(packages[0]) || options.scopeLabel
+        : options.scopeLabel;
     const dateLabel = new Date().toLocaleString("en-PH", {
         month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", hour12: true,
     });
-    const W = 595, H = 842, scale = 2, margin = 35, right = W - margin;
-    const ink = "#251535", muted = "#776786", purple = "#2B174C";
-    const pale = "#F6F1FA", border = "#E6DDF0";
+    // Match components/dashboard/_shared.tsx:createTablePdf page geometry and palette.
+    const W = 595.28, H = 841.89, scale = 2, margin = 42, right = W - margin;
+    const pixelW = Math.round(W * scale), pixelH = Math.round(H * scale);
+    const outerMargin = 25, pageInset = 24, contentBottom = H - 54;
+    const cream = "#FDFAF4", ink = "#1A1220", muted = "#5F4E75", purple = "#2B174C";
+    const pale = "#F9F6FD", border = "#E6DDF0", altRow = "#FCFBFE";
     const money = (n: number) => `PHP ${Number(n || 0).toLocaleString("en-PH", {
         minimumFractionDigits: 2, maximumFractionDigits: 2,
     })}`;
@@ -527,10 +517,10 @@ export async function downloadPackagesPdf(
     let canvas: HTMLCanvasElement | null = null;
     let ctx: CanvasRenderingContext2D;
     let y = 0;
-    let pageNumber = 0;
+    let currentPackageName = "";
 
     const font = (size: number, bold = false) => {
-        ctx.font = `${bold ? "700" : "400"} ${size}px Arial, Helvetica, sans-serif`;
+        ctx.font = `${bold ? "700" : "400"} ${size}px Helvetica, Arial, sans-serif`;
     };
     const text = (s: unknown, x: number, baseline: number, size = 10, bold = false, color = ink) => {
         ctx.fillStyle = color;
@@ -541,6 +531,14 @@ export async function downloadPackagesPdf(
         ctx.fillStyle = color;
         font(size, bold);
         ctx.fillText(clean(s), x - ctx.measureText(clean(s)).width, baseline);
+    };
+    const centerText = (s: unknown, baseline: number, size: number, bold = false, color = ink) => {
+        ctx.fillStyle = color;
+        font(size, bold);
+        const previous = ctx.textAlign;
+        ctx.textAlign = "center";
+        ctx.fillText(clean(s), W / 2, baseline, W - 2 * margin);
+        ctx.textAlign = previous;
     };
     const box = (x: number, top: number, width: number, height: number, fill: string, stroke?: string) => {
         ctx.fillStyle = fill;
@@ -589,73 +587,59 @@ export async function downloadPackagesPdf(
     const newPage = (continued = false) => {
         savePage();
         canvas = document.createElement("canvas");
-        canvas.width = W * scale;
-        canvas.height = H * scale;
+        canvas.width = pixelW;
+        canvas.height = pixelH;
         const context = canvas.getContext("2d");
         if (!context) throw new Error("Unable to create the PDF rendering surface.");
         ctx = context;
-        ctx.setTransform(scale, 0, 0, scale, 0, 0);
-        box(0, 0, W, H, "#FFFFFF");
-        box(0, 0, W, 11, purple);
-        pageNumber += 1;
-        text("STOCKNBOOK  /  PACKAGE INFORMATION REPORT", margin, 37, 14, true, purple);
-        text(storeName, margin, 56, 10, true);
-        text(`Scope: ${options.scopeLabel}`, margin, 72, 9, false, muted);
-        rightText(`Generated: ${dateLabel}`, right, 72, 8, false, muted);
-        box(margin, 83, W - margin * 2, 1, border);
-        box(margin, 793, W - margin * 2, 1, border);
-        text("Internal package information copy  |  Prices in PHP", margin, 811, 8, false, muted);
-        rightText(`Page ${pageNumber}`, right, 811, 8, true, muted);
-        y = 103;
-        if (continued) { text("Package details (continued)", margin, y + 11, 10, true, purple); y += 28; }
+        ctx.setTransform(pixelW / W, 0, 0, pixelH / H, 0, 0);
+        box(0, 0, W, H, cream);
+        box(outerMargin, pageInset, W - outerMargin * 2, H - pageInset * 2, "#FFFFFF");
+        box(outerMargin, pageInset, W - outerMargin * 2, 6, purple);
+
+        centerText(storeName, 58, 21, true, purple);
+        centerText(`Branch: ${scope}`, 75, 11.5, true, purple);
+        // Packages are saved definitions, not date-range reports.
+        centerText(`Generated: ${dateLabel}`, 91, 10.2, false, muted);
+        box(margin, 103, W - 2 * margin, 0.7, border);
+        centerText(continued ? "Package Information Report (continued)" : "Package Information Report",
+            continued ? 127 : 131, continued ? 16 : 18, true, purple);
+        centerText(`${packages.length.toLocaleString("en-PH")} package(s) exported | Amounts in Philippine pesos`,
+            continued ? 143 : 147, 9, false, muted);
+        y = continued ? 161 : 165;
+        if (continued && currentPackageName) {
+            text(`${currentPackageName} (continued)`, margin, y + 10, 10, true, purple);
+            y += 25;
+        }
     };
     const need = (height: number) => {
-        if (y + height > 784) newPage(true);
+        if (y + height > contentBottom) newPage(true);
     };
     const sectionTitle = (title: string, hint = "") => {
-        need(37);
-        box(margin, y, W - margin * 2, 27, pale);
-        text(title, margin + 10, y + 18, 11, true, purple);
-        if (hint) rightText(hint, right - 10, y + 18, 8, false, muted);
-        y += 35;
+        need(30);
+        box(margin, y, W - margin * 2, 23, pale);
+        text(title, margin + 10, y + 15, 11, true, purple);
+        if (hint) rightText(hint, right - 10, y + 15, 8, false, muted);
+        y += 29;
     };
     const infoCard = (label: string, value: string, x: number, top: number, width: number) => {
-        box(x, top, width, 47, "#FFFFFF", border);
-        text(label, x + 10, top + 16, 8, false, muted);
-        const lines = wrap(value, width - 18, 10, true);
-        text(lines[0], x + 10, top + 33, 10, true);
-    };
-    // Cover images are included when the existing URL permits browser CORS;
-    // a failure never blocks export of the package's authoritative text/data.
-    const loadImage = async (url?: string): Promise<HTMLImageElement | null> => {
-        if (!url) return null;
-        return new Promise((resolve) => {
-            const img = new Image();
-            let done = false;
-            const finish = (found: HTMLImageElement | null) => {
-                if (done) return;
-                done = true;
-                clearTimeout(timer);
-                img.onload = null;
-                img.onerror = null;
-                resolve(found);
-            };
-            const timer = window.setTimeout(() => finish(null), 4500);
-            img.crossOrigin = "anonymous";
-            img.onload = () => finish(img);
-            img.onerror = () => finish(null);
-            img.src = url;
-        });
+        box(x, top, width, 39, "#FFFFFF", border);
+        text(label, x + 10, top + 13, 8, false, muted);
+        font(10, true);
+        ctx.fillStyle = ink;
+        ctx.fillText(clean(value), x + 10, top + 28, width - 20);
     };
     const drawGroup = (name: string, rows: PackageInclusion[], isRental: boolean) => {
         if (!rows.length) return;
+        // Keep the section heading, table header, and at least one typical row together.
+        need(29 + 22 + 34);
         sectionTitle(name, `${rows.length} item type${rows.length === 1 ? "" : "s"}`);
         const header = () => {
             need(28);
-            box(margin, y, W - margin * 2, 22, "#F9F6FC");
+            box(margin, y, W - margin * 2, 22, pale);
             text("ITEM / SERVICE", margin + 9, y + 15, 8, true, muted);
-            rightText("QTY", 394, y + 15, 8, true, muted);
-            rightText(isRental ? "RATE / DAY" : "UNIT PRICE", 479, y + 15, 8, true, muted);
+            rightText("QTY", 365, y + 15, 8, true, muted);
+            rightText(isRental ? "RATE / DAY" : "UNIT PRICE", 451, y + 15, 8, true, muted);
             rightText("VALUE", right - 9, y + 15, 8, true, muted);
             y += 22;
         };
@@ -663,23 +647,23 @@ export async function downloadPackagesPdf(
         for (const item of rows) {
             const label = clean(item.productName) || "Unnamed item";
             const sub = clean(item.variantName);
-            const lines = wrap(label, 290, 9.5, true);
-            const subLines = sub ? wrap(sub, 290, 8) : [];
+            const lines = wrap(label, 265, 9.5, true);
+            const subLines = sub ? wrap(sub, 265, 8) : [];
             const rowHeight = Math.max(34, 10 + lines.length * 12 + subLines.length * 11);
-            if (y + rowHeight > 781) { newPage(true); sectionTitle(`${name} (continued)`); header(); }
-            box(margin, y, W - margin * 2, rowHeight, rows.indexOf(item) % 2 ? "#FFFFFF" : "#FCFAFE");
+            if (y + rowHeight > contentBottom) { newPage(true); sectionTitle(`${name} (continued)`); header(); }
+            box(margin, y, W - margin * 2, rowHeight, rows.indexOf(item) % 2 ? "#FFFFFF" : altRow);
             writeLines(lines, margin + 9, y + 15, 9.5, 12, true);
             writeLines(subLines, margin + 9, y + 15 + lines.length * 12, 8, 11, false, muted);
-            rightText(String(Number(item.quantity || 0)), 394, y + 17, 9);
-            rightText(money(Number(item.unitSalesPrice || 0)).replace("PHP ", ""), 479, y + 17, 8.7);
+            rightText(String(Number(item.quantity || 0)), 365, y + 17, 9);
+            rightText(money(Number(item.unitSalesPrice || 0)).replace("PHP ", ""), 451, y + 17, 8.7);
             rightText(money(Number(item.lineValue || 0)).replace("PHP ", ""), right - 9, y + 17, 8.7, true);
             y += rowHeight;
             box(margin, y, W - margin * 2, 0.6, border);
         }
-        y += 11;
+        y += 7;
         if (isRental) {
-            need(36);
             const note = wrap("Rental rates are per unit per day. Final availability is verified for the event dates; including equipment in a package is not a reservation.", W - margin * 2 - 20, 8.5);
+            need(12 + note.length * 12);
             writeLines(note, margin + 8, y + 10, 8.5, 12, false, muted);
             y += 12 + note.length * 12;
         }
@@ -687,47 +671,36 @@ export async function downloadPackagesPdf(
 
     for (let index = 0; index < packages.length; index++) {
         const pkg = packages[index];
+        currentPackageName = clean(pkg.name);
         newPage(false); // Each package starts on a new page in the combined report.
         const nameLines = wrap(pkg.name, W - 2 * margin, 17, true);
         need(16 + nameLines.length * 22);
         writeLines(nameLines, margin, y + 14, 17, 22, true, purple);
         y += nameLines.length * 22 + 8;
 
-        const image = await loadImage(pkg.cover_image);
-        if (image) {
-            need(118);
-            const top = y;
-            ctx.save();
-            ctx.beginPath(); ctx.rect(margin, top, W - 2 * margin, 108); ctx.clip();
-            const ratio = Math.max((W - 2 * margin) / image.width, 108 / image.height);
-            const iw = image.width * ratio, ih = image.height * ratio;
-            ctx.drawImage(image, margin + (W - 2 * margin - iw) / 2, top + (108 - ih) / 2, iw, ih);
-            ctx.restore();
-            y += 120;
-        }
-
+        need(29 + 90);
         sectionTitle("Package Information");
-        need(102);
         const cardWidth = (W - 2 * margin - 10) / 2;
         infoCard("Category", getPackageCategory(pkg), margin, y, cardWidth);
         infoCard("Duration", clean(pkg.duration) || "Not specified", margin + cardWidth + 10, y, cardWidth);
-        y += 55;
+        y += 44;
         infoCard("Branch", options.branchNameForPackage?.(pkg) || options.scopeLabel, margin, y, cardWidth);
         infoCard("Status", clean(pkg.status) || "Not specified", margin + cardWidth + 10, y, cardWidth);
-        y += 57;
+        y += 46;
 
+        need(29 + 90);
         sectionTitle("Package Pricing");
-        need(102);
         const discount = pkg.discount_type === "percentage"
             ? `${Number(pkg.discount_value || 0)}% (${money(Number(pkg.original_value || 0) - Number(pkg.package_price || 0))})`
             : money(Number(pkg.discount_value || 0));
         infoCard("Original Value", money(pkg.original_value), margin, y, cardWidth);
         infoCard("Discount", discount, margin + cardWidth + 10, y, cardWidth);
-        y += 55;
+        y += 44;
         infoCard("Package Price", money(pkg.package_price), margin, y, cardWidth);
         infoCard("Down Payment", money(pkg.down_payment_amount), margin + cardWidth + 10, y, cardWidth);
-        y += 56;
+        y += 46;
 
+        need(29 + 15);
         sectionTitle("Description");
         const description = wrap(pkg.description || "No description provided.", W - 2 * margin - 16, 9.5);
         for (const line of description) {
@@ -735,11 +708,12 @@ export async function downloadPackagesPdf(
             text(line, margin + 8, y + 10, 9.5, false, ink);
             y += 15;
         }
-        y += 15;
+        y += 8;
 
         const inclusions = Array.isArray(pkg.inclusions) ? pkg.inclusions : [];
         const consumables = inclusions.filter((item) => item.itemType !== "rental");
         const rentals = inclusions.filter((item) => item.itemType === "rental");
+        need(29 + (inclusions.length ? 85 : 29));
         sectionTitle("Package Inclusions", `${inclusions.length} types / ${inclusions.reduce((n, item) => n + Number(item.quantity || 0), 0)} units`);
         if (!inclusions.length) {
             need(26);
@@ -764,8 +738,11 @@ export async function downloadPackagesPdf(
     const offsets: number[] = [0];
     const append = (data: string | Uint8Array) => {
         const bytes = typeof data === "string" ? encoder.encode(data) : data;
-        blobs.push(bytes);
-        position += bytes.length;
+        // Copy into an ArrayBuffer-backed view accepted by BlobPart.
+        const blobBytes = new Uint8Array(new ArrayBuffer(bytes.byteLength));
+        blobBytes.set(bytes);
+        blobs.push(blobBytes);
+        position += blobBytes.byteLength;
     };
     const object = (id: number, body: string | Uint8Array, prefix = "", suffix = "") => {
         offsets[id] = position;
@@ -777,17 +754,25 @@ export async function downloadPackagesPdf(
     };
     append("%PDF-1.4\n%----\n");
     object(1, "<< /Type /Catalog /Pages 2 0 R >>");
-    const pageIds = pages.map((_, i) => 3 + i * 3);
+    // The footer is drawn as native PDF text once the final page count is known.
+    // This preserves the Dashboard footer exactly without re-encoding the canvas images.
+    const pageIds = pages.map((_, i) => 4 + i * 3);
     object(2, `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pages.length} >>`);
+    object(3, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
     pages.forEach((jpeg, i) => {
         const pageId = pageIds[i], streamId = pageId + 1, imageId = pageId + 2;
-        const pageCommands = `q ${W} 0 0 ${H} 0 0 cm /Cover Do Q\n`;
-        object(pageId, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H}] /Resources << /XObject << /Cover ${imageId} 0 R >> >> /Contents ${streamId} 0 R >>`);
+        const footer = `Powered by StockNBook | Page ${i + 1} of ${pages.length}`;
+        const footerX = (W / 2 - footer.length * 2.05).toFixed(2);
+        const pageCommands = `q ${W} 0 0 ${H} 0 0 cm /Cover Do Q
+q 0.9 0.86 0.94 RG 0.6 w ${margin} 42 m ${right} 42 l S Q
+q 0.373 0.306 0.459 rg BT /F1 8 Tf 1 0 0 1 ${footerX} 26 Tm (${footer}) Tj ET Q
+`;
+        object(pageId, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H}] /Resources << /XObject << /Cover ${imageId} 0 R >> /Font << /F1 3 0 R >> >> /Contents ${streamId} 0 R >>`);
         object(streamId, pageCommands, `<< /Length ${encoder.encode(pageCommands).length} >>\nstream\n`, "endstream");
-        object(imageId, jpeg, `<< /Type /XObject /Subtype /Image /Width ${W * scale} /Height ${H * scale} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`, "\nendstream");
+        object(imageId, jpeg, `<< /Type /XObject /Subtype /Image /Width ${pixelW} /Height ${pixelH} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`, "\nendstream");
     });
     const xrefPosition = position;
-    const totalObjects = 2 + pages.length * 3;
+    const totalObjects = 3 + pages.length * 3;
     append(`xref\n0 ${totalObjects + 1}\n0000000000 65535 f \n`);
     for (let i = 1; i <= totalObjects; i++) append(`${String(offsets[i]).padStart(10, "0")} 00000 n \n`);
     append(`trailer\n<< /Size ${totalObjects + 1} /Root 1 0 R >>\nstartxref\n${xrefPosition}\n%%EOF\n`);
@@ -817,11 +802,9 @@ export function PackageCard({
     onDelete: () => void;
 }) {
     const [showDetails, setShowDetails] = useState(false);
-    const [showExpandedImage, setShowExpandedImage] = useState(false);
     const inclusionCount = (pkg.inclusions || []).length;
     const packageCategory = getPackageCategory(pkg);
 
-    const coverImage = getPackageCoverImage(pkg);
 
     const discountLabel =
         pkg.discount_type === "percentage"
@@ -862,19 +845,6 @@ export function PackageCard({
                 }}
                 className="group cursor-pointer overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm transition-all duration-200 hover:-translate-y-1 hover:border-[#D4C1E7] hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2B174C] focus-visible:ring-offset-2"
             >
-                <div className="h-36 overflow-hidden bg-[#F5EEF6]">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                        src={coverImage}
-                        alt={`${pkg.name} package cover`}
-                        loading="lazy"
-                        onError={(event) => {
-                            event.currentTarget.style.display = "none";
-                        }}
-                        className="h-full w-full object-cover transition duration-300 group-hover:scale-105"
-                    />
-                </div>
-
                 <div
                     className={`px-4 py-4 ${
                         featured
@@ -966,44 +936,12 @@ export function PackageCard({
                         className="flex max-h-[92vh] w-full max-w-[1000px] flex-col overflow-hidden rounded-[22px] border border-[#E6DDF0] bg-white shadow-[0_24px_80px_rgba(20,10,35,0.28)]"
                         onClick={(event) => event.stopPropagation()}
                     >
-                        <div className="relative shrink-0 overflow-hidden bg-[#2D1B4E]">
-                            <button
-                                type="button"
-                                onClick={() => setShowExpandedImage(true)}
-                                className="group/image block h-[210px] sm:h-[230px] w-full cursor-zoom-in overflow-hidden text-left"
-                                aria-label="Expand package cover image"
-                                title="Click to enlarge image"
-                            >
-                                {/* eslint-disable-next-line @next/next/no-img-element */}
-                                <img
-                                    src={coverImage}
-                                    alt={`${pkg.name} package cover`}
-                                    className="h-full w-full object-cover transition duration-300 group-hover/image:scale-[1.02]"
-                                />
-                                <div className="absolute inset-0 bg-gradient-to-t from-[#160C27]/85 via-[#160C27]/15 to-transparent" />
-
-                                <span className="absolute right-5 top-5 rounded-full bg-black/45 px-3 py-1.5 text-[11px] font-semibold text-white backdrop-blur-sm transition group-hover/image:bg-black/60">
-                                    Click image to expand
-                                </span>
-                            </button>
-
-                            <button
-                                type="button"
-                                onClick={() => setShowDetails(false)}
-                                className="absolute left-5 top-5 flex h-10 w-10 items-center justify-center rounded-full bg-white/95 text-lg font-semibold text-[#2B174C] shadow-md transition hover:scale-105 hover:bg-white"
-                                aria-label="Close package details"
-                            >
-                                ×
-                            </button>
-
-                            <div className="pointer-events-none absolute bottom-0 left-0 right-0 p-6">
-                                <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-white/75">
-                                    Package details
-                                </p>
-                                <h2 className="mt-1 max-w-[820px] text-[28px] font-bold leading-tight text-white">
-                                    {pkg.name}
-                                </h2>
+                        <div className="flex shrink-0 items-center justify-between gap-4 bg-[#2D1B4E] px-6 py-5 text-white">
+                            <div className="min-w-0">
+                                <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-white/75">Package details</p>
+                                <h2 className="mt-1 break-words text-[24px] font-bold leading-tight">{pkg.name}</h2>
                             </div>
+                            <button type="button" onClick={() => setShowDetails(false)} aria-label="Close package details" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white text-[#2B174C]"><X size={18} /></button>
                         </div>
 
                         <div className="min-h-0 flex-1 overflow-y-auto">
@@ -1142,11 +1080,7 @@ export function PackageCard({
                             </div>
                         </div>
 
-                        <div className="flex shrink-0 items-center justify-between gap-3 border-t border-[#E8DFED] bg-white px-6 py-4">
-                            <p className="text-xs text-[#8A7A91]">
-                                Click the cover image above to view it in full size.
-                            </p>
-
+                        <div className="flex shrink-0 items-center justify-end gap-3 border-t border-[#E8DFED] bg-white px-6 py-4">
                             <div className="flex items-center gap-2">
                                 <button
                                     type="button"
@@ -1200,36 +1134,6 @@ export function PackageCard({
                 </div>
             )}
 
-            {showExpandedImage && (
-                <div
-                    className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85 p-4 backdrop-blur-sm"
-                    role="dialog"
-                    aria-modal="true"
-                    aria-label={`${pkg.name} enlarged cover image`}
-                    onClick={() => setShowExpandedImage(false)}
-                >
-                    <div
-                        className="relative flex max-h-[94vh] max-w-[94vw] items-center justify-center"
-                        onClick={(event) => event.stopPropagation()}
-                    >
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img
-                            src={coverImage}
-                            alt={`${pkg.name} enlarged package cover`}
-                            className="max-h-[90vh] max-w-[90vw] rounded-[18px] object-contain shadow-2xl"
-                        />
-
-                        <button
-                            type="button"
-                            onClick={() => setShowExpandedImage(false)}
-                            className="absolute right-3 top-3 flex h-10 w-10 items-center justify-center rounded-full bg-white/95 text-lg font-semibold text-[#2B174C] shadow-md transition hover:scale-105 hover:bg-white"
-                            aria-label="Close enlarged image"
-                        >
-                            ×
-                        </button>
-                    </div>
-                </div>
-            )}
         </>
     );
 }
@@ -1273,9 +1177,6 @@ export function PackageFormModal({
                                      setDescription,
                                      category,
                                      setCategory,
-                                     coverImage,
-                                     onCoverImageChange,
-                                     onRemoveCoverImage,
                                      duration,
                                      setDuration,
                                      status,
@@ -1312,9 +1213,6 @@ export function PackageFormModal({
     setDescription: (value: string) => void;
     category: PackageFormCategory;
     setCategory: (value: PackageFormCategory) => void;
-    coverImage: string;
-    onCoverImageChange: (file: File | null) => void;
-    onRemoveCoverImage: () => void;
     duration: string;
     setDuration: (value: string) => void;
     status: "Active" | "Inactive";
@@ -1356,11 +1254,10 @@ export function PackageFormModal({
     const [inclusionCategory, setInclusionCategory] = useState("");
     const [goodsTab, setGoodsTab] = useState<"consumable" | "rental">("consumable");
     const [rentalCatalog, setRentalCatalog] = useState<Array<{
-        id: number; name: string; category?: string; dailyRate: number; physicallyAvailable: number; bookableToday: number;
+        id: number; name: string; category?: string; dailyRate: number; physicallyAvailable: number; totalUnits: number;
     }>>([]);
     const [rentalLoading, setRentalLoading] = useState(false);
     const [rentalError, setRentalError] = useState("");
-    const [showFormImagePreview, setShowFormImagePreview] = useState(false);
 
     useEffect(() => {
         if (!show || !storeId || !branchId) return;
@@ -1370,12 +1267,11 @@ export function PackageFormModal({
         setRentalCatalog([]);
         void (async () => {
             try {
-                // Same branch-scoped rental catalog as the customer booking portal.
-                // bookableToday is only a preview, NOT a reservation for an event date.
-                const response = await fetch("/api/bookings", {
+                // Authenticated package catalog: show owned units, keep physical quantity limits.
+                const response = await fetch("/api/packages", {
                     method: "POST", cache: "no-store", signal: controller.signal,
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ action: "get_public_rental_catalog", storeId, branchId }),
+                    headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}` },
+                    body: JSON.stringify({ action: "get_package_rental_catalog", store_id: storeId, branch_id: branchId }),
                 });
                 const data = await response.json();
                 if (!response.ok || Number(data.branchId) !== branchId) {
@@ -1398,6 +1294,7 @@ export function PackageFormModal({
         key: `rental:${item.id}`, itemType: "rental", equipmentId: item.id,
         productId: 0, productName: item.name, displayName: item.name,
         category: item.category || "Other", stock: Math.max(0, Number(item.physicallyAvailable || 0)),
+        totalUnits: Math.max(0, Number(item.totalUnits || 0)),
         salesPrice: Number(item.dailyRate || 0),
     }));
     const activeProducts = goodsTab === "rental" ? rentalProducts : products;
@@ -1484,7 +1381,7 @@ export function PackageFormModal({
                         </Field>
                     </div>
 
-                    <div className="grid grid-cols-1 items-stretch gap-3 rounded-2xl border border-[#E6DDF0] bg-white p-4 md:grid-cols-2">
+                    <div className="rounded-2xl border border-[#E6DDF0] bg-white p-4">
                         <Field label="Description">
                             <textarea
                                 value={description}
@@ -1492,106 +1389,10 @@ export function PackageFormModal({
                                     setDescription(event.target.value)
                                 }
                                 placeholder="Short package details or notes"
-                                className={`${fieldClass} h-[150px] resize-none py-3`}
+                                className={`${fieldClass} h-[110px] resize-y py-3`}
                             />
                         </Field>
 
-                        <div className="flex h-full flex-col">
-                            <span className="mb-1 block text-xs font-semibold text-[#806A8C]">
-                                Package Picture
-                            </span>
-
-                            {!coverImage ? (
-                                <label className="flex h-[150px] cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-[#D9CBE6] bg-[#FFFCF7] px-4 py-3 text-sm font-semibold text-[#2B174C] transition hover:border-[#2B174C] hover:bg-[#F7F1FF]">
-                                    <ImagePlus size={18} />
-                                    Upload picture
-
-                                    <input
-                                        type="file"
-                                        accept="image/png,image/jpeg,image/webp"
-                                        className="sr-only"
-                                        onChange={(event) =>
-                                            onCoverImageChange(
-                                                event.target.files?.[0] || null
-                                            )
-                                        }
-                                    />
-                                </label>
-                            ) : (
-                                <div className="flex h-[150px] items-stretch gap-2">
-                                    <button
-                                        type="button"
-                                        onClick={() =>
-                                            setShowFormImagePreview(true)
-                                        }
-                                        className="group relative min-w-0 flex-1 cursor-zoom-in overflow-hidden rounded-xl border border-[#D9CBE6] bg-[#F7F1FF]"
-                                        aria-label="Expand package picture"
-                                        title="Click picture to expand"
-                                    >
-                                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                                        <img
-                                            src={coverImage}
-                                            alt="Selected package cover preview"
-                                            className="h-full w-full object-cover transition duration-200 group-hover:scale-[1.02]"
-                                        />
-
-                                        <span className="absolute bottom-2 right-2 rounded-full bg-black/55 px-2 py-1 text-[10px] font-semibold text-white backdrop-blur-sm">
-                                            Click to expand
-                                        </span>
-                                    </button>
-
-                                    <div className="flex w-11 shrink-0 flex-col gap-2">
-                                        <label
-                                            className="flex flex-1 cursor-pointer items-center justify-center rounded-xl border border-[#D9CBE6] bg-white text-[#2B174C] transition hover:bg-[#F7F1FF]"
-                                            title="Replace picture"
-                                            aria-label="Replace package picture"
-                                        >
-                                            <ImagePlus size={16} />
-
-                                            <input
-                                                type="file"
-                                                accept="image/png,image/jpeg,image/webp"
-                                                className="sr-only"
-                                                onChange={(event) =>
-                                                    onCoverImageChange(
-                                                        event.target.files?.[0] ||
-                                                        null
-                                                    )
-                                                }
-                                            />
-                                        </label>
-
-                                        <button
-                                            type="button"
-                                            onClick={onRemoveCoverImage}
-                                            className="flex flex-1 items-center justify-center rounded-xl border border-red-200 bg-white text-red-500 transition hover:bg-red-50"
-                                            title="Remove picture"
-                                            aria-label="Remove package picture"
-                                        >
-                                            <svg
-                                                viewBox="0 0 24 24"
-                                                fill="none"
-                                                stroke="currentColor"
-                                                strokeWidth="2"
-                                                className="h-4 w-4"
-                                                aria-hidden="true"
-                                            >
-                                                <path d="M4 7h16" />
-                                                <path d="M9 7V4h6v3" />
-                                                <path d="M7 7l1 13h8l1-13" />
-                                                <path d="M10 11v5M14 11v5" />
-                                            </svg>
-                                        </button>
-                                    </div>
-                                </div>
-                            )}
-
-                            <p className="mt-1 text-[11px] text-[#7A6A84]">
-                                {coverImage
-                                    ? "Click the picture to expand. Use the side buttons to replace or remove it."
-                                    : "JPG, PNG, or WEBP. Maximum file size: 2 MB."}
-                            </p>
-                        </div>
                     </div>
 
                     <Card className="overflow-hidden bg-white !p-0">
@@ -1631,13 +1432,10 @@ export function PackageFormModal({
                                         {inclusionCategoryOptions.map((option) => <option key={option} value={option}>{option}</option>)}
                                     </select>
                                 </div>
-                                {goodsTab === "rental" && <p className="mb-3 rounded-lg bg-[#F9F5FE] px-3 py-2 text-[11px] leading-5 text-[#644879]">
-                                    Rates shown are per unit per day. The package pricing preview counts one day per rental unit; the Units column is physical stock, not future-date availability. Date-specific availability is checked when the customer books. Adding equipment here does not reserve it.
-                                </p>}
                                 {goodsTab === "rental" && rentalError && <p role="alert" className="mb-2 text-xs text-red-600">{rentalError}</p>}
                                 <div className="overflow-hidden rounded-xl border border-[#EAE1EF]">
                                     <div className="grid grid-cols-[minmax(0,1fr)_80px_90px_112px] gap-2 border-b border-[#EAE1EF] bg-[#FBF8FD] px-3 py-2.5 text-[10px] font-bold uppercase tracking-wide text-[#806A8C]">
-                                        <span>Product</span><span className="text-center">{goodsTab === "rental" ? "Units" : "Stock"}</span><span className="text-right">{goodsTab === "rental" ? "Rate / day" : "Price"}</span><span className="text-center">Qty</span>
+                                        <span>Product</span><span className="text-center">{goodsTab === "rental" ? "Total Units" : "Available"}</span><span className="text-right">{goodsTab === "rental" ? "Rate / day" : "Price"}</span><span className="text-center">Qty</span>
                                     </div>
                                     <div className="max-h-[340px] divide-y divide-[#F1EAF5] overflow-y-auto">
                                         {rentalLoading && goodsTab === "rental" ? <p className="p-6 text-center text-sm text-[#806A8C]">Loading branch rental equipment...</p>
@@ -1649,14 +1447,14 @@ export function PackageFormModal({
                                                             <p className="truncate text-xs font-semibold text-[#1A1220]" title={product.displayName}>{product.displayName}</p>
                                                             <p className="mt-0.5 truncate text-[11px] text-[#806F89]">{product.category || "Uncategorized"}</p>
                                                         </div>
-                                                        <span className={`text-center text-xs font-semibold ${product.stock <= 0 ? "text-red-600" : "text-[#1A1220]"}`}>{product.stock}</span>
+                                                        <span className={`text-center text-xs font-semibold ${(product.totalUnits ?? product.stock) <= 0 ? "text-red-600" : "text-[#1A1220]"}`}>{product.totalUnits ?? product.stock}</span>
                                                         <span className="text-right text-xs font-semibold tabular-nums text-[#1A1220]">{peso(product.salesPrice)}</span>
                                                         <div className="flex items-center justify-center gap-1">
                                                             <button type="button" disabled={selectedQty <= 0} onClick={() => onAdjustInclusion(product, -1)}
                                                                     className="h-8 w-8 rounded-lg border border-[#E6DDF0] text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-30" aria-label={`Decrease ${product.displayName}`}>−</button>
                                                             <span className="min-w-5 text-center text-xs font-bold tabular-nums">{selectedQty}</span>
                                                             <button type="button" disabled={product.stock <= 0 || selectedQty >= product.stock} onClick={() => onAdjustInclusion(product, 1)}
-                                                                    className="h-8 w-8 rounded-lg border border-[#E6DDF0] text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-30" aria-label={`Increase ${product.displayName}`}>+</button>
+                                                                    className="h-8 w-8 rounded-lg border border-[#E6DDF0] text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-30" title={product.itemType === "rental" ? `Currently selectable: ${product.stock}` : `Available: ${product.stock}`} aria-label={`Increase ${product.displayName}`}>+</button>
                                                         </div>
                                                     </div>;
                                                 })}
@@ -1834,36 +1632,6 @@ export function PackageFormModal({
                 </form>
             </div>
 
-            {showFormImagePreview && coverImage && (
-                <div
-                    className="fixed inset-0 z-[70] flex items-center justify-center bg-black/85 p-4 backdrop-blur-sm"
-                    role="dialog"
-                    aria-modal="true"
-                    aria-label="Expanded package picture"
-                    onClick={() => setShowFormImagePreview(false)}
-                >
-                    <div
-                        className="relative flex max-h-[94vh] max-w-[94vw] items-center justify-center"
-                        onClick={(event) => event.stopPropagation()}
-                    >
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img
-                            src={coverImage}
-                            alt="Expanded package cover"
-                            className="max-h-[90vh] max-w-[90vw] rounded-[18px] object-contain shadow-2xl"
-                        />
-
-                        <button
-                            type="button"
-                            onClick={() => setShowFormImagePreview(false)}
-                            className="absolute right-3 top-3 flex h-10 w-10 items-center justify-center rounded-full bg-white/95 text-lg font-semibold text-[#2B174C] shadow-md transition hover:scale-105 hover:bg-white"
-                            aria-label="Close expanded package picture"
-                        >
-                            ×
-                        </button>
-                    </div>
-                </div>
-            )}
         </div>
     );
 }
@@ -1884,7 +1652,6 @@ export function usePackageForm(
     const [name, setName] = useState("");
     const [description, setDescription] = useState("");
     const [category, setCategory] = useState<PackageFormCategory>("Other");
-    const [coverImage, setCoverImage] = useState("");
     const [duration, setDuration] = useState("");
     const [status, setStatus] = useState<"Active" | "Inactive">("Active");
     const [discountType, setDiscountType] = useState<DiscountType>("amount");
@@ -1919,7 +1686,6 @@ export function usePackageForm(
         setName("");
         setDescription("");
         setCategory("Other");
-        setCoverImage("");
         setDuration("");
         setStatus("Active");
         setDiscountType("amount");
@@ -1942,7 +1708,6 @@ export function usePackageForm(
         setName(pkg.name);
         setDescription(pkg.description || "");
         setCategory(pkg.category || getPackageCategory(pkg));
-        setCoverImage(getPackageCoverImage(pkg));
         setDuration(pkg.duration || "");
         setStatus(pkg.status);
 
@@ -1964,41 +1729,6 @@ export function usePackageForm(
         setInclusions(pkg.inclusions || []);
         setError("");
         setShowForm(true);
-    }
-
-    function handleCoverImageChange(file: File | null) {
-        if (!file) return;
-
-        if (!file.type.startsWith("image/")) {
-            setError("Please choose a JPG, PNG, or WEBP image.");
-            return;
-        }
-
-        const maximumFileSize = 2 * 1024 * 1024;
-
-        if (file.size > maximumFileSize) {
-            setError("Picture must be 2 MB or smaller.");
-            return;
-        }
-
-        const reader = new FileReader();
-
-        reader.onload = () => {
-            if (typeof reader.result === "string") {
-                setCoverImage(reader.result);
-                setError("");
-            }
-        };
-
-        reader.onerror = () => {
-            setError("Unable to read the selected picture.");
-        };
-
-        reader.readAsDataURL(file);
-    }
-
-    function removeCoverImage() {
-        setCoverImage("");
     }
 
     function addInclusion(products: PackageSelectableItem[]) {
@@ -2219,7 +1949,6 @@ export function usePackageForm(
                     name: name.trim(),
                     description: description.trim(),
                     category,
-                    cover_image: coverImage || null,
                     original_value: originalValue,
                     discount_type: discountType,
                     discount_value: discountNumber,
@@ -2295,9 +2024,6 @@ export function usePackageForm(
         setDescription,
         category,
         setCategory,
-        coverImage,
-        handleCoverImageChange,
-        removeCoverImage,
         duration,
         setDuration,
         status,

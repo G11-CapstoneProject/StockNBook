@@ -1,3 +1,11 @@
+/*
+ * StockNBook Forecasting Lambda (stocknbook_v2 database)
+ *
+ * Database and JWT settings come from environment variables (same names as the Bookings Lambda):
+ *   DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT (optional), JWT_SECRET
+ * Never write passwords or secrets in this file.
+ */
+
 const mysql = require("mysql2/promise");
 const jwt = require("jsonwebtoken");
 
@@ -10,6 +18,7 @@ const {
 
 const {
     ensureBranchBelongsToStore,
+    getUserPermissions,
     getWeekWindows,
     getMonthRange,
     getUpcomingBookingRange,
@@ -21,58 +30,36 @@ const {
     buildWeeklyDemandMap,
 } = require("./forecastingRepository");
 
-/*
-  Configure these in AWS Lambda Environment Variables:
+const REQUIRED_ENV = ["DB_HOST", "DB_USER", "DB_PASSWORD", "DB_NAME", "JWT_SECRET"];
 
-  DB_HOST
-  DB_PORT
-  DB_USER
-  DB_PASSWORD
-  DB_NAME
-  DB_SSL
-  JWT_SECRET
-*/
-
-
-// ===== ENV SECURITY CHANGE: Required JWT environment variable BEGIN =====
-function requiredEnv(name) {
-    const value = process.env[name];
-    if (typeof value !== "string" || !value.trim()) {
-        throw new Error(`Missing required environment variable: ${name}`);
-    }
-    return value;
+function missingEnvironment() {
+    return REQUIRED_ENV.filter((name) => {
+        const value = process.env[name];
+        return typeof value !== "string" || !value.trim();
+    });
 }
 
-const JWT_SECRET = requiredEnv("JWT_SECRET");
-// ===== ENV SECURITY CHANGE: Required JWT environment variable END =====
-
-
-
-const dbConfig = {
-    // ===== ENV SECURITY CHANGE: MySQL environment configuration BEGIN =====
-    host: requiredEnv("DB_HOST"),
-    user: requiredEnv("DB_USER"),
-    password: requiredEnv("DB_PASSWORD"),
-    database: requiredEnv("DB_NAME"),
-    port: Number(process.env.DB_PORT || 3306),
-    // ===== ENV SECURITY CHANGE: MySQL environment configuration END =====
-    ssl: { rejectUnauthorized: false },
-    waitForConnections: true,
-    connectionLimit: 4,
-    queueLimit: 0,
-    enableKeepAlive: true,
-    keepAliveInitialDelay: 0,
-    connectTimeout: 10000,
-};
-
-// Reuse a connection pool across warm Lambda invocations.
-// The old code used one MySQL connection for Promise.all(), so the four
-// inventory-forecast queries were queued instead of running concurrently.
+// Reuse one connection pool across warm invocations; Promise.all() uses separate pooled connections.
 let databasePool;
 
 function getDatabasePool() {
     if (!databasePool) {
-        databasePool = mysql.createPool(dbConfig);
+        databasePool = mysql.createPool({
+            host: process.env.DB_HOST,
+            user: process.env.DB_USER,
+            password: process.env.DB_PASSWORD,
+            database: process.env.DB_NAME,
+            port: Number(process.env.DB_PORT || 3306),
+            // Same as the Bookings Lambda (works for local MySQL and AWS RDS).
+            ssl: { rejectUnauthorized: false },
+            waitForConnections: true,
+            connectionLimit: 4,
+            queueLimit: 0,
+            enableKeepAlive: true,
+            keepAliveInitialDelay: 0,
+            connectTimeout: 10000,
+            decimalNumbers: true,
+        });
     }
 
     return databasePool;
@@ -94,14 +81,15 @@ function unauthorized(headers, message) {
     return jsonResponse(401, headers, { error: message });
 }
 
+function forbidden(headers, message) {
+    return jsonResponse(403, headers, { error: message });
+}
+
 function serverError(headers, error) {
     console.error("Forecasting Lambda error:", error);
 
     return jsonResponse(500, headers, {
-        error:
-            error instanceof Error
-                ? error.message
-                : "Internal server error",
+        error: "Forecasting service failed. Check the server log for details.",
     });
 }
 
@@ -128,10 +116,10 @@ function getRole(decoded) {
 }
 
 function getScopeFromToken(decoded, body, headers) {
-    const storeId = toPositiveInteger(decoded?.store_id);
+    const storeId = toPositiveInteger(decoded?.store_id ?? decoded?.storeId);
     const role = getRole(decoded);
-    const tokenBranchId = toPositiveInteger(decoded?.branch_id);
-    const requestedBranchId = toPositiveInteger(body.branch_id);
+    const tokenBranchId = toPositiveInteger(decoded?.branch_id ?? decoded?.branchId);
+    const requestedBranchId = toPositiveInteger(body.branch_id ?? body.branchId);
 
     const isBranchUser =
         role === "manager" ||
@@ -146,9 +134,13 @@ function getScopeFromToken(decoded, body, headers) {
         };
     }
 
-    // Forecasting is a management-only module regardless of legacy grants.
-    if (!["owner", "manager"].includes(role)) {
-        return { error: unauthorized(headers, "Forecasting is not available to this role.") };
+    if (!["owner", "manager", "staff"].includes(role)) {
+        return {
+            error: forbidden(
+                headers,
+                "Your account role is not allowed to view forecasting."
+            ),
+        };
     }
 
     if (isBranchUser && !tokenBranchId) {
@@ -165,10 +157,17 @@ function getScopeFromToken(decoded, body, headers) {
         role,
         selectedBranchId: isBranchUser
             ? tokenBranchId
-            : role === "owner"
-                ? requestedBranchId
-                : null,
+            : requestedBranchId,
     };
+}
+
+// v2 permissions are saved as true / "full" / "view" (or "none" / false).
+function forecastingAccess(permissions) {
+    const value = permissions?.forecasting_access ?? permissions?.forecasting;
+
+    if ([true, 1, "1", "true", "full", "view", "view_only"].includes(value)) return "allowed";
+    if ([false, 0, "0", "false", "none"].includes(value)) return "denied";
+    return "unset";
 }
 
 function normalizeAction(action) {
@@ -265,116 +264,6 @@ function resolveSeasonalDateRange(body) {
     };
 }
 
-/*
-  Creates a complete month-by-month timeline.
-
-  Missing months become zero instead of being removed, so the Forecasting
-  graph always displays a real 12-month sequence.
-*/
-function buildMonthlyDemandHistory(
-    monthlyRows = [],
-    startDate,
-    endDate
-) {
-    const savedRows = new Map();
-
-    monthlyRows.forEach((row) => {
-        const monthKey = String(row.monthKey || "");
-
-        if (!/^\d{4}-\d{2}$/.test(monthKey)) {
-            return;
-        }
-
-        savedRows.set(monthKey, {
-            totalUnits: Math.max(
-                0,
-                Number(row.totalUnits || 0)
-            ),
-            orderCount: Math.max(
-                0,
-                Number(row.orderCount || 0)
-            ),
-        });
-    });
-
-    const start = parseMonth(
-        String(startDate || "").slice(0, 7)
-    );
-
-    const end = parseMonth(
-        String(endDate || "").slice(0, 7)
-    );
-
-    if (!start || !end) {
-        return [];
-    }
-
-    const cursor = new Date(
-        Date.UTC(start.year, start.month - 1, 1)
-    );
-
-    const lastMonth = new Date(
-        Date.UTC(end.year, end.month - 1, 1)
-    );
-
-    const history = [];
-
-    while (cursor <= lastMonth) {
-        const monthKey = `${cursor.getUTCFullYear()}-${String(
-            cursor.getUTCMonth() + 1
-        ).padStart(2, "0")}`;
-
-        const row = savedRows.get(monthKey) || {
-            totalUnits: 0,
-            orderCount: 0,
-        };
-
-        history.push({
-            monthKey,
-            label: new Intl.DateTimeFormat("en-US", {
-                month: "short",
-                year: "2-digit",
-                timeZone: "UTC",
-            }).format(cursor),
-            totalUnits: row.totalUnits,
-            orderCount: row.orderCount,
-        });
-
-        cursor.setUTCMonth(
-            cursor.getUTCMonth() + 1
-        );
-    }
-
-    return history;
-}
-
-function buildBookingAllocationMap(bookingForecast) {
-    const allocationMap = new Map();
-
-    for (const allocation of bookingForecast?.allocatedInventory || []) {
-        const productId = Number(
-            allocation.productId || 0
-        );
-
-        if (!productId) {
-            continue;
-        }
-
-        const variantId =
-            Number(allocation.variantId || 0) || null;
-
-        const key = `${productId}:${variantId || "product"}`;
-
-        allocationMap.set(
-            key,
-            Number(allocationMap.get(key) || 0) +
-            Number(allocation.quantity || 0)
-        );
-    }
-
-    return allocationMap;
-}
-
 function alertPriority(item) {
     const timeAlert = String(
         item.timeAlert || "NONE"
@@ -423,11 +312,7 @@ async function buildInventoryForecastResponse({
 
     /*
       Keep the main Product Demand request small and fast.
-
-      Product-level seasonal history and detailed upcoming bookings are already
-      provided by the separate seasonal and booking forecast actions. Loading
-      all three datasets again here caused the inventory request to run too long
-      and API Gateway returned 503 Service Unavailable.
+      Seasonal history and detailed upcoming bookings have their own actions.
     */
     const [
         inventoryItems,
@@ -460,18 +345,17 @@ async function buildInventoryForecastResponse({
         weekWindows
     );
 
-    const bookingAllocationMap = buildBookingAllocationMap(
-        bookingAllocationSummary
-    );
-
     const rawItems = inventoryItems.map((item) => {
         const weeklyDemand =
             weeklyDemandMap.get(item.id) ||
             Array(historyWeeks).fill(0);
 
-        const allocatedQuantity = Number(
-            bookingAllocationMap.get(item.id) || 0
-        );
+        /*
+          Units already held for confirmed bookings come straight from the Inventory
+          module (branch_inventory.reserved_quantity), so "available" here matches
+          the Inventory page: usable stock − reserved.
+        */
+        const allocatedQuantity = Number(item.reservedQuantity || 0);
 
         const forecast = buildInventoryForecast({
             weeklyDemand,
@@ -483,11 +367,7 @@ async function buildInventoryForecastResponse({
             leadTimeDays,
         });
 
-        /*
-          Return only fields used by the Product Demand interface.
-          weeklyDemand, monthlyDemand, the twelve-month item seasonal array,
-          and the duplicate detailed booking list are intentionally omitted.
-        */
+        // Only the fields used by the Product Demand interface.
         return {
             ...item,
 
@@ -623,7 +503,7 @@ async function buildInventoryForecastResponse({
 
         notes: {
             dataSource:
-                "Completed POS sales, current inventory, and aggregated upcoming booking allocations.",
+                "Completed POS sales, current branch inventory, and stock already reserved for confirmed bookings.",
 
             seasonality:
                 "Branch seasonal patterns are loaded separately by get_seasonal_forecast.",
@@ -722,6 +602,12 @@ async function buildBookingForecastResponse({
             endDate: range.endDate,
         },
 
+        notes: {
+            dataSource: "Bookings with an event date in the next 30 days.",
+            includedStatuses: ["Confirmed", "Preparing", "Released"],
+            allocationRule: "Consumables and rental equipment booked for each booking (package lines and cancelled lines excluded).",
+        },
+
         booking: buildBookingForecast(bookings, {
             periodDays,
         }),
@@ -752,10 +638,22 @@ exports.handler = async (event) => {
         };
     }
 
+    const missing = missingEnvironment();
+
+    if (missing.length) {
+        return jsonResponse(500, headers, {
+            error:
+                "Forecasting server configuration is incomplete. " +
+                `Set ${missing.join(", ")} in the environment (.env.local or the Lambda settings).`,
+        });
+    }
+
     let body;
 
     try {
-        body = JSON.parse(event.body || "{}");
+        body = typeof event?.body === "object" && event.body !== null
+            ? event.body
+            : JSON.parse(event?.body || "{}");
     } catch {
         return badRequest(
             headers,
@@ -793,7 +691,7 @@ exports.handler = async (event) => {
     try {
         decoded = jwt.verify(
             authorization.replace(/^Bearer\s+/i, ""),
-            JWT_SECRET
+            process.env.JWT_SECRET
         );
     } catch {
         return unauthorized(
@@ -812,12 +710,34 @@ exports.handler = async (event) => {
         return scope.error;
     }
 
-    let connection;
-
     try {
-        // Repository functions only use execute(), so a pool can be passed
-        // directly. Promise.all() can now use separate pooled connections.
-        connection = getDatabasePool();
+        const connection = getDatabasePool();
+
+        // Managers and Staff: the account must be active, and Staff need Forecasting access.
+        if (scope.role !== "owner") {
+            const permissions = await getUserPermissions(
+                connection,
+                decoded,
+                scope.storeId,
+                scope.role
+            );
+
+            if (!permissions) {
+                return forbidden(
+                    headers,
+                    "Your account was not found or is inactive in this store."
+                );
+            }
+
+            const access = forecastingAccess(permissions);
+
+            if (access === "denied" || (scope.role === "staff" && access !== "allowed")) {
+                return forbidden(
+                    headers,
+                    "You do not have permission to view forecasting."
+                );
+            }
+        }
 
         if (scope.selectedBranchId) {
             const allowed =

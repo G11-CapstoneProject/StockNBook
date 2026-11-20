@@ -1,710 +1,1021 @@
+/*
+ * StockNBook Analytics Engine — Revised V2
+ *
+ * Sections:
+ * 1. Sales Performance & Trends
+ * 2. Product & Category Demand
+ * 3. Booking & Rental Trends
+ * 4. Package Demand Analysis
+ * 5. Branch Performance (Owner only)
+ *
+ * Analytics describes historical activity only.
+ * Forecasting remains a separate module.
+ */
+
+// Accepted = down payment paid or later (same statuses as the Bookings module's sales).
+const ACCEPTED_BOOKING_STATUSES = new Set([
+    "confirmed",
+    "preparing",
+    "released",
+    "return inspection",
+    "pending settlement",
+    "completed",
+]);
+
+const MONTH_FORMATTER = new Intl.DateTimeFormat("en-PH", {
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+});
+
 function toNumber(value, fallback = 0) {
     const number = Number(value);
     return Number.isFinite(number) ? number : fallback;
 }
 
-function toDateOnly(value) {
-    const raw = String(value || "").slice(0, 10);
-    return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : null;
+function round(value, decimals = 2) {
+    const factor = 10 ** decimals;
+    return Math.round((toNumber(value) + Number.EPSILON) * factor) / factor;
 }
 
-function parseDateOnly(value) {
-    const dateOnly = toDateOnly(value);
+function normalizeText(value) {
+    return String(value ?? "").trim();
+}
 
-    if (!dateOnly) {
+function normalizeStatus(value) {
+    return normalizeText(value).toLowerCase();
+}
+
+function toDateOnly(value) {
+    const text = normalizeText(value).slice(0, 10);
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
         return null;
     }
 
-    const date = new Date(`${dateOnly}T00:00:00.000Z`);
-    return Number.isFinite(date.getTime()) ? date : null;
+    const date = new Date(`${text}T00:00:00.000Z`);
+
+    if (
+        Number.isNaN(date.getTime()) ||
+        date.toISOString().slice(0, 10) !== text
+    ) {
+        return null;
+    }
+
+    return text;
 }
 
-function toISODate(date) {
+function parseDate(value) {
+    const dateOnly = toDateOnly(value);
+
+    return dateOnly
+        ? new Date(`${dateOnly}T00:00:00.000Z`)
+        : null;
+}
+
+function isoDate(date) {
     return date.toISOString().slice(0, 10);
 }
 
-function addDaysUTC(date, days) {
+function addDays(date, days) {
     const result = new Date(date.getTime());
     result.setUTCDate(result.getUTCDate() + days);
     return result;
 }
 
-function startOfDayUTC(date) {
+function addMonths(date, months) {
     return new Date(
-        Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())
+        Date.UTC(
+            date.getUTCFullYear(),
+            date.getUTCMonth() + months,
+            1
+        )
     );
 }
 
-function clampInteger(value, minimum, maximum, fallback) {
-    const number = Number(value);
+function monthKey(dateOnly) {
+    const date = toDateOnly(dateOnly);
+    return date ? date.slice(0, 7) : null;
+}
 
-    if (!Number.isInteger(number)) {
-        return fallback;
+function monthLabel(key) {
+    const date = parseDate(`${key}-01`);
+    return date ? MONTH_FORMATTER.format(date) : key;
+}
+
+function monthKeys(startDate, endDate) {
+    const start = parseDate(startDate);
+    const end = parseDate(endDate);
+
+    if (!start || !end || start > end) return [];
+
+    const result = [];
+    let cursor = new Date(
+        Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1)
+    );
+
+    const last = new Date(
+        Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1)
+    );
+
+    while (cursor <= last) {
+        result.push(isoDate(cursor).slice(0, 7));
+        cursor = addMonths(cursor, 1);
     }
 
-    return Math.min(maximum, Math.max(minimum, number));
+    return result;
 }
 
-function normalizeStatus(value) {
-    return String(value || "")
-        .trim()
-        .toLowerCase()
-        .replace(/\s+/g, " ");
+function inRange(date, startDate, endDate) {
+    const normalized = toDateOnly(date);
+
+    return Boolean(
+        normalized &&
+        normalized >= startDate &&
+        normalized <= endDate
+    );
 }
 
-function formatDateLabel(dateOnly) {
-    const date = parseDateOnly(dateOnly);
+function percentChange(current, previous) {
+    const currentValue = toNumber(current);
+    const previousValue = toNumber(previous);
 
-    if (!date) {
-        return String(dateOnly || "");
+    if (previousValue <= 0) {
+        return null;
     }
 
-    return new Intl.DateTimeFormat("en-PH", {
-        month: "short",
-        day: "numeric",
-        year: "numeric",
-        timeZone: "UTC",
-    }).format(date);
+    return round(
+        ((currentValue - previousValue) / previousValue) * 100,
+        1
+    );
 }
 
-function formatMonthLabel(monthKey) {
-    const date = new Date(`${monthKey}-01T00:00:00.000Z`);
+function changeDetails(current, previous) {
+    const currentValue = toNumber(current);
+    const previousValue = toNumber(previous);
 
-    if (!Number.isFinite(date.getTime())) {
-        return monthKey;
-    }
-
-    return new Intl.DateTimeFormat("en-PH", {
-        month: "short",
-        year: "numeric",
-        timeZone: "UTC",
-    }).format(date);
-}
-
-function formatRangeLabel(startDate, endDate) {
-    const start = parseDateOnly(startDate);
-    const end = parseDateOnly(endDate);
-
-    if (!start || !end) {
-        return "Selected reporting period";
-    }
-
-    const sameYear = start.getUTCFullYear() === end.getUTCFullYear();
-    const startText = new Intl.DateTimeFormat("en-PH", {
-        month: "short",
-        day: "numeric",
-        year: sameYear ? undefined : "numeric",
-        timeZone: "UTC",
-    }).format(start);
-    const endText = new Intl.DateTimeFormat("en-PH", {
-        month: "short",
-        day: "numeric",
-        year: "numeric",
-        timeZone: "UTC",
-    }).format(end);
-
-    return `${startText} – ${endText}`;
-}
-
-function percentChange(currentValue, previousValue) {
-    const current = toNumber(currentValue);
-    const previous = toNumber(previousValue);
-
-    if (previous <= 0) {
-        return current > 0 ? 100 : 0;
-    }
-
-    return Number((((current - previous) / previous) * 100).toFixed(1));
-}
-
-function monthKeyFromDate(dateOnly) {
-    const raw = String(dateOnly || "").slice(0, 7);
-    return /^\d{4}-\d{2}$/.test(raw) ? raw : "";
-}
-
-function weekdayKey(dateOnly) {
-    const date = parseDateOnly(dateOnly);
-
-    if (!date) {
-        return "";
-    }
-
-    return new Intl.DateTimeFormat("en-US", {
-        weekday: "short",
-        timeZone: "UTC",
-    }).format(date);
-}
-
-function isWeekend(day) {
-    return day === "Sat" || day === "Sun";
-}
-
-function shortWeekdayToLong(day) {
-    const labels = {
-        Mon: "Monday",
-        Tue: "Tuesday",
-        Wed: "Wednesday",
-        Thu: "Thursday",
-        Fri: "Friday",
-        Sat: "Saturday",
-        Sun: "Sunday",
-    };
-
-    return labels[day] || "No booking data";
-}
-
-function safePackageName(row) {
-    const name = String(
-        row.package_name ||
-        row.packageName ||
-        row.custom_order ||
-        row.customOrder ||
-        ""
-    ).trim();
-
-    return name || "Custom / unnamed booking";
-}
-
-function bookingValue(row) {
-    const agreedPrice = toNumber(row.agreed_price ?? row.agreedPrice);
-    const packagePrice = toNumber(row.package_price ?? row.packagePrice);
-    const amountPaid = toNumber(row.amount_paid ?? row.amountPaid);
-
-    return agreedPrice > 0
-        ? agreedPrice
-        : packagePrice > 0
-            ? packagePrice
-            : amountPaid;
-}
-
-function normalizeRevenueItems(rows) {
-    return rows
-        .map((row) => ({
-            name: String(row.name || row.category || "Uncategorized").trim() || "Uncategorized",
-            value: Math.max(0, Math.round(toNumber(row.value ?? row.revenue))),
-        }))
-        .filter((row) => row.value > 0)
-        .sort((first, second) => second.value - first.value);
-}
-
-function createMonthKeys(startDate, endDate) {
-    const start = parseDateOnly(startDate);
-    const end = parseDateOnly(endDate);
-
-    if (!start || !end) {
-        return [];
-    }
-
-    const keys = [];
-    const cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
-    const finalMonth = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1));
-
-    while (cursor <= finalMonth) {
-        keys.push(toISODate(cursor).slice(0, 7));
-        cursor.setUTCMonth(cursor.getUTCMonth() + 1);
-    }
-
-    return keys;
-}
-
-function createDateKeys(startDate, endDate) {
-    const start = parseDateOnly(startDate);
-    const end = parseDateOnly(endDate);
-
-    if (!start || !end) {
-        return [];
-    }
-
-    const keys = [];
-    let cursor = new Date(start.getTime());
-
-    while (cursor <= end) {
-        keys.push(toISODate(cursor));
-        cursor = addDaysUTC(cursor, 1);
-    }
-
-    return keys;
-}
-
-function buildRange(input = {}, now = new Date()) {
-    const today = startOfDayUTC(now);
-
-    const customStart = toDateOnly(input.startDate ?? input.start_date);
-    const customEnd = toDateOnly(input.endDate ?? input.end_date);
-
-    if (customStart || customEnd) {
-        if (!customStart || !customEnd) {
-            throw new Error("Both start_date and end_date are required for a custom analytics period.");
-        }
-
-        const start = parseDateOnly(customStart);
-        const end = parseDateOnly(customEnd);
-
-        if (!start || !end || start > end) {
-            throw new Error("The custom analytics date range is invalid.");
-        }
-
-        const days = Math.floor((end.getTime() - start.getTime()) / 86400000) + 1;
-
-        if (days > 366) {
-            throw new Error("The custom analytics period cannot exceed 366 days.");
-        }
-
-        const previousEnd = addDaysUTC(start, -1);
-        const previousStart = addDaysUTC(previousEnd, -(days - 1));
-
+    if (previousValue <= 0) {
         return {
-            kind: "custom",
-            days,
-            startDate: customStart,
-            endDate: customEnd,
-            previousStartDate: toISODate(previousStart),
-            previousEndDate: toISODate(previousEnd),
-            label: formatRangeLabel(customStart, customEnd),
+            percentage: null,
+            direction:
+                currentValue > 0 ? "new-activity" : "no-activity",
+            label:
+                currentValue > 0 ? "New activity" : "No activity",
         };
     }
 
-    const days = clampInteger(input.period ?? input.periodDays, 30, 90, 30);
-    const endDate = toISODate(today);
-    const startDate = toISODate(addDaysUTC(today, -(days - 1)));
-    const previousEnd = addDaysUTC(today, -days);
-    const previousStart = addDaysUTC(previousEnd, -(days - 1));
+    const percentage = percentChange(
+        currentValue,
+        previousValue
+    );
 
     return {
-        kind: "preset",
-        days,
-        startDate,
-        endDate,
-        previousStartDate: toISODate(previousStart),
-        previousEndDate: toISODate(previousEnd),
-        label: `Rolling last ${days} days`,
+        percentage,
+        direction:
+            percentage > 0
+                ? "increasing"
+                : percentage < 0
+                    ? "decreasing"
+                    : "unchanged",
+        label:
+            percentage > 0
+                ? `+${percentage}%`
+                : `${percentage}%`,
     };
 }
 
-function buildSalesData({
-                            salesRows = [],
-                            range,
-                        }) {
-    const selectedDateSet = new Set(createDateKeys(range.startDate, range.endDate));
-    const allRows = Array.isArray(salesRows) ? salesRows : [];
+function salesComparison(current, previous) {
+    const currentValue = toNumber(current);
+    const previousValue = toNumber(previous);
 
-    const currentRows = allRows.filter((row) => {
-        const date = toDateOnly(row.orderDate ?? row.order_date ?? row.date);
-        return Boolean(date && selectedDateSet.has(date));
-    });
-
-    const currentSales = currentRows.reduce(
-        (sum, row) => sum + toNumber(row.total ?? row.value ?? row.amount),
-        0
-    );
-
-    const previousRows = allRows.filter((row) => {
-        const date = toDateOnly(row.orderDate ?? row.order_date ?? row.date);
-        return Boolean(
-            date &&
-            date >= range.previousStartDate &&
-            date <= range.previousEndDate
-        );
-    });
-
-    const previousSales = previousRows.reduce(
-        (sum, row) => sum + toNumber(row.total ?? row.value ?? row.amount),
-        0
-    );
-
-    const dailyMap = new Map();
-    const monthMap = new Map();
-
-    for (const date of createDateKeys(range.startDate, range.endDate)) {
-        dailyMap.set(date, 0);
+    // A percentage change cannot be calculated
+    // when the previous period has zero qualifying sales.
+    if (previousValue <= 0) {
+        return {
+            percentage: null,
+            direction: "unavailable",
+            label: "N/A",
+            explanation:
+                "No qualifying sales recorded in the comparison period.",
+        };
     }
 
-    for (const monthKey of createMonthKeys(range.startDate, range.endDate)) {
-        monthMap.set(monthKey, 0);
-    }
+    const result = changeDetails(
+        currentValue,
+        previousValue
+    );
 
-    for (const row of currentRows) {
-        const date = toDateOnly(row.orderDate ?? row.order_date ?? row.date);
-        const total = toNumber(row.total ?? row.value ?? row.amount);
+    return {
+        ...result,
+        explanation:
+            "Calculated against recorded sales in the comparison period.",
+    };
+}
 
-        if (!date) {
+function sum(rows, field) {
+    return rows.reduce(
+        (total, row) => total + toNumber(row[field]),
+        0
+    );
+}
+
+function groupSum(rows, keyFunction, valueFunction) {
+    const result = new Map();
+
+    for (const row of rows) {
+        const key = keyFunction(row);
+
+        if (key === null || key === undefined || key === "") {
             continue;
         }
 
-        dailyMap.set(date, (dailyMap.get(date) || 0) + total);
-
-        const monthKey = monthKeyFromDate(date);
-        monthMap.set(monthKey, (monthMap.get(monthKey) || 0) + total);
+        result.set(
+            key,
+            (result.get(key) || 0) + toNumber(valueFunction(row))
+        );
     }
 
-    const monthKeys = Array.from(monthMap.keys());
-    const monthlySales = monthKeys.map((monthKey) => ({
-        label: formatMonthLabel(monthKey),
-        key: monthKey,
-        value: Math.round(monthMap.get(monthKey) || 0),
+    return result;
+}
+
+function createMonthlySeries(
+    rows,
+    startDate,
+    endDate,
+    dateField,
+    valueField
+) {
+    const sums = groupSum(
+        rows.filter(row =>
+            inRange(row[dateField], startDate, endDate)
+        ),
+        row => monthKey(row[dateField]),
+        row => row[valueField]
+    );
+
+    return monthKeys(startDate, endDate).map(key => ({
+        key,
+        label: monthLabel(key),
+        value: round(sums.get(key) || 0),
     }));
+}
 
-    const dailySalesByMonth = {};
-
-    for (const monthKey of monthKeys) {
-        dailySalesByMonth[formatMonthLabel(monthKey)] = createDateKeys(
-            `${monthKey}-01`,
-            (() => {
-                const finalRangeDate = parseDateOnly(range.endDate);
-                const startRangeDate = parseDateOnly(range.startDate);
-                const monthStart = parseDateOnly(`${monthKey}-01`);
-                const monthEnd = new Date(
-                    Date.UTC(monthStart.getUTCFullYear(), monthStart.getUTCMonth() + 1, 0)
-                );
-
-                const start = startRangeDate > monthStart ? startRangeDate : monthStart;
-                const end = finalRangeDate < monthEnd ? finalRangeDate : monthEnd;
-
-                return toISODate(end);
-            })()
-        )
-            .filter((date) => date >= range.startDate && date <= range.endDate)
-            .map((date) => ({
-                label: String(Number(date.slice(-2))),
-                value: Math.round(dailyMap.get(date) || 0),
-            }));
+function highestAndLowest(items) {
+    if (!items.length) {
+        return { highest: null, lowest: null };
     }
 
-    /*
-      Sales Growth uses only the selected reporting period for its month-by-month
-      bars. monthlySales is created from createMonthKeys(startDate, endDate), so
-      it already contains every calendar month touched by the selected range.
-      A month with no completed POS order stays in the chart with a value of 0.
-
-      This prevents missing months from being skipped (for example, comparing
-      March directly with January when February had no sales). The first month
-      has no earlier month inside this chart, so it is marked as unavailable
-      instead of being presented as a misleading 0% comparison.
-    */
-    const growthMonths = monthlySales.map((month, index) => {
-        const currentValue = Number(month.value || 0);
-        const previousValue =
-            index > 0 ? Number(monthlySales[index - 1].value || 0) : null;
-
-        return {
-            label: month.label,
-            key: month.key,
-            value:
-                previousValue === null
-                    ? 0
-                    : Math.round(percentChange(currentValue, previousValue)),
-            hasComparison: previousValue !== null,
-        };
-    });
-
-    const latestMonthlySales =
-        monthlySales.length > 0
-            ? monthlySales[monthlySales.length - 1].value
-            : 0;
-
-    const previousMonthSales =
-        monthlySales.length > 1
-            ? monthlySales[monthlySales.length - 2].value
-            : 0;
+    const sorted = [...items].sort(
+        (a, b) => b.value - a.value
+    );
 
     return {
-        currentSales: Math.round(currentSales),
-        previousSales: Math.round(previousSales),
-        salesGrowthPercent: percentChange(currentSales, previousSales),
-        monthlyGrowth: growthMonths,
-        monthlySales,
-        dailySalesByMonth,
-        latestMonthlySales,
-        previousMonthSales,
-        salesOrderCount: currentRows.length,
+        highest: sorted[0],
+        lowest: sorted[sorted.length - 1],
     };
 }
 
-function buildBookingData(bookings = [], range = null) {
-    const acceptedStatuses = new Set(["confirmed", "preparing", "completed"]);
-    const acceptedBookings = (Array.isArray(bookings) ? bookings : []).filter((booking) =>
-        acceptedStatuses.has(normalizeStatus(booking.status))
-    );
+function sameCalendarPeriodPreviousYear(startDate, endDate) {
+    const start = parseDate(startDate);
+    const end = parseDate(endDate);
 
-    const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-    const countByDay = new Map(days.map((day) => [day, 0]));
-    const countByTime = new Map();
-    const weekdayCounts = new Map();
-
-    /*
-      Monthly booking points follow the exact selected period. This is separate
-      from the weekday pattern: a 12-month period must produce 12 month buckets,
-      including a 0 for any month without an accepted booking.
-    */
-    const monthlyBookingMap = new Map(
-        range?.startDate && range?.endDate
-            ? createMonthKeys(range.startDate, range.endDate).map((monthKey) => [monthKey, 0])
-            : []
-    );
-
-    let confirmed = 0;
-    let preparing = 0;
-    let completed = 0;
-    let weekendCount = 0;
-
-    for (const booking of acceptedBookings) {
-        const status = normalizeStatus(booking.status);
-
-        if (status === "confirmed") confirmed += 1;
-        if (status === "preparing") preparing += 1;
-        if (status === "completed") completed += 1;
-
-        const date = toDateOnly(booking.eventDate ?? booking.event_date ?? booking.date);
-        const day = weekdayKey(date);
-        const monthKey = monthKeyFromDate(date);
-
-        if (monthKey) {
-            monthlyBookingMap.set(
-                monthKey,
-                (monthlyBookingMap.get(monthKey) || 0) + 1
-            );
-        }
-
-        if (day && countByDay.has(day)) {
-            countByDay.set(day, (countByDay.get(day) || 0) + 1);
-
-            if (isWeekend(day)) {
-                weekendCount += 1;
-            } else {
-                weekdayCounts.set(day, (weekdayCounts.get(day) || 0) + 1);
-            }
-        }
-
-        const time = String(booking.eventTime ?? booking.event_time ?? "").trim();
-
-        if (time) {
-            countByTime.set(time, (countByTime.get(time) || 0) + 1);
-        }
+    if (!start || !end) {
+        throw new Error("Invalid comparison dates.");
     }
 
-    const dailyBookings = days.map((day) => ({
-        label: day,
-        value: countByDay.get(day) || 0,
-    }));
+    function previousYear(date) {
+        const year = date.getUTCFullYear() - 1;
+        const month = date.getUTCMonth();
+        const day = date.getUTCDate();
 
-    const monthlyBookings = Array.from(monthlyBookingMap.entries()).map(
-        ([monthKey, value]) => ({
-            label: formatMonthLabel(monthKey),
-            key: monthKey,
-            value: Math.round(value || 0),
+        const lastDay = new Date(
+            Date.UTC(year, month + 1, 0)
+        ).getUTCDate();
+
+        return new Date(
+            Date.UTC(year, month, Math.min(day, lastDay))
+        );
+    }
+
+    return {
+        startDate: isoDate(previousYear(start)),
+        endDate: isoDate(previousYear(end)),
+    };
+}
+
+/*
+ * Reporting range
+ *
+ * Default: last 12 completed calendar months.
+ *
+ * Presets:
+ * 30, 60, 90, 180 days
+ * 12m (12 completed months)
+ * Custom: maximum 366 days
+ */
+function buildRange(input = {}, now = new Date()) {
+    const today = new Date(
+        Date.UTC(
+            now.getUTCFullYear(),
+            now.getUTCMonth(),
+            now.getUTCDate()
+        )
+    );
+
+    let start;
+    let end;
+    let kind;
+    let label;
+
+    const requestedStart = input.startDate ?? input.start_date;
+    const requestedEnd = input.endDate ?? input.end_date;
+
+    if (requestedStart || requestedEnd) {
+        start = parseDate(requestedStart);
+        end = parseDate(requestedEnd);
+        kind = "custom";
+
+        if (!start || !end || start > end) {
+            throw new Error("Invalid analytics date range.");
+        }
+
+        label = `${isoDate(start)} to ${isoDate(end)}`;
+    } else if (
+        String(input.period ?? input.periodDays ?? "12m") === "12m"
+    ) {
+        end = new Date(
+            Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 0)
+        );
+
+        start = new Date(
+            Date.UTC(
+                end.getUTCFullYear(),
+                end.getUTCMonth() - 11,
+                1
+            )
+        );
+
+        kind = "preset";
+        label = "Last 12 complete months";
+    } else {
+        const requestedDays = Number(
+            input.period ?? input.periodDays ?? 30
+        );
+
+        if (![30, 60, 90, 180].includes(requestedDays)) {
+            throw new Error("Invalid analytics reporting period.");
+        }
+
+        start = addDays(today, -(requestedDays - 1));
+        end = today;
+        kind = "preset";
+        label = `Last ${requestedDays} days`;
+    }
+
+    const days =
+        Math.round(
+            (end.getTime() - start.getTime()) / 86400000
+        ) + 1;
+
+    if (days > 366) {
+        throw new Error(
+            "Analytics date range cannot exceed 366 days."
+        );
+    }
+
+    const previousEnd = addDays(start, -1);
+    const previousStart = addDays(previousEnd, -(days - 1));
+
+    const previousYear = sameCalendarPeriodPreviousYear(
+        isoDate(start),
+        isoDate(end)
+    );
+
+    return {
+        kind,
+        label,
+        days,
+        startDate: isoDate(start),
+        endDate: isoDate(end),
+        previousStartDate: isoDate(previousStart),
+        previousEndDate: isoDate(previousEnd),
+        previousYearStartDate: previousYear.startDate,
+        previousYearEndDate: previousYear.endDate,
+    };
+}
+
+/* -------------------------------------------------------
+ * 1. SALES PERFORMANCE & TRENDS
+ * ------------------------------------------------------- */
+
+function buildSalesAnalytics(rows, range) {
+    const allRows = Array.isArray(rows) ? rows : [];
+
+    const current = allRows.filter(row =>
+        inRange(row.day, range.startDate, range.endDate)
+    );
+
+    const previous = allRows.filter(row =>
+        inRange(
+            row.day,
+            range.previousStartDate,
+            range.previousEndDate
+        )
+    );
+
+    const lastYear = allRows.filter(row =>
+        inRange(
+            row.day,
+            range.previousYearStartDate,
+            range.previousYearEndDate
+        )
+    );
+
+    const currentSales = sum(current, "value");
+    const previousSales = sum(previous, "value");
+    const previousYearSales = sum(lastYear, "value");
+
+    const monthlySales = createMonthlySeries(
+        allRows,
+        range.startDate,
+        range.endDate,
+        "day",
+        "value"
+    );
+
+    const monthlyPreviousYear = createMonthlySeries(
+        allRows,
+        range.previousYearStartDate,
+        range.previousYearEndDate,
+        "day",
+        "value"
+    );
+
+    const branchMap = groupSum(
+        current,
+        row => String(row.branchId || ""),
+        row => row.value
+    );
+
+    const branchNames = new Map();
+
+    for (const row of current) {
+        branchNames.set(
+            String(row.branchId),
+            row.branchName || `Branch ${row.branchId}`
+        );
+    }
+
+    return {
+        totalSales: round(currentSales),
+        previousSales: round(previousSales),
+        previousYearSales: round(previousYearSales),
+        orderCount: sum(current, "orders"),
+
+        periodChange: salesComparison(
+            currentSales,
+            previousSales
+        ),
+        yearOverYearChange: salesComparison(
+            currentSales,
+            previousYearSales
+        ),
+        monthlySales,
+        monthlyPreviousYear,
+        highlights: highestAndLowest(monthlySales),
+        salesByBranch: Array.from(branchMap.entries()).map(
+            ([branchId, value]) => ({
+                branchId: Number(branchId),
+                branchName: branchNames.get(branchId),
+                value: round(value),
+            })
+        ),
+    };
+}
+
+/* -------------------------------------------------------
+ * 2. PRODUCT & CATEGORY DEMAND
+ * ------------------------------------------------------- */
+
+function buildProductAnalytics(rows, range) {
+    const allRows = Array.isArray(rows) ? rows : [];
+
+    const current = allRows.filter(row =>
+        inRange(row.day, range.startDate, range.endDate)
+    );
+
+    const previous = allRows.filter(row =>
+        inRange(
+            row.day,
+            range.previousStartDate,
+            range.previousEndDate
+        )
+    );
+
+    const categoryName = row =>
+        normalizeText(row.category) || "Uncategorized";
+
+    const productKey = row =>
+        `${row.productId ?? "unknown"}:${row.variantId ?? "base"}`;
+
+    const categoryUnits = groupSum(
+        current,
+        categoryName,
+        row => row.units
+    );
+
+    const categoryPrevious = groupSum(
+        previous,
+        categoryName,
+        row => row.units
+    );
+
+    const categories = Array.from(categoryUnits.entries())
+        .map(([name, units]) => ({
+            name,
+            units: round(units),
+            change: changeDetails(
+                units,
+                categoryPrevious.get(name) || 0
+            ),
+        }))
+        .sort((a, b) => b.units - a.units);
+
+    const productUnits = groupSum(
+        current,
+        productKey,
+        row => row.units
+    );
+
+    const previousProductUnits = groupSum(
+        previous,
+        productKey,
+        row => row.units
+    );
+
+    const productNames = new Map();
+
+    for (const row of current) {
+        productNames.set(productKey(row), {
+            productId: row.productId,
+            variantId: row.variantId,
+            name: normalizeText(row.productName) ||
+                `Product ${row.productId}`,
+            category: categoryName(row),
+        });
+    }
+
+    const products = Array.from(productUnits.entries())
+        .map(([key, units]) => ({
+            key,
+            ...productNames.get(key),
+            units: round(units),
+            change: changeDetails(
+                units,
+                previousProductUnits.get(key) || 0
+            ),
+        }))
+        .sort((a, b) => b.units - a.units);
+
+    const hourlyMap = groupSum(
+        current.filter(row =>
+            Number.isInteger(Number(row.purchaseHour)) &&
+            row.purchaseHour !== null &&
+            Number(row.purchaseHour) >= 0 &&
+            Number(row.purchaseHour) <= 23
+        ),
+        row => Number(row.purchaseHour),
+        row => row.units
+    );
+
+    const hourlyDemand = Array.from(
+        { length: 24 },
+        (_, hour) => ({
+            hour,
+            label: `${String(hour).padStart(2, "0")}:00`,
+            units: round(hourlyMap.get(hour) || 0),
         })
     );
 
-    const sortedMonths = [...monthlyBookings].sort(
-        (first, second) =>
-            second.value - first.value ||
-            String(first.key || first.label).localeCompare(String(second.key || second.label))
-    );
-    const peakMonth = sortedMonths[0]?.value
-        ? sortedMonths[0].label
-        : "No booking data";
-
-    const sortedDays = [...dailyBookings].sort(
-        (first, second) => second.value - first.value || first.label.localeCompare(second.label)
-    );
-    const peakDay = sortedDays[0]?.value
-        ? shortWeekdayToLong(sortedDays[0].label)
-        : "No booking data";
-
-    const sortedTimes = Array.from(countByTime.entries())
-        .map(([time, value]) => ({ time, value }))
-        .sort((first, second) => second.value - first.value || first.time.localeCompare(second.time));
-    const peakTime = sortedTimes[0]?.value ? sortedTimes[0].time : "No booking data";
-
-    const sortedWeekdays = Array.from(weekdayCounts.entries())
-        .map(([day, value]) => ({ day, value }))
-        .sort((first, second) => second.value - first.value || first.day.localeCompare(second.day));
-    const weekdayPeak = sortedWeekdays[0]?.value
-        ? shortWeekdayToLong(sortedWeekdays[0].day)
-        : "No weekday booking data";
-
-    const packageMap = new Map();
-
-    for (const booking of acceptedBookings) {
-        const packageName = safePackageName(booking);
-        packageMap.set(packageName, (packageMap.get(packageName) || 0) + 1);
-    }
-
-    const topPackages = Array.from(packageMap.entries())
-        .map(([name, bookings]) => ({ name, value: bookings }))
-        .sort((first, second) => second.value - first.value || first.name.localeCompare(second.name))
-        .slice(0, 8);
-
     return {
-        totalBookings: acceptedBookings.length,
-        confirmed,
-        preparing,
-        completed,
-        weekendPercentage:
-            acceptedBookings.length > 0
-                ? Math.round((weekendCount / acceptedBookings.length) * 100)
-                : 0,
-        peakMonth,
-        peakDay,
-        peakTime,
-        weekdayPeak,
-        weekdayPeakTime:
-            weekdayPeak === "No weekday booking data"
-                ? "No weekday booking data"
-                : `${weekdayPeak} has the highest accepted booking count.`,
-        monthlyBookings,
-        dailyBookings,
-        topPackages,
-        acceptedBookings,
+        totalUnits: round(sum(current, "units")),
+        categories,
+        products,
+        hourlyDemand,
+        monthlyDemand: createMonthlySeries(
+            current,
+            range.startDate,
+            range.endDate,
+            "day",
+            "units"
+        ),
+        highestDemandProducts: products.slice(0, 5),
+        lowestDemandProducts: [...products]
+            .reverse()
+            .slice(0, 5),
     };
 }
 
-function buildPackageRevenue(bookings = []) {
-    const acceptedStatuses = new Set(["confirmed", "preparing", "completed"]);
-    const packageMap = new Map();
+/* -------------------------------------------------------
+ * 3. BOOKING & RENTAL TRENDS
+ * ------------------------------------------------------- */
 
-    for (const booking of Array.isArray(bookings) ? bookings : []) {
-        if (!acceptedStatuses.has(normalizeStatus(booking.status))) {
-            continue;
-        }
+function buildBookingAnalytics(
+    bookingRows,
+    bookingItemRows,
+    range
+) {
+    const validBookings = (
+        Array.isArray(bookingRows) ? bookingRows : []
+    ).filter(row =>
+        ACCEPTED_BOOKING_STATUSES.has(
+            normalizeStatus(row.status)
+        )
+    );
 
-        const packageName = safePackageName(booking);
-        const value = bookingValue(booking);
+    const current = validBookings.filter(row =>
+        inRange(row.day, range.startDate, range.endDate)
+    );
 
-        if (value <= 0) {
-            continue;
-        }
+    const previous = validBookings.filter(row =>
+        inRange(
+            row.day,
+            range.previousStartDate,
+            range.previousEndDate
+        )
+    );
 
-        packageMap.set(packageName, (packageMap.get(packageName) || 0) + value);
+    const bookingTypes = groupSum(
+        current,
+        row => normalizeText(row.bookingType) || "Unspecified",
+        () => 1
+    );
+
+    const currentBookingIds = new Set(
+        current.map(row => String(row.bookingId))
+    );
+
+    const bookingItems = (
+        Array.isArray(bookingItemRows) ? bookingItemRows : []
+    ).filter(row =>
+        currentBookingIds.has(String(row.bookingId))
+    );
+
+    const itemDemand = groupSum(
+        bookingItems,
+        row => normalizeText(row.productName) ||
+            `Product ${row.productId}`,
+        row => row.bookedUnits
+    );
+
+    return {
+        totalBookings: current.length,
+        change: changeDetails(
+            current.length,
+            previous.length
+        ),
+        monthlyBookings: createMonthlySeries(
+            current.map(row => ({
+                ...row,
+                bookingCount: 1,
+            })),
+            range.startDate,
+            range.endDate,
+            "day",
+            "bookingCount"
+        ),
+        bookingTypes: Array.from(bookingTypes.entries())
+            .map(([name, count]) => ({
+                name,
+                count,
+            }))
+            .sort((a, b) => b.count - a.count),
+        bookedItems: Array.from(itemDemand.entries())
+            .map(([name, units]) => ({
+                name,
+                units: round(units),
+            }))
+            .sort((a, b) => b.units - a.units),
+        totalBookedItemUnits: round(
+            sum(bookingItems, "bookedUnits")
+        ),
+    };
+}
+
+/* Rental lifecycle: booked quantities use scheduled event dates; release and
+ * return quantities use actual event timestamps. Damage/missing are condition
+ * subsets, not additional returns. All metrics are period-scoped. */
+function buildRentalAnalytics(rows, range) {
+    const all = Array.isArray(rows) ? rows : [];
+    const eligible = all.filter(row =>
+        ACCEPTED_BOOKING_STATUSES.has(normalizeStatus(row.bookingStatus)) &&
+        normalizeStatus(row.itemStatus) !== "cancelled"
+    );
+    const booked = eligible.filter(row => inRange(row.bookingDay, range.startDate, range.endDate));
+    const released = eligible.filter(row => inRange(row.releaseDay, range.startDate, range.endDate));
+    const returned = eligible.filter(row => inRange(row.returnDay, range.startDate, range.endDate));
+    const sumSafe = (items, field) => round(items.reduce((total, row) => total + Math.max(0, toNumber(row[field])), 0));
+    const uniqueBookings = new Set(booked.map(row => String(row.bookingId))).size;
+    const byEquipment = new Map();
+    for (const row of booked) {
+        const key = String(row.equipmentId ?? row.equipmentName ?? row.bookingItemId);
+        const previous = byEquipment.get(key) || {name: normalizeText(row.equipmentName) || "Unnamed equipment", units: 0};
+        previous.units += Math.max(0, toNumber(row.bookedUnits));
+        byEquipment.set(key, previous);
     }
+    return {
+        bookingCount: uniqueBookings,
+        bookedUnits: sumSafe(booked, "bookedUnits"),
+        releasedUnits: sumSafe(released, "bookedUnits"),
+        returnedUnits: sumSafe(returned, "returnedUnits"),
+        damagedUnits: sumSafe(returned, "damagedUnits"),
+        missingUnits: sumSafe(returned, "missingUnits"),
+        returnRecords: returned.length,
+        topEquipment: [...byEquipment.values()].sort((a,b) => b.units-a.units).slice(0,8),
+        monthlyBookedUnits: createMonthlySeries(booked.map(row => ({day: row.bookingDay, units: Math.max(0,toNumber(row.bookedUnits))})),range.startDate,range.endDate,"day","units"),
+    };
+}
 
-    return Array.from(packageMap.entries())
-        .map(([name, value]) => ({
+/* -------------------------------------------------------
+ * 4. PACKAGE DEMAND ANALYSIS
+ * ------------------------------------------------------- */
+
+function buildPackageAnalytics(bookingRows, range) {
+    const rows = (
+        Array.isArray(bookingRows) ? bookingRows : []
+    ).filter(row =>
+        ACCEPTED_BOOKING_STATUSES.has(
+            normalizeStatus(row.status)
+        )
+    );
+
+    const packageName = row =>
+        normalizeText(row.packageName);
+
+    const current = rows.filter(row =>
+        inRange(row.day, range.startDate, range.endDate) &&
+        packageName(row)
+    );
+
+    const previous = rows.filter(row =>
+        inRange(
+            row.day,
+            range.previousStartDate,
+            range.previousEndDate
+        ) && packageName(row)
+    );
+
+    const currentCounts = groupSum(
+        current,
+        packageName,
+        () => 1
+    );
+
+    const previousCounts = groupSum(
+        previous,
+        packageName,
+        () => 1
+    );
+
+    const packages = Array.from(currentCounts.entries())
+        .map(([name, count]) => ({
             name,
-            value: Math.round(value),
+            bookings: count,
+            change: changeDetails(
+                count,
+                previousCounts.get(name) || 0
+            ),
         }))
-        .sort((first, second) => second.value - first.value || first.name.localeCompare(second.name));
+        .sort((a, b) => b.bookings - a.bookings);
+
+    return {
+        totalPackageBookings: current.length,
+        packages,
+        monthlyPackageBookings: createMonthlySeries(
+            current.map(row => ({
+                ...row,
+                count: 1,
+            })),
+            range.startDate,
+            range.endDate,
+            "day",
+            "count"
+        ),
+        highestDemandPackages: packages.slice(0, 5),
+        lowestDemandPackages: [...packages]
+            .reverse()
+            .slice(0, 5),
+    };
 }
 
-function buildInsights({ sales, bookings, productRevenue, packageRevenue, period }) {
-    const insight = [];
+/* -------------------------------------------------------
+ * 5. OWNER BRANCH PERFORMANCE
+ * ------------------------------------------------------- */
 
-    if (sales.currentSales > 0) {
-        const direction =
-            sales.salesGrowthPercent > 0
-                ? "increased"
-                : sales.salesGrowthPercent < 0
-                    ? "decreased"
-                    : "remained stable";
-
-        insight.push(
-            sales.salesGrowthPercent === 0
-                ? `POS sales remained stable compared with the previous ${period.days}-day period.`
-                : `POS sales ${direction} by ${Math.abs(sales.salesGrowthPercent)}% compared with the previous ${period.days}-day period.`
-        );
+function buildBranchAnalytics(salesRows, range, scope) {
+    if (scope.role !== "owner") {
+        return null;
     }
 
-    if (bookings.totalBookings > 0) {
-        insight.push(
-            `${bookings.peakMonth} recorded the highest number of accepted bookings in the selected reporting period. ${bookings.peakDay} is the most frequently scheduled booking weekday across that period.`
-        );
+    const allRows = Array.isArray(salesRows)
+        ? salesRows
+        : [];
+
+    const current = allRows.filter(row =>
+        inRange(row.day, range.startDate, range.endDate)
+    );
+
+    const branchMap = new Map();
+
+    for (const row of current) {
+        const branchId = Number(row.branchId);
+
+        if (!branchId) continue;
+
+        if (!branchMap.has(branchId)) {
+            branchMap.set(branchId, {
+                branchId,
+                branchName:
+                    row.branchName || `Branch ${branchId}`,
+                totalSales: 0,
+                rows: [],
+            });
+        }
+
+        const branch = branchMap.get(branchId);
+        branch.totalSales += toNumber(row.value);
+        branch.rows.push(row);
     }
 
-    if (productRevenue.length > 0) {
-        insight.push(
-            `${productRevenue[0].name} generated the highest POS product-category revenue in the selected reporting period.`
-        );
-    }
+    const branches = Array.from(branchMap.values())
+        .map(branch => ({
+            branchId: branch.branchId,
+            branchName: branch.branchName,
+            totalSales: round(branch.totalSales),
+            monthlySales: createMonthlySeries(
+                branch.rows,
+                range.startDate,
+                range.endDate,
+                "day",
+                "value"
+            ),
+        }))
+        .sort((a, b) => b.totalSales - a.totalSales);
 
-    if (packageRevenue.length > 0) {
-        insight.push(
-            `${packageRevenue[0].name} has the highest accepted package booking value in the selected reporting period.`
-        );
-    }
-
-    return insight;
+    return { branches };
 }
 
-function buildAnalyticsPayload({
-                                   range,
-                                   scope,
-                                   salesRows = [],
-                                   productRevenueRows = [],
-                                   bookingRows = [],
-                               }) {
-    const sales = buildSalesData({
+/* -------------------------------------------------------
+ * INSIGHTS
+ * ------------------------------------------------------- */
+
+function buildInsights({
+                           sales,
+                           products,
+                           bookings,
+                           packages,
+                       }) {
+    const insights = [];
+
+    if (sales.periodChange.percentage !== null) {
+        insights.push({
+            section: "sales",
+            message:
+                `Sales changed by ` +
+                `${sales.periodChange.label} compared with ` +
+                `the previous equivalent period.`,
+        });
+    }
+
+    if (products.products.length > 0) {
+        const top = products.products[0];
+
+        insights.push({
+            section: "products",
+            message:
+                `${top.name} recorded the highest number ` +
+                `of units sold during the selected period.`,
+        });
+    }
+
+    if (bookings.monthlyBookings.length > 0) {
+        const months = bookings.monthlyBookings;
+        const maximum = Math.max(...months.map(month => month.value));
+        const peakMonths = months.filter(month => month.value === maximum);
+
+        if (maximum > 0) {
+            let message;
+            if (peakMonths.length === months.length && months.length > 1) {
+                message = `Booking activity remained consistent at ${maximum} ` +
+                    `accepted scheduled bookings per month throughout the selected period.`;
+            } else if (peakMonths.length > 1) {
+                message = `${peakMonths.map(month => month.label).join(", ")} ` +
+                    `tied for the highest number of accepted scheduled bookings ` +
+                    `(${maximum} each).`;
+            } else {
+                message = `${peakMonths[0].label} recorded the highest ` +
+                    `number of accepted scheduled bookings.`;
+            }
+            insights.push({ section: "bookings", message });
+        }
+    }
+
+    if (packages.packages.length > 0) {
+        insights.push({
+            section: "packages",
+            message:
+                `${packages.packages[0].name} recorded the ` +
+                `highest package booking count.`,
+        });
+    }
+
+    return insights;
+}
+
+/* -------------------------------------------------------
+ * FINAL API RESPONSE — ANALYTICS V2
+ * ------------------------------------------------------- */
+
+function buildAnalyticsPayloadV2({
+                                     range,
+                                     scope,
+                                     salesRows = [],
+                                     productRows = [],
+                                     bookingRows = [],
+                                     bookingItemRows = [],
+                                     rentalRows = [],
+                                 }) {
+    const sales = buildSalesAnalytics(salesRows, range);
+
+    const products = buildProductAnalytics(
+        productRows,
+        range
+    );
+
+    const bookings = buildBookingAnalytics(
+        bookingRows,
+        bookingItemRows,
+        range
+    );
+
+    const rentals = buildRentalAnalytics(rentalRows, range);
+
+    const packages = buildPackageAnalytics(
+        bookingRows,
+        range
+    );
+
+    const branches = buildBranchAnalytics(
         salesRows,
         range,
-    });
-    const bookings = buildBookingData(bookingRows, range);
-    const productRevenue = normalizeRevenueItems(productRevenueRows);
-    const packageRevenue = buildPackageRevenue(bookingRows);
+        scope
+    );
 
     const hasData =
-        sales.salesOrderCount > 0 ||
-        bookings.totalBookings > 0 ||
-        productRevenue.length > 0 ||
-        packageRevenue.length > 0;
+        sales.orderCount > 0 ||
+        products.totalUnits > 0 ||
+        bookings.totalBookings > 0;
 
     return {
         success: true,
+        version: 2,
         generatedAt: new Date().toISOString(),
         scope,
         period: range,
         hasData,
-        salesGrowth: {
-            value: sales.salesGrowthPercent,
-            currentSales: sales.currentSales,
-            previousSales: sales.previousSales,
-            comparisonLabel: `Overall selected-period sales compared with the previous ${range.days}-day period.`,
-            monthlyGrowthLabel: "Selected reporting period only",
-            monthlyGrowthDescription:
-                "Each bar compares a calendar month with the preceding month shown in this chart. Every calendar month in the selected reporting period is included; months without completed POS sales appear as ₱0.",
-            monthlyGrowth: sales.monthlyGrowth,
-        },
-        salesTrend: {
-            latestMonthlySales: sales.latestMonthlySales,
-            previousMonthSales: sales.previousMonthSales,
-            monthlySales: sales.monthlySales,
-            dailySalesByMonth: sales.dailySalesByMonth,
-            salesOrderCount: sales.salesOrderCount,
-        },
-        peakBookings: {
-            totalBookings: bookings.totalBookings,
-            confirmed: bookings.confirmed,
-            preparing: bookings.preparing,
-            completed: bookings.completed,
-            peakMonth: bookings.peakMonth,
-            peakDay: bookings.peakDay,
-            peakTime: bookings.peakTime,
-            weekendPercentage: bookings.weekendPercentage,
-            weekdayPeak: bookings.weekdayPeak,
-            weekdayPeakTime: bookings.weekdayPeakTime,
-            monthlyBookings: bookings.monthlyBookings,
-            dailyBookings: bookings.dailyBookings,
-            topPackages: bookings.topPackages,
-        },
-        productRevenue,
-        packageRevenue,
+        sales,
+        products,
+        bookings,
+        rentals,
+        packages,
+        branches,
         insights: buildInsights({
             sales,
+            products,
             bookings,
-            productRevenue,
-            packageRevenue,
-            period: range,
+            packages,
         }),
-        dataNotes: {
-            sales: "POS sales use recorded orders within the selected reporting period.",
-            bookings: "Booking analytics use accepted bookings with Confirmed, Preparing, or Completed status and event dates within the selected reporting period. The monthly timeline shows booking volume by event month, while the weekday pattern combines all selected months by weekday.",
-            products: "Product revenue is grouped by the category of products recorded in POS order items.",
-            packages: "Package booking value uses agreed price, package price, or recorded payment for accepted bookings. Pending Review and Cancelled bookings are excluded.",
-        },
     };
 }
 
+/*
+ * Legacy compatibility note:
+ * The old buildAnalyticsPayload API remains usable
+ * only through the existing deployment until the
+ * V2 Lambda handler and UI are installed together.
+ */
+function buildAnalyticsPayload() {
+    throw new Error(
+        "Legacy Analytics payload is unavailable in V2. " +
+        "Install the revised Lambda handler and UI together."
+    );
+}
+
 module.exports = {
+    toNumber,
+    toDateOnly,
+    percentChange,
     buildRange,
     buildAnalyticsPayload,
-    toDateOnly,
-    toNumber,
+    buildAnalyticsPayloadV2,
 };

@@ -1,30 +1,99 @@
 "use client";
 
 import {
-    Building2, CalendarDays, Check, ChevronDown, ChevronRight, CircleDollarSign,
-    Download, Search, ShieldCheck, ShoppingBag, SlidersHorizontal,
-    TrendingUp, WalletCards,
+    Building2, Calculator, CalendarDays, Check, ChevronDown, ChevronRight, CircleDollarSign,
+    Download, Info, ReceiptText, Search, ShieldCheck, ShoppingBag, SlidersHorizontal,
+    WalletCards, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { UsePOSReturn } from "@/hooks/usePOS";
-import { POSLayout, StatCard, formatPOSOrderTime, peso, type Order } from "./_shared";
+import { POSLayout, formatPOSOrderTime, peso, type Order } from "./_shared";
 
 const fieldClass = "h-[42px] w-full min-w-0 rounded-xl border border-[#E3D8EA] bg-white px-3 text-sm text-[#1A1220] outline-none shadow-sm transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10";
 const sourceLabel = (order: Order) =>
     order.salesSource === "BOOKING" || String(order.customerType || "").toUpperCase() === "BOOKING"
         ? "Booking" : "Walk-in";
 
-function DateField({ label, value, min, max, onChange }: {
-    label: string; value: string; min?: string; max?: string; onChange: (value: string) => void;
-}) {
-    return (
-        <div className="relative min-w-0">
-            <CalendarDays size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#9B8AAA]" />
-            <span className="pointer-events-none absolute left-9 top-1/2 -translate-y-1/2 text-[10px] font-semibold uppercase tracking-wide text-[#806A8C]">{label}</span>
-            <input type="date" value={value} min={min} max={max} onChange={(e) => onChange(e.target.value)}
-                   aria-label={`${label} date`} className={`${fieldClass} pl-[75px] pr-2 text-xs font-medium`} />
-        </div>
-    );
+// Shared period filter for Owner and Manager sales history. Dates are Philippine calendar dates.
+type POSDatePeriod = "today" | "month" | "year" | "range";
+const posDatePeriods: Array<{value: POSDatePeriod; label: string}> = [
+    {value: "today", label: "Today"},
+    {value: "month", label: "This Month"},
+    {value: "year", label: "This Year"},
+    {value: "range", label: "Date Range"},
+];
+const posManilaDate = () => new Intl.DateTimeFormat("sv-SE", {timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit"}).format(new Date());
+function posPresetDates(period: Exclude<POSDatePeriod, "range">, today: string): [string, string] {
+    return [period === "month" ? `${today.slice(0, 7)}-01` : period === "year" ? `${today.slice(0, 4)}-01-01` : today, today];
+}
+export function usePOSDatePeriod(dateFrom: string, dateTo: string, setDateRange: (from: string, to: string) => void) {
+    const [today, setToday] = useState(posManilaDate);
+    const [period, setPeriod] = useState<POSDatePeriod>(() => {
+        if (!dateFrom && !dateTo) return "today";
+        for (const preset of ["today", "month", "year"] as const) {
+            const [from, to] = posPresetDates(preset, today);
+            if (dateFrom === from && dateTo === to) return preset;
+        }
+        return "range";
+    });
+    const [draftFrom, setDraftFrom] = useState(dateFrom || today);
+    const [draftTo, setDraftTo] = useState(dateTo || today);
+    useEffect(() => {
+        const update = () => setToday(posManilaDate());
+        const timer = window.setInterval(update, 15_000);
+        window.addEventListener("focus", update);
+        document.addEventListener("visibilitychange", update);
+        return () => {
+            window.clearInterval(timer);
+            window.removeEventListener("focus", update);
+            document.removeEventListener("visibilitychange", update);
+        };
+    }, []);
+    useEffect(() => {
+        if (period === "range") return;
+        const [from, to] = posPresetDates(period, today);
+        if (dateFrom !== from || dateTo !== to) setDateRange(from, to);
+    }, [period, today, dateFrom, dateTo, setDateRange]);
+    const selectPeriod = (next: POSDatePeriod) => {
+        const currentDay = posManilaDate();
+        setToday(currentDay);
+        setPeriod(next);
+        if (next === "range") {
+            setDraftFrom(dateFrom || currentDay);
+            setDraftTo(dateTo || currentDay);
+        } else {
+            const [from, to] = posPresetDates(next, currentDay);
+            if (dateFrom !== from || dateTo !== to) setDateRange(from, to);
+        }
+    };
+    const validRange = /^\d{4}-\d{2}-\d{2}$/.test(draftFrom) && /^\d{4}-\d{2}-\d{2}$/.test(draftTo)
+        && draftFrom <= draftTo;
+    const applyRange = () => {
+        if (validRange) setDateRange(draftFrom, draftTo);
+    };
+    return {period, selectPeriod, draftFrom, draftTo, setDraftFrom, setDraftTo, validRange, applyRange, dateFrom, dateTo};
+}
+export function POSPeriodFilter({filter}: {filter: ReturnType<typeof usePOSDatePeriod>}) {
+    const pending = filter.draftFrom !== filter.dateFrom || filter.draftTo !== filter.dateTo;
+    return <>
+        <FilterSelect icon={<CalendarDays size={15}/>} label="Sales period" value={filter.period}
+                      onChange={value => filter.selectPeriod(value as POSDatePeriod)} options={posDatePeriods}/>
+        {filter.period === "range" && (
+            <div className="order-last col-span-full flex flex-wrap items-end gap-3 rounded-xl border border-[#E6DDF0] bg-[#FAF7FF] p-3" aria-label="Custom date range">
+                <label className="min-w-[145px] flex-1 text-xs font-semibold text-[#5F4E75]">From
+                    <input type="date" aria-label="From date" value={filter.draftFrom} max={filter.draftTo || undefined}
+                           onChange={e => filter.setDraftFrom(e.target.value)} className={`${fieldClass} mt-1 block`}/>
+                </label>
+                <label className="min-w-[145px] flex-1 text-xs font-semibold text-[#5F4E75]">To
+                    <input type="date" aria-label="To date" value={filter.draftTo} min={filter.draftFrom || undefined}
+                           onChange={e => filter.setDraftTo(e.target.value)} className={`${fieldClass} mt-1 block`}/>
+                </label>
+                <button type="button" disabled={!filter.validRange} onClick={filter.applyRange}
+                        className="h-[42px] rounded-xl bg-[#2B174C] px-4 text-xs font-semibold text-white transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-40">Apply</button>
+                {pending && <p className="w-full text-xs text-[#806A8C]" role="status">{filter.validRange ? "Apply to update the sales period." : "Select a valid start and end date."} {filter.dateFrom || filter.dateTo ? `Current: ${filter.dateFrom || "Any date"} to ${filter.dateTo || "Any date"}.` : "Current: All dates."}</p>}
+            </div>
+        )}
+    </>;
 }
 
 function FilterSelect({ icon, label, value, onChange, options }: {
@@ -146,7 +215,7 @@ export function createVatReportPdf(data: OwnerVatExport, store: string, branch: 
         const row = data.rows[n];
         const tax = String(row.taxType || "").toUpperCase();
         const cells = [
-            ascii(row.orderId), ascii(row.createdAt || row.date), ascii(row.branchName),
+            ascii(row.orderId), ascii(row.salesSource.toLowerCase() === "booking" && !/[T ]\d{2}:\d{2}/.test(row.createdAt || "") ? `${row.date} (event date; time unknown)` : row.createdAt || row.date), ascii(row.branchName),
             ascii(row.salesSource), ascii(row.paymentMode).replace(/_/g, " "),
             tax === "VAT" ? "VAT" : tax === "NON_VAT" ? "Non-VAT" : tax,
             money(row.totalInclusive).replace("PHP ", ""),
@@ -204,6 +273,13 @@ export function createVatReportPdf(data: OwnerVatExport, store: string, branch: 
 }
 
 /** Database-backed transaction detail. Missing historical values remain null. */
+export type BookingBilling = {
+    bookingPaid: number; bookingRefunded: number; balance: number;
+    depositRequired: number; depositCollected: number; depositApplied: number;
+    depositRefunded: number; depositHeld: number; additionalCharges: number;
+    chargePaid: number; claimBalance: number; settlementStatus: string | null;
+};
+
 export type OwnerOrderInvoice = {
     orderId: string;
     storeName: string;
@@ -226,11 +302,33 @@ export type OwnerOrderInvoice = {
     changeDue?: number | null;
     paymentStatus?: string | null;
     total: number | null;
-    items: Array<{ name: string; quantity: number; unitPrice: number | null; lineTotal: number | null }>;
+    bookingBilling?: BookingBilling;
+    items: Array<{ name: string; quantity: number; unitPrice: number | null; lineTotal: number | null; included?: boolean }>;
     itemsAvailable: boolean;
     detailNotice: string | null;
     officialInvoiceNumber: null;
 };
+
+// Shared between Owner and Manager; booking payments and deposit settlement are separate from sales.
+export function bookingBillingRows(b: BookingBilling): Array<[string, number]> {
+    return [["Booking Payments", b.bookingPaid], ["Booking Refunds", b.bookingRefunded],
+        ["Remaining Booking Balance", b.balance], ["Security Deposit Required", b.depositRequired],
+        ["Security Deposit Collected", b.depositCollected], ["Additional Charges", b.additionalCharges],
+        ["Deposit Applied", b.depositApplied], ["Additional Charge Payments", b.chargePaid],
+        ["Deposit Refunded", b.depositRefunded], ["Remaining Deposit", b.depositHeld],
+        ["Remaining Additional Charges", b.claimBalance]];
+}
+export function BookingBillingPreview({ billing }: { billing: BookingBilling }) {
+    return <div className="mt-3 space-y-1 border-t border-[#E8DFF0] pt-3">
+        <p className="font-bold text-[#2B174C]">Booking billing &amp; deposit settlement</p>
+        {bookingBillingRows(billing).map(([label, amount]) => <p key={label} className="flex justify-between gap-4"><span className="text-[#806A8C]">{label}</span><strong>{peso(amount)}</strong></p>)}
+        <p className="flex justify-between gap-4"><span className="text-[#806A8C]">Settlement Status</span><strong className="capitalize">{billing.settlementStatus?.replace(/_/g, " ") || "Not recorded"}</strong></p>
+    </div>;
+}
+export function BookingFinancials({ order }: { order: Order }) {
+    const values: Array<[string, number | null | undefined]> = [["Sales",order.total], ["Additional Charges",order.additionalCharges], ["Deposit Refunded",order.depositRefunded]];
+    return <div className="min-w-0 space-y-0.5">{values.map(([label,value]) => <p key={label} className="flex flex-wrap items-center justify-between gap-x-2"><span className="text-[#806A8C]">{label}</span><strong className="whitespace-nowrap text-right">{value == null ? "—" : peso(value)}</strong></p>)}</div>;
+}
 
 /** Retrieve a fresh, role-scoped database record at download time. */
 export async function fetchOrderInvoiceDetail(orderId: string, salesSource: "WALK_IN" | "BOOKING"): Promise<OwnerOrderInvoice> {
@@ -310,7 +408,7 @@ export function createOrderInvoicePdf(detail: OwnerOrderInvoice): Blob {
     const isVat = ["VAT", "VAT_REGISTERED"].includes(tax);
     const isNonVat = ["NON_VAT", "NON_VAT_REGISTERED"].includes(tax);
     const payment = String(detail.paymentMode || "").toUpperCase();
-    const paymentName = ({ CASH: "Cash", GCASH: "GCash", BANK_TRANSFER: "Bank Transfer" } as Record<string, string>)[payment] || display(detail.paymentMode).replace(/_/g, " ");
+    const paymentName = payment.includes(",") ? payment.split(",").map(method => ({ CASH: "Cash", GCASH: "GCash", BANK_TRANSFER: "Bank Transfer" } as Record<string,string>)[method] || method.replace(/_/g," ")).join(", ") : ({ CASH: "Cash", GCASH: "GCash", BANK_TRANSFER: "Bank Transfer" } as Record<string, string>)[payment] || display(detail.paymentMode).replace(/_/g, " ");
     const startPage = (first: boolean) => {
         page = []; pages.push(page);
         rect(0, 0, W, H, cream); rect(25, 24, W - 50, H - 48, "1 1 1"); rect(25, 24, W - 50, 6, purple);
@@ -324,7 +422,7 @@ export function createOrderInvoicePdf(detail: OwnerOrderInvoice): Blob {
             centered(isVat ? "VAT Registered (recorded sale)" : isNonVat ? "Non-VAT Registered (recorded sale)" : "Tax classification not verified", 11, true, purple);
             y += 1; rule(y); y += 25;
             centered("SALES INVOICE", 24, true, purple);
-            centered(`Order ID: ${detail.orderId}`, 12, true);
+            centered(`${detail.salesSource === "BOOKING" ? "Booking Reference" : "Order ID"}: ${detail.orderId}`, 12, true);
             centered("Internal transaction copy", 10, false, muted);
             y += 5;
             const fieldPair = (a: string, av: unknown, b: string, bv: unknown) => {
@@ -334,7 +432,7 @@ export function createOrderInvoicePdf(detail: OwnerOrderInvoice): Blob {
                 aa.forEach((s, i) => text(s, L, y + i * 15)); bb.forEach((s, i) => text(s, x2, y + i * 15));
                 y += Math.max(aa.length, bb.length) * 15 + 6;
             };
-            fieldPair("Date & Time", formatDateTime(detail.createdAt || detail.date), detail.salesSource === "BOOKING" ? "Processed By" : "Cashier", detail.cashierName);
+            fieldPair(detail.salesSource === "BOOKING" ? (/[T ]\d{2}:\d{2}/.test(detail.createdAt || "") ? "Completed At" : "Completion Time") : "Date & Time", detail.salesSource === "BOOKING" && !/[T ]\d{2}:\d{2}/.test(detail.createdAt || "") ? "Not recorded" : formatDateTime(detail.createdAt || detail.date), detail.salesSource === "BOOKING" ? "Settlement Reviewed By" : "Cashier", detail.cashierName);
             fieldPair("Customer", detail.customerName, "Payment Method", paymentName);
             text(`Sales Source: ${detail.salesSource === "BOOKING" ? "Booking" : "Walk-in"}`, L, y, 10, false, muted); y += 16;
         } else {
@@ -361,8 +459,8 @@ export function createOrderInvoicePdf(detail: OwnerOrderInvoice): Blob {
             part.forEach((s, i) => text(s, L + 8, y + 18 + i * 15));
             if (offset === 0) {
                 text(item.quantity, 321, y + 18, 10, false, ink, "center");
-                text(currency(item.unitPrice), 426, y + 18, 10, false, ink, "right");
-                text(currency(item.lineTotal), R - 8, y + 18, 10, true, ink, "right");
+                text(item.included ? "Included" : currency(item.unitPrice), 426, y + 18, 10, false, ink, "right");
+                text(item.included ? "Included" : currency(item.lineTotal), R - 8, y + 18, 10, true, ink, "right");
             }
             y += h; rule(y); offset += part.length;
         }
@@ -385,10 +483,25 @@ export function createOrderInvoicePdf(detail: OwnerOrderInvoice): Blob {
     text("TOTAL AMOUNT", L + 8, y + 24, 15, true, purple);
     text(currency(detail.total), R - 8, y + 24, 19, true, purple, "right"); y += 52;
     if (hasDifference) { text("Itemized amounts and recorded total differ; review original transaction.", L + 4, y, 9, false, muted); y += 15; }
-    sum(payment === "CASH" ? "Cash Received" : "Amount Received", currency(detail.amountTendered));
-    if (payment === "CASH") sum("Change", currency(detail.changeDue));
+    if (detail.salesSource === "BOOKING") {
+        sum("Booking Payments", currency(detail.bookingBilling?.bookingPaid));
+        sum("Remaining Booking Balance", currency(detail.bookingBilling?.balance));
+    } else {
+        sum(payment === "CASH" ? "Cash Received" : "Amount Received", currency(detail.amountTendered));
+        if (payment === "CASH") sum("Change", currency(detail.changeDue));
+    }
     text("Payment Status", L + 4, y, 11, true, purple);
     text(statusLabel, R - 4, y, 11, true, status === "PAID" ? green : muted, "right"); y += 17;
+    if (detail.salesSource === "BOOKING" && detail.bookingBilling) {
+        // Keep settlement separate, and move to a new page if necessary.
+        const rows = bookingBillingRows(detail.bookingBilling).filter(([label]) => !["Booking Payments", "Remaining Booking Balance"].includes(label));
+        if (y + rows.length * 22 + 105 > 730) startPage(false);
+        y += 12; rule(y); y += 23;
+        text("BOOKING BILLING & DEPOSIT SETTLEMENT", L + 4, y, 12, true, purple); y += 24;
+        for (const [label, amount] of rows) sum(label, currency(amount));
+        sum("Settlement Status", display(detail.bookingBilling.settlementStatus).replace(/_/g, " "));
+        if (y + 65 > 730) startPage(false);
+    }
     rule(y); y += 24;
     centered("Thank you for your purchase!", 14, true, purple);
     centered("Powered by StockNBook", 10, false, muted);
@@ -528,15 +641,17 @@ function TransactionTable({ pos, orders, branchName }: {
                                 </div>
                                 <div>
                                     <p className="font-semibold text-[#2B174C]">{order.date}</p>
-                                    <p className="mt-1 text-[11px] text-[#806A8C]">{formatPOSOrderTime(order)}</p>
+                                    <p className="mt-1 text-[11px] text-[#806A8C]">{order.salesSource === "BOOKING" && formatPOSOrderTime(order) === "—" ? "" : formatPOSOrderTime(order)}</p>
                                 </div>
                                 <p className="truncate font-semibold text-[#1A1220]" title={branchName(order)}>{branchName(order)}</p>
                                 <p className="font-semibold text-[#4F3572]">{sourceLabel(order)}</p>
-                                <div className="min-w-0 space-y-0.5">
-                                    <p className="grid grid-cols-[42px_minmax(0,1fr)] items-center gap-2"><span className="text-[#806A8C]">Sales</span><strong className="whitespace-nowrap text-right">{peso(Number(order.total || 0))}</strong></p>
-                                    <p className="grid grid-cols-[42px_minmax(0,1fr)] items-center gap-2"><span className="text-[#806A8C]">Cost</span><strong className="whitespace-nowrap text-right">{costKnown ? peso(Number(order.cost)) : "—"}</strong></p>
-                                    <p className="grid grid-cols-[42px_minmax(0,1fr)] items-center gap-2"><span className="text-[#806A8C]">Gross</span><strong className="whitespace-nowrap text-right text-[#168A48]">{profitKnown ? peso(Number(order.profit)) : "—"}</strong></p>
-                                </div>
+                                {order.salesSource === "BOOKING" ? <BookingFinancials order={order} /> : (
+                                    <div className="min-w-0 space-y-0.5">
+                                        <p className="grid grid-cols-[42px_minmax(0,1fr)] items-center gap-2"><span className="text-[#806A8C]">Sales</span><strong className="whitespace-nowrap text-right">{peso(Number(order.total || 0))}</strong></p>
+                                        <p className="grid grid-cols-[42px_minmax(0,1fr)] items-center gap-2"><span className="text-[#806A8C]">Cost</span><strong className="whitespace-nowrap text-right">{costKnown ? peso(Number(order.cost)) : "—"}</strong></p>
+                                        <p className="grid grid-cols-[42px_minmax(0,1fr)] items-center gap-2"><span className="text-[#806A8C]">Gross</span><strong className="whitespace-nowrap text-right text-black">{profitKnown ? peso(Number(order.profit)) : "—"}</strong></p>
+                                    </div>
+                                )}
                             </div>
                             {isExpanded && (
                                 <div className="bg-[#FBF9FF] px-4 py-4 sm:pl-12">
@@ -552,7 +667,7 @@ function TransactionTable({ pos, orders, branchName }: {
                                             <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#E8DFF0] px-4 py-3">
                                                 <div className="space-y-1">
                                                     <h3 className="text-sm font-bold text-[#2B174C]">Transaction invoice preview</h3>
-                                                    <p className="text-[11px] text-[#806A8C]">{detail.storeName} · {detail.branchName} · {detail.createdAt || detail.date}</p>
+                                                    <p className="text-[11px] text-[#806A8C]">{detail.storeName} · {detail.branchName} · {detail.salesSource === "BOOKING" && !/[T ]\d{2}:\d{2}/.test(detail.createdAt || "") ? `${detail.date} (event date; completion time unavailable)` : detail.createdAt || detail.date}</p>
                                                     <p className="text-[11px] text-[#806A8C]">Customer: {detail.customerName || "Walk-in"} · Payment: {detail.paymentMode ? detail.paymentMode.replace(/_/g," ") : "Not recorded"} · Tax: {detail.taxType || "Unverified"}</p>
                                                 </div>
                                                 <button
@@ -575,8 +690,8 @@ function TransactionTable({ pos, orders, branchName }: {
                                                             <tr key={`${i}-${item.name}`} className="border-b border-[#F0EAF5] last:border-0">
                                                                 <td className="px-3 py-2 font-medium text-[#2B174C]">{item.name}</td>
                                                                 <td className="px-3 py-2 text-center">{item.quantity}</td>
-                                                                <td className="px-3 py-2 text-right">{item.unitPrice == null ? "—" : peso(item.unitPrice)}</td>
-                                                                <td className="px-3 py-2 text-right font-semibold">{item.lineTotal == null ? "—" : peso(item.lineTotal)}</td>
+                                                                <td className="px-3 py-2 text-right">{item.included ? "Included" : item.unitPrice == null ? "—" : peso(item.unitPrice)}</td>
+                                                                <td className="px-3 py-2 text-right font-semibold">{item.included ? "Included" : item.lineTotal == null ? "—" : peso(item.lineTotal)}</td>
                                                             </tr>
                                                         ))}
                                                         </tbody>
@@ -586,13 +701,14 @@ function TransactionTable({ pos, orders, branchName }: {
                                                 <p className="px-4 py-4 text-xs text-[#806A8C]">{detail.detailNotice || "Original items and prices could not be verified."} PDF export is unavailable for this transaction.</p>
                                             )}
                                             <div className="space-y-1 border-t border-[#E8DFF0] bg-[#FAF7FF] px-4 py-3 text-xs">
-                                                {detail.taxType?.toUpperCase() === "VAT" && detail.vatAmount != null && detail.total != null && (
+                                                {["VAT", "VAT_REGISTERED"].includes(detail.taxType?.toUpperCase() || "") && detail.vatAmount != null && detail.total != null && (
                                                     <>
                                                         <p className="flex justify-between gap-4"><span className="text-[#806A8C]">VATable Sales (recorded)</span><strong>{peso(detail.total - detail.vatAmount)}</strong></p>
                                                         <p className="flex justify-between gap-4"><span className="text-[#806A8C]">Output VAT (recorded)</span><strong>{peso(detail.vatAmount)}</strong></p>
                                                     </>
                                                 )}
                                                 <p className="flex justify-between gap-4 font-bold text-[#2B174C]"><span>Recorded Total</span><span>{detail.total == null ? "—" : peso(detail.total)}</span></p>
+                                                {detail.bookingBilling && <BookingBillingPreview billing={detail.bookingBilling} />}
                                                 <p className="pt-2 text-[10px] text-[#806A8C]">Internal transaction copy only. An Order ID is not a BIR-issued invoice number.</p>
                                             </div>
                                         </section>
@@ -617,7 +733,144 @@ function TransactionTable({ pos, orders, branchName }: {
     );
 }
 
+type OwnerPOSKpiKey = "sales" | "booking" | "walk";
+export type POSKpiKey = OwnerPOSKpiKey | "transactions";
+export type POSKpiDetail = {
+    title: string;
+    amount: number | null;
+    period: string;
+    scope: string;
+    scopeNote?: string;
+    formula: string;
+    items: [string, number | null][];
+    description: string;
+};
+
+const ownerPOSKpiVisuals = {
+    sales: { Icon: CircleDollarSign, icon: "bg-[#F0E9FF] text-[#5A35A5]", surface: "border-[#E6DDF0] bg-[#F8F4FE] text-[#543099]" },
+    booking: { Icon: WalletCards, icon: "bg-[#FFF2E5] text-[#D56A1F]", surface: "border-[#F3E2C2] bg-[#FFFAF0] text-[#8C601F]" },
+    walk: { Icon: ShoppingBag, icon: "bg-[#EAF1FF] text-[#245EDB]", surface: "border-[#D6E5FC] bg-[#F2F7FF] text-[#205AA8]" },
+    transactions: { Icon: ReceiptText, icon: "bg-[#E9F8EF] text-[#168A48]", surface: "border-[#D7EBDF] bg-[#F0FAF4] text-[#206B49]" },
+} as const;
+
+function posKpiVisual(key: POSKpiKey, manager: boolean) {
+    const visual = ownerPOSKpiVisuals[key];
+    if (manager && key === "booking") return { ...visual, Icon: CalendarDays, icon: "bg-[#FFF2E5] text-[#C8791D]" };
+    if (manager && key === "walk") return { ...visual, icon: "bg-[#E8F0FF] text-[#2865D9]" };
+    return visual;
+}
+
+function formatKpiAmount(key: POSKpiKey, amount: number | null) {
+    if (amount == null || !Number.isFinite(amount)) return "Unavailable";
+    if (key === "transactions") return amount.toLocaleString("en-PH", { maximumFractionDigits: 0 });
+    return amount < 0 ? `−${peso(Math.abs(amount))}` : peso(amount);
+}
+
+export function POSKpiCard({ kpiKey, detail, helper, onClick, manager = false }: {
+    kpiKey: POSKpiKey; detail: POSKpiDetail; helper: string; onClick: () => void; manager?: boolean;
+}) {
+    const visual = posKpiVisual(kpiKey, manager);
+    const Icon = visual.Icon;
+    return (
+        <button type="button" onClick={onClick}
+                aria-label={`View how ${detail.title} is calculated`} aria-haspopup="dialog"
+                title={`View ${detail.title} breakdown`}
+                className="flex min-h-[128px] min-w-0 w-full cursor-pointer items-center gap-4 rounded-[18px] border border-[#E6DDF0] bg-white px-5 py-4 text-left shadow-sm transition hover:border-[#B6A1D4] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#7651BA]">
+            <span aria-hidden="true" className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${visual.icon}`}><Icon size={18} /></span>
+            <span className="min-w-0 flex-1">
+                <span className="block text-[14px] font-medium text-[#2B174C]">{detail.title}</span>
+                <span className="mt-0.5 block break-words text-[26px] font-bold leading-tight tabular-nums text-[#1A1220]">{detail.amount == null || !Number.isFinite(detail.amount) ? "—" : formatKpiAmount(kpiKey, detail.amount)}</span>
+                <span className="mt-1 block text-xs text-[#806A8C]">{helper}</span>
+            </span>
+        </button>
+    );
+}
+
+export function POSKpiDetailModal({kpiKey,detail,onClose,manager=false}:{kpiKey:POSKpiKey;detail:POSKpiDetail;onClose:()=>void;manager?:boolean}) {
+    const dialogRef = useRef<HTMLDialogElement>(null);
+    const visual = posKpiVisual(kpiKey, manager);
+    const Icon = visual.Icon;
+    const tone = visual;
+    const amountText = (amount:number|null) => formatKpiAmount(kpiKey, amount);
+    const isNegative = detail.amount !== null && detail.amount < 0;
+    const resultLabel = detail.title;
+
+    useEffect(() => {
+        const dialog = dialogRef.current;
+        if (!dialog) return;
+        const trigger = document.activeElement;
+        if (!dialog.open) dialog.showModal();
+        return () => {
+            if (dialog.open) dialog.close();
+            if (trigger instanceof HTMLElement && trigger.isConnected) trigger.focus({preventScroll:true});
+        };
+    }, []);
+
+    return (
+        <dialog ref={dialogRef} aria-labelledby="owner-pos-kpi-detail-title"
+                aria-describedby="owner-pos-kpi-detail-period"
+                onCancel={event=>{event.preventDefault();onClose();}}
+                onClick={event=>{if(event.target===event.currentTarget)onClose();}}
+                className="fixed inset-0 m-auto max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-[540px] overflow-y-auto rounded-[20px] border border-[#E6DDF0] bg-white p-0 text-[#25153D] shadow-2xl backdrop:bg-[#170B29]/55 backdrop:backdrop-blur-[2px]">
+            <div className="font-sans">
+                <header className="flex items-center gap-3 border-b border-[#EEE7F5] px-5 py-4 sm:px-6">
+                    <span className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl ${tone.icon}`} aria-hidden="true"><Icon size={23}/></span>
+                    <div className="min-w-0 flex-1">
+                        <h2 id="owner-pos-kpi-detail-title" className="text-[18px] font-bold leading-tight text-[#25153D]">{detail.title}</h2>
+                        <p className="mt-1 text-[11px] text-[#806A8C]">Calculation breakdown</p>
+                    </div>
+                    <button type="button" aria-label="Close calculation" onClick={onClose}
+                            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#E6DDF0] text-[#806A8C] transition hover:bg-[#F6F0FC] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#7651BA]"><X size={18}/></button>
+                </header>
+                <div className="space-y-4 px-5 py-5 sm:px-6">
+                    <div className={`rounded-2xl border px-4 py-4 ${tone.surface}`}>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="text-[11px] font-semibold uppercase tracking-wide">{resultLabel}</p>
+                            <span className="flex items-center gap-1.5 rounded-lg bg-white/75 px-2 py-1 text-[10px] font-medium"><CalendarDays size={13} aria-hidden="true"/><span id="owner-pos-kpi-detail-period">{detail.period}</span></span>
+                        </div>
+                        <p className={`mt-2 break-words text-[30px] font-bold leading-tight tracking-tight tabular-nums ${isNegative?"text-[#B42318]":"text-[#25153D]"}`}>{amountText(detail.amount)}</p>
+                        <p className="mt-1 text-[11px] text-[#806A8C]">{detail.scope} · {detail.scopeNote ?? "All matching sales (not table search or source filter)"}</p>
+                    </div>
+                    <section aria-label="Formula" className="rounded-xl border border-[#E9E1EE] bg-[#FAF8FC] px-4 py-3">
+                        <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-[#806A8C]"><Calculator size={15} aria-hidden="true"/>Formula</div>
+                        <p className="mt-2 break-words text-[13px] font-semibold leading-5 text-[#392648]">{detail.formula}</p>
+                        {kpiKey === "sales" && detail.amount !== null && detail.items.every(([, amount]) => amount !== null && Number.isFinite(amount)) && (
+                            <p className="mt-1 break-words text-[12px] tabular-nums text-[#5F4E75]">{detail.items.map(([, amount]) => amountText(amount)).join(" + ")} = {amountText(detail.amount)}</p>
+                        )}
+                    </section>
+                    <section aria-label="Calculation details" className="overflow-hidden rounded-xl border border-[#E6DDF0]">
+                        <div className="flex justify-between gap-2 bg-[#FFFCF8] px-4 py-2.5 text-[10px] font-semibold uppercase tracking-wide text-[#806A8C]"><span>Breakdown</span><span>{kpiKey === "transactions" ? "Count" : "Amount"}</span></div>
+                        <dl className="divide-y divide-[#F1ECF4]">
+                            {detail.items.map(([name,amount])=>(
+                                <div key={name} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-4 py-3 text-[12px]">
+                                    <dt className="min-w-0 flex-1 text-[#5F4E75]">{name}</dt>
+                                    <dd className="break-words text-right font-semibold tabular-nums text-[#25153D]">{amountText(amount)}</dd>
+                                </div>
+                            ))}
+                            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 bg-[#F8F5FC] px-4 py-3">
+                                <dt className="text-[12px] font-bold text-[#25153D]">{"Total"}</dt>
+                                <dd className={`break-words text-right text-[17px] font-bold tabular-nums ${isNegative?"text-[#B42318]":"text-[#25153D]"}`}>{amountText(detail.amount)}</dd>
+                            </div>
+                        </dl>
+                    </section>
+                    <div className="flex items-start gap-2 rounded-xl bg-[#FAF8FC] px-3 py-3">
+                        <Info size={15} className="mt-0.5 shrink-0 text-[#806A8C]" aria-hidden="true"/>
+                        <div className="min-w-0">
+                            <p className="text-[11px] font-semibold text-[#5F4E75]">How this is calculated</p>
+                            <p className="mt-1 text-[11px] leading-[1.6] text-[#6C5E76]">{detail.description}</p>
+                        </div>
+                    </div>
+                </div>
+                <footer className="flex justify-end border-t border-[#EEE7F5] px-5 py-3 sm:px-6">
+                    <button type="button" onClick={onClose} className="rounded-xl bg-[#2B174C] px-5 py-2.5 text-[12px] font-semibold text-white transition hover:bg-[#1B0D31] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#7651BA]">Close</button>
+                </footer>
+            </div>
+        </dialog>
+    );
+}
+
 export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
+    const [selectedKpi, setSelectedKpi] = useState<OwnerPOSKpiKey | null>(null);
     const [branchQuery, setBranchQuery] = useState("All Branches");
     const [menuOpen, setMenuOpen] = useState(false);
     const [downloadingVat, setDownloadingVat] = useState(false);
@@ -642,9 +895,34 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
     const summary = report?.summary;
     const dateFrom = pos.ownerOrderStartDate;
     const dateTo = pos.ownerOrderEndDate;
+    const dateFilter = usePOSDatePeriod(dateFrom, dateTo, pos.setOwnerOrderDateRange);
     const branchName = (order: Order) => order.branchName || pos.branches.find(b => b.id === order.branchId)?.branchName || "—";
     const isVatRegistered = report?.taxRegistration === "VAT_REGISTERED";
     const vatSummary = report?.vatSummary;
+    // These are the server's branch/date-scoped totals, not the sum of the current page.
+    // The table's search and sales-source filters do not restrict the Owner KPI totals.
+    const period = dateFrom && dateTo ? `${dateFrom} to ${dateTo}` : dateFrom ? `From ${dateFrom}` : dateTo ? `Through ${dateTo}` : "All time";
+    const scope = selectedBranch?.branchName || "All Branches";
+    const bookingSales = summary?.bookingSales ?? null;
+    const walkInSales = summary?.walkInSales ?? null;
+    const totalSales = summary?.totalSales ?? null;
+    const bookingRule = "Completed bookings are grouped by their recorded completion date. Older bookings without a recorded completion time use their event date as a reporting fallback. Each uses the saved agreed price when positive, otherwise the saved package price. Refundable security deposits and separate settlement charges or refunds are not included in this sales total.";
+    const walkRule = "Completed walk-in POS orders are grouped by order date. The report sums their saved transaction totals, including any recorded VAT, without deducting costs.";
+    const kpiDetails: Record<OwnerPOSKpiKey, POSKpiDetail> = {
+        sales: { title: "Total Sales", amount: totalSales, period, scope,
+            formula: "Total Sales = Booking Sales + Walk-in Sales",
+            items: [["Booking Sales", bookingSales], ["Walk-in Sales", walkInSales]],
+            description: `Adds completed booking sales and completed walk-in sales for the selected branch and date range, before deducting costs or recorded VAT. Refundable deposits and separate settlement adjustments are excluded. If booking totals are unavailable, combined sales are also unavailable.` },
+        booking: { title: "Booking Sales", amount: bookingSales, period, scope,
+            formula: "Booking Sales = Sum of completed booking prices",
+            items: [["Completed booking sales", bookingSales]],
+            description: bookingRule },
+        walk: { title: "Walk-in Sales", amount: walkInSales, period, scope,
+            formula: "Walk-in Sales = Sum of completed walk-in order totals",
+            items: [["Completed walk-in sales", walkInSales]],
+            description: walkRule },
+    };
+
 
     const downloadTransactionReport = async () => {
         if (downloadingVat) return;
@@ -721,15 +999,13 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
     return (
         <POSLayout role="owner" isOwner={true} activeBranchName="" onRefresh={() => pos.refreshAll()}>
             <div className="space-y-4">
-                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                    <StatCard label="Total Sales" value={summary?.totalSales == null ? "—" : peso(summary.totalSales)}
-                              helper="Earned booking + completed walk-in sales" icon={<CircleDollarSign size={18} />} iconClassName="bg-[#F0E9FF] text-[#5A35A5]" />
-                    <StatCard label="Gross Profit" value={summary?.grossProfit == null ? "—" : peso(summary.grossProfit)}
-                              helper="Revenue less recorded VAT and direct costs" icon={<TrendingUp size={18} />} iconClassName="bg-[#EAF8EF] text-[#168A48]" />
-                    <StatCard label="Booking Sales" value={summary?.bookingSales == null ? "—" : peso(summary.bookingSales)}
-                              helper="Completed and fulfilled bookings only" icon={<WalletCards size={18} />} iconClassName="bg-[#FFF2E5] text-[#D56A1F]" />
-                    <StatCard label="Walk-in Sales" value={summary ? peso(summary.walkInSales) : "—"}
-                              helper="Completed POS walk-in transactions" icon={<ShoppingBag size={18} />} iconClassName="bg-[#EAF1FF] text-[#245EDB]" />
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                    <POSKpiCard kpiKey="sales" detail={kpiDetails.sales}
+                                helper="Earned booking + completed walk-in sales" onClick={() => setSelectedKpi("sales")} />
+                    <POSKpiCard kpiKey="booking" detail={kpiDetails.booking}
+                                helper="Completed bookings only" onClick={() => setSelectedKpi("booking")} />
+                    <POSKpiCard kpiKey="walk" detail={kpiDetails.walk}
+                                helper="Completed POS walk-in transactions" onClick={() => setSelectedKpi("walk")} />
                 </div>
                 {isVatRegistered && vatSummary && (
                     <section aria-label="VAT registered store summary" className="rounded-[16px] border border-[#E8DEF3] bg-gradient-to-r from-[#FAF7FF] via-white to-[#F7F2FF] px-4 py-3 shadow-sm">
@@ -751,9 +1027,6 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                             </div>
                         </div>
                     </section>
-                )}
-                {report && report.bookingIntegration.available && summary && summary.missingCostRecords > 0 && (
-                    <p role="status" className="px-1 text-xs text-[#806A8C]">Gross profit is unavailable for this scope because {summary.missingCostRecords} transaction(s) lack complete historical direct-cost or tax records.</p>
                 )}
                 <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
                     <div className="mb-3">
@@ -778,21 +1051,14 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                         )}
                     </div>
                     <div className="mb-3">
-                        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[minmax(220px,1fr)_minmax(170px,190px)_minmax(170px,190px)_minmax(145px,175px)_minmax(170px,205px)]">
+                        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[minmax(220px,1fr)_minmax(170px,205px)_minmax(145px,175px)_minmax(170px,205px)]">
                             <div className="relative min-w-0">
                                 <Search size={15} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]" />
                                 <input value={pos.ownerOrderSearch} onChange={e => pos.setOwnerOrderSearch(e.target.value)}
                                        placeholder="Search Order ID or customer..." aria-label="Search Order ID or customer name"
                                        className={`${fieldClass} pl-10 placeholder:text-[#9B8AAA]`} />
                             </div>
-                            <div className="min-w-0">
-                                <DateField label="From" value={dateFrom} max={dateTo || undefined}
-                                           onChange={v => pos.setOwnerOrderDateRange(v, dateTo)} />
-                            </div>
-                            <div className="min-w-0">
-                                <DateField label="To" value={dateTo} min={dateFrom || undefined}
-                                           onChange={v => pos.setOwnerOrderDateRange(dateFrom, v)} />
-                            </div>
+                            <POSPeriodFilter filter={dateFilter} />
                             <FilterSelect icon={<SlidersHorizontal size={15} />} label="Sales Source" value={pos.ownerSalesSource}
                                           onChange={v => pos.setOwnerSalesSource(v as "ALL" | "BOOKING" | "WALK_IN")}
                                           options={[{value:"ALL",label:"All Sales"},{value:"BOOKING",label:"Booking"},{value:"WALK_IN",label:"Walk-in"}]} />
@@ -824,6 +1090,7 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
                     <TransactionTable pos={pos} orders={pos.orders} branchName={branchName} />
                 </section>
             </div>
+            {selectedKpi && <POSKpiDetailModal kpiKey={selectedKpi} detail={kpiDetails[selectedKpi]} onClose={() => setSelectedKpi(null)} />}
         </POSLayout>
     );
 }

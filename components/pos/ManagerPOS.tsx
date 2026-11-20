@@ -19,7 +19,7 @@ import {
     WalletCards,
 } from "lucide-react";
 import type { UsePOSReturn } from "@/hooks/usePOS";
-import { createVatReportPdf, createOrderInvoicePdf, fetchOrderInvoiceDetail, type OwnerOrderInvoice } from "./OwnerPOS";
+import { BookingBillingPreview, createVatReportPdf, createOrderInvoicePdf, fetchOrderInvoiceDetail, type OwnerOrderInvoice } from "./OwnerPOS";
 import {
     OrdersTable,
     formatPOSOrderTime,
@@ -86,8 +86,9 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
 
     const orderKey = (order: Order) => `${order.salesSource === "BOOKING" ? "BOOKING" : "WALK_IN"}:${order.id}`;
     const salesSourceLabel = (order: Order) => order.salesSource === "BOOKING" ? "Booking" : "Walk-in";
-    const paymentLabel = (mode?: string | null) => {
+    const paymentLabel = (mode?: string | null): string => {
         const value = String(mode || "").toUpperCase();
+        if (value.includes(",")) return value.split(",").map(method => paymentLabel(method)).join(", ");
         return ({ CASH: "Cash", GCASH: "GCash", BANK_TRANSFER: "Bank Transfer" } as Record<string, string>)[value]
             || (mode ? mode.replace(/_/g, " ") : "—");
     };
@@ -207,7 +208,7 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
     };
 
     const filterClass = "h-[42px] w-full min-w-0 rounded-xl border border-[#E3D8EA] bg-white px-3 text-sm text-[#1A1220] outline-none shadow-sm transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10";
-    const tableGrid = "grid w-full min-w-0 grid-cols-[minmax(0,2fr)_minmax(0,1.1fr)_minmax(0,.9fr)_minmax(0,.7fr)_minmax(0,.8fr)_minmax(0,1fr)] gap-3";
+    const tableGrid = "grid w-full min-w-0 grid-cols-[minmax(0,2fr)_minmax(0,1.1fr)_minmax(0,.9fr)_minmax(0,.7fr)_minmax(0,1.45fr)_minmax(0,1fr)] gap-3";
     const dateField = (id: string, label: string, value: string, min: string | undefined, max: string | undefined, onChange: (next: string) => void) => (
         <div className="relative min-w-0">
             <CalendarDays size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#9B8AAA]" />
@@ -291,7 +292,7 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
                     )}
                     <div className="max-h-[560px] min-h-0 overflow-y-auto overscroll-contain rounded-xl border border-[#E6DDF0]">
                         <div className={`${tableGrid} sticky top-0 z-10 border-b border-[#E6DDF0] bg-[#F9F6FD] px-4 py-3 text-xs font-semibold text-[#5F4E75]`}>
-                            <div>Order ID</div><div>Date / Time</div><div>Payment</div><div>Sales Source</div><div>Total</div><div>Processed By</div>
+                            <div>Order ID</div><div>Date / Time</div><div>Payment</div><div>Sales Source</div><div>Sales</div><div>Processed By</div>
                         </div>
                         {orders.length === 0 ? (
                             <div className="px-4 py-12 text-center text-sm text-[#9B8AAA]">No branch transactions match these filters.</div>
@@ -299,7 +300,7 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
                             const key = orderKey(order);
                             const expanded = expandedOrderKey === key;
                             const detail = details[key];
-                            const recordedVat = String(detail?.taxType || "").toUpperCase() === "VAT";
+                            const recordedVat = ["VAT", "VAT_REGISTERED"].includes(String(detail?.taxType || "").toUpperCase());
                             const cashier = order.cashierName || (order.cashierId ? `Staff #${order.cashierId}` : "—");
                             return (
                                 <div key={key} className="border-b border-[#EFE7F4] last:border-0">
@@ -314,7 +315,7 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
                                             <span className="min-w-0 break-all pt-1 font-bold text-[#2B174C]">{order.id}</span>
                                         </div>
                                         <div><p className="font-semibold text-[#2B174C]">{order.date}</p>
-                                            <p className="mt-1 text-[11px] text-[#806A8C]">{formatPOSOrderTime(order)}</p></div>
+                                            <p className="mt-1 text-[11px] text-[#806A8C]">{order.salesSource === "BOOKING" && formatPOSOrderTime(order) === "—" ? "" : formatPOSOrderTime(order)}</p></div>
                                         <p className="break-words font-medium text-[#2B174C]">{paymentLabel(order.paymentMode)}</p>
                                         <p className="font-semibold text-[#4F3572]">{salesSourceLabel(order)}</p>
                                         <p className="font-bold text-[#2B174C]">{peso(order.total)}</p>
@@ -333,7 +334,7 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
                                                     <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#E8DFF0] px-4 py-3">
                                                         <div className="space-y-1">
                                                             <h3 className="text-sm font-bold text-[#2B174C]">Transaction invoice preview</h3>
-                                                            <p className="text-[11px] text-[#806A8C]">{detail.storeName} · {detail.branchName} · {detail.createdAt || detail.date}</p>
+                                                            <p className="text-[11px] text-[#806A8C]">{detail.storeName} · {detail.branchName} · {detail.salesSource === "BOOKING" && !/[T ]\d{2}:\d{2}/.test(detail.createdAt || "") ? `${detail.date} (event date; completion time unavailable)` : detail.createdAt || detail.date}</p>
                                                             <p className="text-[11px] text-[#806A8C]">Customer: {detail.customerName || "Walk-in"} · Payment: {paymentLabel(detail.paymentMode)} · Tax: {detail.taxType || "Unverified"}</p>
                                                         </div>
                                                         <button type="button" onClick={() => downloadInvoice(detail, key)}
@@ -355,8 +356,8 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
                                                                     <tr key={`${index}-${item.name}`} className="border-b border-[#F0EAF5] last:border-0">
                                                                         <td className="px-3 py-2 font-medium text-[#2B174C]">{item.name}</td>
                                                                         <td className="px-3 py-2 text-center">{item.quantity}</td>
-                                                                        <td className="px-3 py-2 text-right">{item.unitPrice == null ? "—" : peso(item.unitPrice)}</td>
-                                                                        <td className="px-3 py-2 text-right font-semibold">{item.lineTotal == null ? "—" : peso(item.lineTotal)}</td>
+                                                                        <td className="px-3 py-2 text-right">{item.included ? "Included" : item.unitPrice == null ? "—" : peso(item.unitPrice)}</td>
+                                                                        <td className="px-3 py-2 text-right font-semibold">{item.included ? "Included" : item.lineTotal == null ? "—" : peso(item.lineTotal)}</td>
                                                                     </tr>
                                                                 ))}
                                                                 </tbody>
@@ -369,6 +370,7 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
                                                             <p className="flex justify-between gap-4"><span className="text-[#806A8C]">Output VAT (recorded)</span><strong>{peso(detail.vatAmount)}</strong></p>
                                                         </>}
                                                         <p className="flex justify-between gap-4 font-bold text-[#2B174C]"><span>Recorded Total</span><span>{detail.total == null ? "—" : peso(detail.total)}</span></p>
+                                                        {detail.bookingBilling && <BookingBillingPreview billing={detail.bookingBilling} />}
                                                         <p className="pt-2 text-[10px] text-[#806A8C]">Internal transaction copy only. An Order ID is not a BIR-issued invoice number.</p>
                                                     </div>
                                                 </section>

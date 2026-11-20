@@ -259,6 +259,8 @@ function mapApiOrderToOrder(o: ApiOrder): Order {
         cost: o.totalCost != null || o.total_cost != null
             ? Number(o.totalCost ?? o.total_cost) : null,
         profit: o.profit != null ? Number(o.profit) : null,
+        additionalCharges: o.additionalCharges == null ? null : Number(o.additionalCharges),
+        depositRefunded: o.depositRefunded == null ? null : Number(o.depositRefunded),
         date: formatISODateLong(orderDateISO),
         // Actual MySQL orders.created_at timestamp, not the browser's current time.
         // The backend returns YYYY-MM-DD HH:mm:ss in the store's local clock.

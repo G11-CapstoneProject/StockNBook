@@ -51,6 +51,22 @@ type AccessLevel = "full" | "view" | "none";
 
 type PermissionMap = Record<string, AccessLevel>;
 
+// Modules every activated Branch Manager can open (role-based, not toggled
+// per Manager). Owner-only items (Branches, Branch Managers, Subscription
+// management) are not included.
+const MANAGER_ROLE_MODULES = new Set([
+    "dashboard",
+    "bookings",
+    "inventory",
+    "packages",
+    "packages_manage",
+    "pos",
+    "reports",
+    "analytics",
+    "forecasting",
+    "staff_management",
+]);
+
 type SidebarItem = {
     label: string;
     href: string;
@@ -676,6 +692,12 @@ export default function RoleSidebar() {
         permission: string,
     ): AccessLevel => {
         if (role === "owner") {
+            return "full";
+        }
+
+        // Branch Managers receive every Manager-role module by role once
+        // activated (enforced by the backend as well). Plan locks still apply.
+        if (role === "manager" && MANAGER_ROLE_MODULES.has(permission)) {
             return "full";
         }
 

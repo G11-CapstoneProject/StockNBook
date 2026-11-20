@@ -1360,6 +1360,7 @@ async function getProducts(connection, storeId, activeBranchId, productId = null
     const [balances] = await connection.execute(
         `SELECT bi.branch_id AS branchId, bi.product_id AS productId,
                 bi.variant_id AS variantId, bi.quantity_on_hand AS onHand,
+                bi.reserved_quantity AS reservedStock,
                 CASE WHEN bi.expiration_date IS NULL OR bi.expiration_date>=?
                          THEN GREATEST(bi.quantity_on_hand-bi.reserved_quantity-bi.unavailable_quantity,0)
                      ELSE 0 END AS eligibleBatches,
@@ -1373,6 +1374,7 @@ async function getProducts(connection, storeId, activeBranchId, productId = null
     const ledgerByKey = new Map(balances.map(row => [
         `${Number(row.branchId)}:${Number(row.productId)}:${row.variantId==null?'regular':Number(row.variantId)}`,
         {physical:Math.max(0,Number(row.onHand||0)),
+            reserved:Math.max(0,Number(row.reservedStock||0)),
             batches:Math.max(0,Number(row.allBatches||0)),
             eligible:Math.max(0,Number(row.eligibleBatches||0)),
             expired:Math.max(0,Number(row.expiredBatches||0))}
@@ -1384,7 +1386,7 @@ async function getProducts(connection, storeId, activeBranchId, productId = null
         const baseKey=`${branchId}:${Number(product.id)}`;
         const variants=(product.variants||[]).map(variant=>{
             const ledger=ledgerByKey.get(`${baseKey}:${Number(variant.id)}`)
-                || {physical:0,batches:0,eligible:0,expired:0};
+                || {physical:0,reserved:0,batches:0,eligible:0,expired:0};
             const catalog=Math.max(0,Number(variant.stock||0));
             return {...variant,
                 // Once the stock is gone, the old expiry is historical, not an
@@ -1392,16 +1394,19 @@ async function getProducts(connection, storeId, activeBranchId, productId = null
                 expirationDate:ledger.batches===0 ? null : variant.expirationDate,
                 sellableStock:Math.max(0,Math.min(catalog,ledger.physical,ledger.eligible)),
                 branchStock:ledger.physical,batchStock:ledger.batches,
+                reservedStock:ledger.reserved,
                 expiredBatchUnits:ledger.expired,
                 ledgerMismatch:catalog!==ledger.physical||ledger.physical!==ledger.batches};
         });
         const base=ledgerByKey.get(`${baseKey}:regular`)
-            || {physical:0,batches:0,eligible:0,expired:0};
+            || {physical:0,reserved:0,batches:0,eligible:0,expired:0};
         const sellableStock=product.hasVariants
             ? variants.reduce((total,variant)=>total+variant.sellableStock,0)
             : Math.max(0,Math.min(Number(product.stock||0),base.physical,base.eligible));
         const branchStock=product.hasVariants
             ? variants.reduce((total,variant)=>total+variant.branchStock,0):base.physical;
+        const reservedStock=product.hasVariants
+            ? variants.reduce((total,variant)=>total+variant.reservedStock,0):base.reserved;
         const batchStock=product.hasVariants
             ? variants.reduce((total,variant)=>total+variant.batchStock,0):base.batches;
         const expiredBatchUnits=product.hasVariants
@@ -1410,7 +1415,7 @@ async function getProducts(connection, storeId, activeBranchId, productId = null
             branchStock!==batchStock || variants.some(variant=>variant.ledgerMismatch);
         return {...product,variants,
             expirationDate:!product.hasVariants && base.batches===0 ? null : product.expirationDate,
-            sellableStock,branchStock,batchStock,expiredBatchUnits,ledgerMismatch};
+            sellableStock,branchStock,reservedStock,batchStock,expiredBatchUnits,ledgerMismatch};
     });
 }
 
@@ -1838,7 +1843,7 @@ const V2_SCHEMA_COLUMNS = {
     inventory_movements: ["id", "store_id", "branch_id", "branch_inventory_id", "movement_type", "quantity_bucket", "quantity_change", "quantity_before", "quantity_after", "unit_cost", "reference_type", "reference_id", "reason", "performed_by", "created_at"],
     inventory_batches: ["id", "store_id", "branch_id", "branch_inventory_id", "batch_code", "received_quantity", "remaining_quantity", "unit_cost", "received_at", "expiration_date", "status"],
     stock_issues: ["id", "store_id", "branch_id", "branch_inventory_id", "booking_id", "issue_type", "quantity", "quantity_resolved", "reason", "status", "estimated_completion_date", "reported_by", "approved_by", "approved_at", "resolved_by", "resolved_at", "resolution_notes", "created_at", "updated_at"],
-    packages: ["id", "store_id", "branch_id", "package_code", "package_name", "description", "category", "discount_type", "discount_value", "package_price", "down_payment_amount", "duration", "cover_image_url", "status", "updated_by", "created_at", "updated_at"],
+    packages: ["id", "store_id", "branch_id", "package_code", "package_name", "description", "category", "discount_type", "discount_value", "package_price", "down_payment_amount", "duration", "status", "updated_by", "created_at", "updated_at"],
     package_items: ["id", "store_id", "package_id", "product_id", "variant_id", "quantity"],
     bookings: ["id", "store_id", "branch_id", "booking_reference", "customer_id", "package_id", "booking_type", "status", "created_at", "updated_at"],
     booking_items: ["id", "store_id", "booking_id", "product_id", "variant_id", "quantity"],

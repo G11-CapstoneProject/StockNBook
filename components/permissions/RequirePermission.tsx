@@ -6,6 +6,26 @@ import { useRouter } from "next/navigation";
 type Role = "owner" | "manager" | "staff";
 type AccessLevel = "none" | "view" | "full";
 
+/*
+ * Branch Managers receive every Manager-role module automatically once their
+ * account is active (the backend enforces the same rule independently and
+ * still limits Managers to their assigned branch). Owner-only pages use
+ * `ownerOnly` and are never part of this set. Subscription-plan locks for
+ * Analytics/Forecasting are enforced separately by PlanFeatureGate and the API.
+ */
+const MANAGER_ROLE_MODULES = new Set([
+    "dashboard",
+    "bookings",
+    "inventory",
+    "packages",
+    "packages_manage",
+    "pos",
+    "reports",
+    "analytics",
+    "forecasting",
+    "staff_management",
+]);
+
 function getSessionPermissions() {
     if (typeof window === "undefined") return {};
 
@@ -74,6 +94,12 @@ function checkAccess(permission?: string, ownerOnly = false) {
     }
 
     if (role === "owner") {
+        return true;
+    }
+
+    // Role-based Manager access: an older session snapshot with disabled
+    // module flags must not hide an authorized Manager module.
+    if (role === "manager" && (!permission || MANAGER_ROLE_MODULES.has(permission))) {
         return true;
     }
 

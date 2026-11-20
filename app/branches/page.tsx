@@ -111,17 +111,6 @@ const predefinedInactiveReasons = inactiveReasonOptions.filter(
     (reason) => reason !== "Other"
 );
 
-const defaultPermissions: Permissions = {
-    dashboard: true,
-    bookings: true,
-    packages: true,
-    packages_manage: false,
-    inventory: true,
-    pos: true,
-    reports: false,
-    staff_management: false,
-};
-
 function getBranchStatus(branch: Branch): BranchStatus {
     const branchStatus = String(
         branch.branch_status || branch.status || ""
@@ -485,8 +474,6 @@ export default function BranchesPage() {
         useState("");
     const [addManagerName, setAddManagerName] = useState("");
     const [addManagerEmail, setAddManagerEmail] = useState("");
-    const [addPermissions, setAddPermissions] =
-        useState<Permissions>(defaultPermissions);
     const [adding, setAdding] = useState(false);
     const [showPlanLimitDialog, setShowPlanLimitDialog] = useState(false);
     const [subscriptionPlan, setSubscriptionPlan] = useState<SubscriptionPlan>("starter");
@@ -504,8 +491,6 @@ export default function BranchesPage() {
         useState("");
     const [editManagerName, setEditManagerName] = useState("");
     const [editManagerEmail, setEditManagerEmail] = useState("");
-    const [editPermissions, setEditPermissions] =
-        useState<Permissions>(defaultPermissions);
     const [saving, setSaving] = useState(false);
 
     const loadSubscriptionPlan = useCallback(async () => {
@@ -779,7 +764,6 @@ export default function BranchesPage() {
         setAddOtherInactiveReason("");
         setAddManagerName("");
         setAddManagerEmail("");
-        setAddPermissions({ ...defaultPermissions });
     };
 
     const openAddModal = () => {
@@ -892,7 +876,6 @@ export default function BranchesPage() {
                             finalInactiveReason,
                             manager_name: addManagerName.trim(),
                             manager_email: normalizedManagerEmail,
-                            permissions: addPermissions,
                         },
                     ],
                     send_invitation_emails: hasManagerEmail,
@@ -964,10 +947,6 @@ export default function BranchesPage() {
         setEditOtherInactiveReason(splitReason.otherReason);
         setEditManagerName(branch.manager_name || "");
         setEditManagerEmail(branch.manager_email || "");
-        setEditPermissions({
-            ...defaultPermissions,
-            ...(branch.permissions || {}),
-        });
         setShowEditModal(true);
     };
 
@@ -1033,8 +1012,6 @@ export default function BranchesPage() {
                     branch_inactive_reason:
                     finalInactiveReason,
                     manager_name: editManagerName,
-                    manager_email: editManagerEmail,
-                    permissions: editPermissions,
                 }),
             });
 
@@ -1104,13 +1081,12 @@ export default function BranchesPage() {
 
                 <main className="min-w-0 flex-1 overflow-y-auto">
                     <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 backdrop-blur">
-                        <div className="flex min-h-[72px] flex-wrap items-center justify-between gap-3 px-6 py-3">
-                            <div className="min-w-0">
-                                <h1 className="text-[25px] font-bold text-[#1A1220]">Branches</h1>
-                                <p className="mt-0.5 text-xs text-[#766983]">Manage business locations and assigned teams.</p>
-                            </div>
+                        <div className="flex min-h-[72px] flex-wrap items-center justify-between gap-4 px-6 py-3">
+                            <h1 className="text-[25px] font-bold tracking-[-0.025em] text-[#1A1220]">
+                                Branches
+                            </h1>
 
-                            <div className="flex flex-wrap items-center gap-2.5">
+                            <div className="flex items-center gap-2.5">
                             <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
                                 {currentDateTime
                                     ? formatCurrentDateTime(currentDateTime)
@@ -1138,35 +1114,35 @@ export default function BranchesPage() {
                         </div>
                     </header>
 
-                    <section className="space-y-4 px-5 py-5">
+                    <section className="space-y-3.5 px-6 py-4">
                         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                             <SummaryCard
                                 title="Total Branches"
                                 value={summary.totalBranches}
                                 description="All registered business locations"
                                 icon={<Building2 className="h-5 w-5" />}
-                                iconClassName="bg-[#F3EBFF] text-[#6C3AD6]"
+                                iconClassName="bg-[#F0E8FA] text-[#5B35A5]"
                             />
                             <SummaryCard
                                 title="Active Branches"
                                 value={summary.activeBranches}
                                 description="Branches currently operating"
                                 icon={<CheckCircle2 className="h-5 w-5" />}
-                                iconClassName="bg-[#EAF7F0] text-[#25865B]"
+                                iconClassName="bg-[#EAF7EF] text-[#21844A]"
                             />
                             <SummaryCard
                                 title="Inactive Branches"
                                 value={summary.inactiveBranches}
                                 description="Branches currently inactive"
                                 icon={<XCircle className="h-5 w-5" />}
-                                iconClassName="bg-[#FFF0F0] text-[#D52B2B]"
+                                iconClassName="bg-[#FFF0F0] text-[#C32F2F]"
                             />
                             <SummaryCard
                                 title="Total Staff"
                                 value={summary.totalStaff}
                                 description="Staff assigned across branches"
                                 icon={<UserRoundCheck className="h-5 w-5" />}
-                                iconClassName="bg-[#E8F1FF] text-[#2169CF]"
+                                iconClassName="bg-[#EEF4FF] text-[#3367D6]"
                             />
                         </div>
 
@@ -1176,25 +1152,23 @@ export default function BranchesPage() {
                             </div>
                         )}
 
-                        <section className="min-w-0 overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm">
-                            <div className="flex min-h-[64px] flex-wrap items-center justify-between gap-3 px-4 py-3.5">
-                                <div className="flex min-w-0 flex-1 items-center gap-2.5">
-                                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#E5F7F5] text-[#147D77]" aria-hidden="true">
-                                        <Building2 size={18} />
-                                    </span>
-                                    <div className="min-w-0">
-                                        <h2 className="text-[15px] font-bold leading-5 text-[#1A1220]">Branch Directory</h2>
-                                        <p className="mt-0.5 text-[11px] leading-4 text-[#86778F]">
-                                            View branch contact information, staff, and assigned managers.
-                                        </p>
-                                    </div>
+                        <section className="overflow-hidden rounded-[20px] border border-[#E8E0EF] bg-white shadow-[0_2px_6px_rgba(45,27,78,0.10)]">
+                            <div className="flex flex-wrap items-center justify-between gap-3 px-5 pb-3 pt-5">
+                                <div className="min-w-0">
+                                    <h2 className="text-[18px] font-bold tracking-[-0.02em] text-[#1A1220]">
+                                        Branch Directory
+                                    </h2>
+                                    <p className="mt-1 text-[13px] leading-5 text-[#806A8C]">
+                                        View branch contact information, staff, and assigned managers.
+                                    </p>
                                 </div>
-                                <span className="text-[11px] font-medium tabular-nums text-[#806A8C]">
+
+                                <span className="text-[13px] font-medium text-[#806A8C]">
                                     {filteredBranches.length} {filteredBranches.length === 1 ? "branch" : "branches"}
                                 </span>
                             </div>
 
-                            <div className="flex flex-wrap items-center gap-3 px-4 pb-3">
+                            <div className="flex flex-wrap items-center gap-3 px-5 pb-4">
                                 <div className="relative min-w-0 flex-1 basis-full sm:basis-[260px]">
                                     <Search
                                         size={16}
@@ -1204,7 +1178,7 @@ export default function BranchesPage() {
                                         value={search}
                                         onChange={(event) => setSearch(event.target.value)}
                                         placeholder="Search branch, manager, address, or contact..."
-                                        className="h-[38px] w-full rounded-xl border border-[#E6DDF0] bg-white pl-10 pr-10 text-[12px] text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                                        className="h-[46px] w-full rounded-xl border border-[#E6DDF0] bg-white px-4 pl-10 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
                                     />
                                     {search && (
                                         <button
@@ -1221,14 +1195,14 @@ export default function BranchesPage() {
                                 <button
                                     type="button"
                                     onClick={openAddModal}
-                                    className="inline-flex h-[38px] shrink-0 items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-[12px] font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
+                                    className="inline-flex h-[46px] shrink-0 items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
                                 >
                                     <Plus size={16} />
                                     Add Branch
                                 </button>
                             </div>
 
-                            <div className="border-t border-[#F1ECF4] p-3.5">
+                            <div className="border-t border-[#EEE7F2] p-4">
                                 {loading && branches.length === 0 ? (
                                     <ModuleSkeleton variant="branches" />
                                 ) : branches.length === 0 ? (
@@ -1246,7 +1220,7 @@ export default function BranchesPage() {
                                         onAction={() => setSearch("")}
                                     />
                                 ) : (
-                                    <div className="grid min-w-0 grid-cols-1 items-stretch gap-3 xl:grid-cols-2">
+                                    <div className="grid items-start gap-4 xl:grid-cols-2">
                                         {filteredBranches.map((branch) => (
                                             <BranchCard
                                                 key={branch.id}
@@ -1271,18 +1245,18 @@ export default function BranchesPage() {
                             role="dialog"
                             aria-modal="true"
                             aria-labelledby="add-branch-dialog-title"
-                            className="max-h-[90vh] w-full max-w-[880px] overflow-y-auto rounded-2xl border border-[#E6DDF0] bg-white shadow-2xl"
+                            className="max-h-[78vh] w-full max-w-[1120px] overflow-y-auto rounded-[22px] border border-[#E6DDF0] bg-white shadow-2xl"
                             onMouseDown={(event) => event.stopPropagation()}
                         >
-                            <div className="sticky top-0 z-10 flex items-start justify-between gap-3 border-b border-[#F1ECF4] bg-white px-5 py-4">
+                            <div className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-[#E6DDF0] bg-white px-6 py-5">
                                 <div>
                                     <h2
                                         id="add-branch-dialog-title"
-                                        className="text-[17px] font-bold text-[#1A1220]"
+                                        className="text-[22px] font-bold tracking-[-0.02em] text-[#1A1220]"
                                     >
                                         Add Branch
                                     </h2>
-                                    <p className="mt-1 text-[11px] leading-4 text-[#86778F]">
+                                    <p className="mt-1 text-sm leading-6 text-[#7A6A84]">
                                         Add a new business location and optionally
                                         invite a branch manager.
                                     </p>
@@ -1293,21 +1267,21 @@ export default function BranchesPage() {
                                     onClick={closeAddModal}
                                     disabled={adding}
                                     aria-label="Close add branch form"
-                                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-[#E6DDF0] text-[#806A8C] transition hover:bg-[#F7F1FF] hover:text-[#2B174C] disabled:cursor-not-allowed disabled:opacity-50"
+                                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#E6DDF0] text-[#806A8C] transition hover:bg-[#F7F1FF] hover:text-[#2B174C] disabled:cursor-not-allowed disabled:opacity-50"
                                 >
                                     <X size={17} />
                                 </button>
                             </div>
 
-                            <div className="space-y-4 px-5 py-4">
-                                <div className="rounded-xl border border-[#EEE7F5] bg-[#FAF8FC] p-4">
-                                    <div className="mb-3 flex items-center gap-2.5">
-                                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F3EBFF] text-[#6C3AD6]">
+                            <div className="space-y-5 px-6 py-5">
+                                <div className="rounded-2xl border border-[#E8DFF0] bg-[#FFFDF8] p-5">
+                                    <div className="mb-4 flex items-center gap-3">
+                                    <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#F0E8FA] text-[#5B35A5]">
                                         <Building2 className="h-5 w-5" />
                                     </span>
 
                                         <div>
-                                            <h3 className="text-[14px] font-bold text-[#1A1220]">
+                                            <h3 className="font-bold text-[#1A1220]">
                                                 Branch information
                                             </h3>
                                             <p className="mt-0.5 text-xs text-[#7A6A84]">
@@ -1321,14 +1295,14 @@ export default function BranchesPage() {
                                             label="Branch name"
                                             value={addBranchName}
                                             onChange={setAddBranchName}
-                                            placeholder="e.g. Main Branch"
+                                            placeholder="Main Branch"
                                         />
 
                                         <TextInput
                                             label="Contact number"
                                             value={addContactNumber}
                                             onChange={setAddContactNumber}
-                                            placeholder="e.g. 0912 345 6789"
+                                            placeholder="0912 345 6789"
                                         />
                                     </div>
 
@@ -1340,7 +1314,7 @@ export default function BranchesPage() {
                                     />
 
                                     <div className="mt-1">
-                                        <p className="mb-1.5 block text-[12px] font-medium text-[#25153D]">
+                                        <p className="mb-2 block text-sm font-medium text-[#1A1220]">
                                             Branch status
                                         </p>
 
@@ -1361,7 +1335,7 @@ export default function BranchesPage() {
                                                     setAddOtherInactiveReason("");
                                                 }}
                                                 className={[
-                                                    "flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition",
+                                                    "flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition",
                                                     addBranchStatus === "active"
                                                         ? "border-[#55B978] bg-[#EDFBF1] ring-2 ring-[#55B978]/10"
                                                         : "border-[#E6DDF0] bg-white hover:border-[#9ED9B3] hover:bg-[#F7FCF8]",
@@ -1369,7 +1343,7 @@ export default function BranchesPage() {
                                             >
                                             <span
                                                 className={[
-                                                    "flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px]",
+                                                    "flex h-9 w-9 shrink-0 items-center justify-center rounded-full",
                                                     addBranchStatus === "active"
                                                         ? "bg-[#DDF6E6] text-[#168344]"
                                                         : "bg-[#F1F4F2] text-[#6F7D74]",
@@ -1379,10 +1353,10 @@ export default function BranchesPage() {
                                             </span>
 
                                                 <span>
-                                                <span className="block text-[12px] font-semibold text-[#25153D]">
+                                                <span className="block text-sm font-semibold text-[#1A1220]">
                                                     Active
                                                 </span>
-                                                <span className="mt-0.5 block text-[11px] leading-4 text-[#86778F]">
+                                                <span className="mt-0.5 block text-xs leading-5 text-[#7A6A84]">
                                                     The branch is currently operating.
                                                 </span>
                                             </span>
@@ -1398,7 +1372,7 @@ export default function BranchesPage() {
                                                     setAddBranchStatus("inactive")
                                                 }
                                                 className={[
-                                                    "flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition",
+                                                    "flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition",
                                                     addBranchStatus === "inactive"
                                                         ? "border-[#E08A8A] bg-[#FFF2F2] ring-2 ring-[#E08A8A]/10"
                                                         : "border-[#E6DDF0] bg-white hover:border-[#E8B4B4] hover:bg-[#FFF8F8]",
@@ -1406,7 +1380,7 @@ export default function BranchesPage() {
                                             >
                                             <span
                                                 className={[
-                                                    "flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px]",
+                                                    "flex h-9 w-9 shrink-0 items-center justify-center rounded-full",
                                                     addBranchStatus === "inactive"
                                                         ? "bg-[#FFE0E0] text-[#C32F2F]"
                                                         : "bg-[#F5F1F1] text-[#857777]",
@@ -1416,10 +1390,10 @@ export default function BranchesPage() {
                                             </span>
 
                                                 <span>
-                                                <span className="block text-[12px] font-semibold text-[#25153D]">
+                                                <span className="block text-sm font-semibold text-[#1A1220]">
                                                     Inactive
                                                 </span>
-                                                <span className="mt-0.5 block text-[11px] leading-4 text-[#86778F]">
+                                                <span className="mt-0.5 block text-xs leading-5 text-[#7A6A84]">
                                                     The branch is temporarily not operating.
                                                 </span>
                                             </span>
@@ -1446,14 +1420,14 @@ export default function BranchesPage() {
                                     </div>
                                 </div>
 
-                                <div className="rounded-xl border border-[#EEE7F5] bg-white p-4">
-                                    <div className="mb-3 flex items-center gap-2.5">
-                                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#E8F1FF] text-[#2169CF]">
+                                <div className="rounded-2xl border border-[#E8DFF0] bg-white p-5">
+                                    <div className="mb-4 flex items-center gap-3">
+                                    <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#EEF4FF] text-[#3367D6]">
                                         <UserRoundCheck className="h-5 w-5" />
                                     </span>
 
                                         <div>
-                                            <h3 className="text-[14px] font-bold text-[#1A1220]">
+                                            <h3 className="font-bold text-[#1A1220]">
                                                 Branch manager
                                                 <span className="ml-2 text-xs font-medium text-[#8A7A94]">
                                                 Optional
@@ -1471,7 +1445,7 @@ export default function BranchesPage() {
                                             label="Manager name"
                                             value={addManagerName}
                                             onChange={setAddManagerName}
-                                            placeholder="e.g. Ana Cruz"
+                                            placeholder="Ana Cruz"
                                         />
 
                                         <TextInput
@@ -1484,45 +1458,11 @@ export default function BranchesPage() {
                                     </div>
 
                                     <div className="mt-5 border-t border-[#E6DDF0] pt-5">
-                                        <p className="mb-3 text-[11px] font-semibold uppercase tracking-wide text-[#806A8C]">
-                                            Manager Permissions
+                                        <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-[#806A8C]">
+                                            Manager Access
                                         </p>
 
-                                        <div className="grid gap-2 sm:grid-cols-2">
-                                            {(
-                                                [
-                                                    ["bookings", "Bookings"],
-                                                    ["packages", "Packages"],
-                                                    [
-                                                        "packages_manage",
-                                                        "Manage Packages",
-                                                    ],
-                                                    ["inventory", "Inventory"],
-                                                    ["pos", "Sales / POS"],
-                                                    ["reports", "Audit Logs"],
-                                                    [
-                                                        "staff_management",
-                                                        "Staff Management",
-                                                    ],
-                                                ] as Array<
-                                                    [keyof Permissions, string]
-                                                >
-                                            ).map(([key, label]) => (
-                                                <AccessToggle
-                                                    key={key}
-                                                    label={label}
-                                                    checked={addPermissions[key]}
-                                                    onChange={(checked) =>
-                                                        setAddPermissions((current) => ({
-                                                            ...current,
-                                                            [key]: checked,
-                                                            ...(key === "packages" && !checked ? { packages_manage: false } : {}),
-                                                            ...(key === "packages_manage" && checked ? { packages: true } : {}),
-                                                        }))
-                                                    }
-                                                />
-                                            ))}
-                                        </div>
+                                        <ManagerRoleAccessNotice />
                                     </div>
                                 </div>
 
@@ -1533,12 +1473,12 @@ export default function BranchesPage() {
                                 </div>
                             </div>
 
-                            <div className="sticky bottom-0 flex flex-wrap justify-end gap-2.5 border-t border-[#F1ECF4] bg-white px-5 py-3">
+                            <div className="sticky bottom-0 flex gap-3 border-t border-[#E6DDF0] bg-white px-6 py-4">
                                 <button
                                     type="button"
                                     onClick={closeAddModal}
                                     disabled={adding}
-                                    className="rounded-xl border border-[#E6DDF0] bg-white px-4 py-2.5 text-[12px] font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-50"
+                                    className="flex-1 rounded-xl border border-[#E6DDF0] bg-white px-5 py-2.5 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-50"
                                 >
                                     Cancel
                                 </button>
@@ -1547,7 +1487,7 @@ export default function BranchesPage() {
                                     type="button"
                                     onClick={() => void handleCreateBranch()}
                                     disabled={adding}
-                                    className="flex items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 py-2.5 text-[12px] font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
+                                    className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
                                 >
                                     <Plus size={16} />
                                     {adding ? "Adding branch..." : "Add branch"}
@@ -1570,13 +1510,13 @@ export default function BranchesPage() {
 
                 {showEditModal && editingBranch && (
                     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm">
-                        <div className="max-h-[90vh] w-full max-w-[620px] overflow-y-auto rounded-2xl border border-[#E6DDF0] bg-white shadow-2xl">
-                            <div className="sticky top-0 z-10 flex items-start justify-between gap-3 border-b border-[#F1ECF4] bg-white px-5 py-4">
+                        <div className="max-h-[90vh] w-full max-w-[620px] overflow-y-auto rounded-[18px] border border-[#E6DDF0] bg-white shadow-2xl">
+                            <div className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-[#E6DDF0] bg-white px-6 py-5">
                                 <div>
-                                    <h2 className="text-[17px] font-bold text-[#1A1220]">
+                                    <h2 className="text-[20px] font-bold text-[#1A1220]">
                                         Edit Branch
                                     </h2>
-                                    <p className="mt-1 text-[11px] leading-4 text-[#86778F]">
+                                    <p className="mt-1 text-sm text-[#7A6A84]">
                                         Update branch and assigned manager details.
                                     </p>
                                 </div>
@@ -1592,7 +1532,7 @@ export default function BranchesPage() {
                                 </button>
                             </div>
 
-                            <div className="space-y-4 px-5 py-4">
+                            <div className="space-y-5 px-6 py-5">
                                 <div className="grid gap-4 sm:grid-cols-2">
                                     <TextInput
                                         label="Branch name"
@@ -1613,7 +1553,7 @@ export default function BranchesPage() {
                                 />
 
                                 <div className="border-t border-[#E6DDF0] pt-5">
-                                    <p className="mb-3 text-[11px] font-semibold uppercase tracking-wide text-[#806A8C]">
+                                    <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-[#806A8C]">
                                         Branch Status
                                     </p>
 
@@ -1634,7 +1574,7 @@ export default function BranchesPage() {
                                                 setEditOtherInactiveReason("");
                                             }}
                                             className={[
-                                                "flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition",
+                                                "flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition",
                                                 editBranchStatus === "active"
                                                     ? "border-[#55B978] bg-[#EDFBF1] ring-2 ring-[#55B978]/10"
                                                     : "border-[#E6DDF0] bg-white hover:border-[#9ED9B3] hover:bg-[#F7FCF8]",
@@ -1642,7 +1582,7 @@ export default function BranchesPage() {
                                         >
                                         <span
                                             className={[
-                                                "flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px]",
+                                                "flex h-9 w-9 shrink-0 items-center justify-center rounded-full",
                                                 editBranchStatus === "active"
                                                     ? "bg-[#DDF6E6] text-[#168344]"
                                                     : "bg-[#F1F4F2] text-[#6F7D74]",
@@ -1652,10 +1592,10 @@ export default function BranchesPage() {
                                         </span>
 
                                             <span>
-                                            <span className="block text-[12px] font-semibold text-[#25153D]">
+                                            <span className="block text-sm font-semibold text-[#1A1220]">
                                                 Active
                                             </span>
-                                            <span className="mt-0.5 block text-[11px] leading-4 text-[#86778F]">
+                                            <span className="mt-0.5 block text-xs leading-5 text-[#7A6A84]">
                                                 The branch is currently operating.
                                             </span>
                                         </span>
@@ -1671,7 +1611,7 @@ export default function BranchesPage() {
                                                 setEditBranchStatus("inactive")
                                             }
                                             className={[
-                                                "flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition",
+                                                "flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition",
                                                 editBranchStatus === "inactive"
                                                     ? "border-[#E08A8A] bg-[#FFF2F2] ring-2 ring-[#E08A8A]/10"
                                                     : "border-[#E6DDF0] bg-white hover:border-[#E8B4B4] hover:bg-[#FFF8F8]",
@@ -1679,7 +1619,7 @@ export default function BranchesPage() {
                                         >
                                         <span
                                             className={[
-                                                "flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px]",
+                                                "flex h-9 w-9 shrink-0 items-center justify-center rounded-full",
                                                 editBranchStatus === "inactive"
                                                     ? "bg-[#FFE0E0] text-[#C32F2F]"
                                                     : "bg-[#F5F1F1] text-[#857777]",
@@ -1689,10 +1629,10 @@ export default function BranchesPage() {
                                         </span>
 
                                             <span>
-                                            <span className="block text-[12px] font-semibold text-[#25153D]">
+                                            <span className="block text-sm font-semibold text-[#1A1220]">
                                                 Inactive
                                             </span>
-                                            <span className="mt-0.5 block text-[11px] leading-4 text-[#86778F]">
+                                            <span className="mt-0.5 block text-xs leading-5 text-[#7A6A84]">
                                                 The branch is temporarily not operating.
                                             </span>
                                         </span>
@@ -1719,7 +1659,7 @@ export default function BranchesPage() {
                                 </div>
 
                                 <div className="border-t border-[#E6DDF0] pt-5">
-                                    <p className="mb-3 text-[11px] font-semibold uppercase tracking-wide text-[#806A8C]">
+                                    <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-[#806A8C]">
                                         Manager Details
                                     </p>
 
@@ -1729,116 +1669,27 @@ export default function BranchesPage() {
                                             value={editManagerName}
                                             onChange={setEditManagerName}
                                         />
-                                        <TextInput
-                                            label="Manager email"
+                                        <ReadOnlyManagerEmail
                                             value={editManagerEmail}
-                                            onChange={setEditManagerEmail}
                                         />
                                     </div>
                                 </div>
 
                                 <div className="border-t border-[#E6DDF0] pt-5">
-                                    <p className="mb-3 text-[11px] font-semibold uppercase tracking-wide text-[#806A8C]">
-                                        Manager Permissions
+                                    <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-[#806A8C]">
+                                        Manager Access
                                     </p>
 
-                                    <div className="grid gap-2 sm:grid-cols-2">
-                                        <AccessToggle
-                                            label="Dashboard"
-                                            checked={editPermissions.dashboard}
-                                            onChange={(checked) =>
-                                                setEditPermissions((prev) => ({
-                                                    ...prev,
-                                                    dashboard: checked,
-                                                }))
-                                            }
-                                        />
-                                        <AccessToggle
-                                            label="Bookings"
-                                            checked={editPermissions.bookings}
-                                            onChange={(checked) =>
-                                                setEditPermissions((prev) => ({
-                                                    ...prev,
-                                                    bookings: checked,
-                                                }))
-                                            }
-                                        />
-                                        <AccessToggle
-                                            label="Packages"
-                                            checked={editPermissions.packages}
-                                            onChange={(checked) =>
-                                                setEditPermissions((prev) => ({
-                                                    ...prev,
-                                                    packages: checked,
-                                                    ...(checked ? {} : { packages_manage: false }),
-                                                }))
-                                            }
-                                        />
-                                        <AccessToggle
-                                            label="Manage Packages"
-                                            checked={
-                                                editPermissions.packages_manage
-                                            }
-                                            onChange={(checked) =>
-                                                setEditPermissions((prev) => ({
-                                                    ...prev,
-                                                    packages_manage: checked,
-                                                    ...(checked ? { packages: true } : {}),
-                                                }))
-                                            }
-                                        />
-                                        <AccessToggle
-                                            label="Inventory"
-                                            checked={editPermissions.inventory}
-                                            onChange={(checked) =>
-                                                setEditPermissions((prev) => ({
-                                                    ...prev,
-                                                    inventory: checked,
-                                                }))
-                                            }
-                                        />
-                                        <AccessToggle
-                                            label="Sales / POS"
-                                            checked={editPermissions.pos}
-                                            onChange={(checked) =>
-                                                setEditPermissions((prev) => ({
-                                                    ...prev,
-                                                    pos: checked,
-                                                }))
-                                            }
-                                        />
-                                        <AccessToggle
-                                            label="Audit Logs"
-                                            checked={editPermissions.reports}
-                                            onChange={(checked) =>
-                                                setEditPermissions((prev) => ({
-                                                    ...prev,
-                                                    reports: checked,
-                                                }))
-                                            }
-                                        />
-                                        <AccessToggle
-                                            label="Staff Management"
-                                            checked={
-                                                editPermissions.staff_management
-                                            }
-                                            onChange={(checked) =>
-                                                setEditPermissions((prev) => ({
-                                                    ...prev,
-                                                    staff_management: checked,
-                                                }))
-                                            }
-                                        />
-                                    </div>
+                                    <ManagerRoleAccessNotice />
                                 </div>
                             </div>
 
-                            <div className="sticky bottom-0 flex flex-wrap justify-end gap-2.5 border-t border-[#F1ECF4] bg-white px-5 py-3">
+                            <div className="sticky bottom-0 flex gap-3 border-t border-[#E6DDF0] bg-white px-6 py-4">
                                 <button
                                     type="button"
                                     onClick={closeEditModal}
                                     disabled={saving}
-                                    className="rounded-xl border border-[#E6DDF0] bg-white px-4 py-2.5 text-[12px] font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed"
+                                    className="flex-1 rounded-xl border border-[#E6DDF0] bg-white px-5 py-2.5 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:cursor-not-allowed"
                                 >
                                     Cancel
                                 </button>
@@ -1847,7 +1698,7 @@ export default function BranchesPage() {
                                     type="button"
                                     onClick={() => void handleUpdateBranch()}
                                     disabled={saving}
-                                    className="rounded-xl bg-[#2B174C] px-4 py-2.5 text-[12px] font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
+                                    className="flex-1 rounded-xl bg-[#2B174C] px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-not-allowed disabled:opacity-60"
                                 >
                                     {saving ? "Saving..." : "Save changes"}
                                 </button>
@@ -1874,19 +1725,19 @@ function SummaryCard({
     iconClassName: string;
 }) {
     return (
-        <div className="flex min-h-[108px] w-full min-w-0 items-center rounded-[16px] border border-[#E6DDF0] bg-white px-3.5 py-3 text-left shadow-sm">
-            <div className="flex w-full min-w-0 items-center gap-3">
-                <span className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl ${iconClassName}`}>
+        <div className="min-h-[142px] rounded-[20px] border border-[#E6DDF0] bg-white px-5 py-4 shadow-[0_2px_6px_rgba(45,27,78,0.10)]">
+            <div className="flex h-full items-center gap-4">
+                <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${iconClassName}`}>
                     {icon}
                 </span>
                 <div className="min-w-0">
-                    <p className="text-[12px] font-semibold leading-4 text-[#25153D]">
+                    <p className="text-[15px] font-medium text-[#2B174C]">
                         {title}
                     </p>
-                    <p className="mt-1 break-words text-[24px] font-bold leading-none tabular-nums text-[#25153D]">
+                    <p className="mt-1 text-[28px] font-bold leading-none tracking-[-0.02em] text-[#1A1220]">
                         {value}
                     </p>
-                    <p className="mt-1 text-[11px] leading-4 text-[#806A8C]">
+                    <p className="mt-2 text-[12px] leading-5 text-[#806A8C]">
                         {description}
                     </p>
                 </div>
@@ -1910,39 +1761,44 @@ function BranchCard({
 
     return (
         <article
-            className="flex min-w-0 flex-col overflow-hidden rounded-2xl border border-[#E7DFEC] bg-white shadow-sm"
+            className="overflow-hidden rounded-[18px] border bg-white transition-shadow duration-200 hover:shadow-md"
+            style={{
+                borderColor: "#E7DFF0",
+                boxShadow:
+                    "0 3px 12px rgba(45, 27, 78, 0.08)",
+            }}
         >
-            <div className="flex flex-wrap items-start justify-between gap-2.5 px-4 py-3.5">
-                <div className="flex min-w-0 flex-1 items-center gap-2.5">
+            <div className="flex items-start justify-between gap-4 px-4 pb-3 pt-4">
+                <div className="flex min-w-0 items-center gap-3">
                     <span
-                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px]"
+                        className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl"
                         style={{
-                            backgroundColor: "#F3EBFF",
-                            color: "#6C3AD6",
+                            backgroundColor: "#F2ECFF",
+                            color: "#6D3CC7",
                         }}
                     >
                         <Building2
-                            size={18}
+                            size={21}
                             strokeWidth={2}
                             aria-hidden="true"
                         />
                     </span>
 
                     <div className="min-w-0">
-                        <h3 className="break-words text-[15px] font-bold leading-5 text-[#1A1220]">
+                        <h3 className="truncate text-[18px] font-bold tracking-[-0.015em] text-[#1A1220]">
                             {branch.branch_name}
                         </h3>
 
-                        <p className="mt-0.5 break-words text-[11px] leading-4 text-[#86778F]">
+                        <p className="mt-1 truncate text-[13px] text-[#7A6A84]">
                             Manager:{" "}
                             {branch.manager_name || "Not assigned"}
                         </p>
                     </div>
                 </div>
 
-                <div className="max-w-full shrink-0 text-right sm:max-w-[45%]">
+                <div className="max-w-[230px] shrink-0 text-right">
                     <span
-                        className="inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] font-semibold"
+                        className="inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-semibold"
                         style={
                             status === "active"
                                 ? {
@@ -1979,7 +1835,7 @@ function BranchCard({
                     {status === "inactive" && inactiveReason && (
                         <div className="mt-2">
                             <span
-                                className="inline-block max-w-full break-words rounded-lg border px-2.5 py-1 text-[10px] font-medium"
+                                className="inline-flex rounded-full border px-3 py-1 text-[10px] font-semibold"
                                 style={{
                                     borderColor: "#F5C9C9",
                                     backgroundColor: "#FFF1F1",
@@ -1994,14 +1850,14 @@ function BranchCard({
                 </div>
             </div>
 
-            <div className="grid flex-1 grid-cols-[repeat(auto-fit,minmax(min(100%,160px),1fr))] gap-2.5 px-4 pb-3.5">
+            <div className="grid grid-cols-1 gap-3 px-4 pb-4 sm:grid-cols-2 xl:grid-cols-3">
                 <div>
                     <Metric
                         value={branch.address || "No address provided"}
                         label="Address"
                         icon={<MapPin size={18} strokeWidth={2} aria-hidden="true" />}
-                        iconBackground="#F3EBFF"
-                        iconColor="#6C3AD6"
+                        iconBackground="#F1E9FF"
+                        iconColor="#6D3CC7"
                         wrapValue
                     />
                 </div>
@@ -2009,25 +1865,25 @@ function BranchCard({
                     value={branch.contact_number || "No phone number"}
                     label="Phone Number"
                     icon={<Phone size={18} strokeWidth={2} aria-hidden="true" />}
-                    iconBackground="#E8F1FF"
-                    iconColor="#2169CF"
+                    iconBackground="#EAF3FF"
+                    iconColor="#2E78DA"
                     wrapValue
                 />
                 <Metric
                     value={Number(branch.staff_count || 0)}
                     label="Total Staff"
                     icon={<UsersRound size={18} strokeWidth={2} aria-hidden="true" />}
-                    iconBackground="#EAF7F0"
-                    iconColor="#25865B"
+                    iconBackground="#EAF8EF"
+                    iconColor="#188348"
                 />
             </div>
 
-            <div className="mt-auto flex items-center justify-end border-t border-[#F1ECF4] px-3 py-1.5">
+            <div className="flex items-center justify-end border-t border-[#EEE7F2] px-4 py-3">
                 <div className="flex shrink-0 flex-wrap justify-end gap-2">
                     <button
                         type="button"
                         onClick={onEdit}
-                        className="inline-flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-[11px] font-semibold text-[#6D35D4] transition hover:bg-[#FAF7FE] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#7651BA]"
+                        className="inline-flex h-[30px] items-center gap-1 rounded-lg bg-[#F1EBFF] px-3 text-[10px] font-semibold text-[#5734B3] transition hover:bg-[#E7DCFF]"
                     >
                         <Pencil size={11} />
                         Edit
@@ -2036,7 +1892,7 @@ function BranchCard({
                     <button
                         type="button"
                         onClick={onDelete}
-                        className="inline-flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-[11px] font-semibold text-[#D52B2B] transition hover:bg-[#FFF0F0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D52B2B]"
+                        className="inline-flex h-[30px] items-center gap-1 rounded-lg bg-[#FFF0F0] px-3 text-[10px] font-semibold text-[#D83A45] transition hover:bg-[#FFE2E2]"
                     >
                         <Trash2 size={11} />
                         Delete
@@ -2064,10 +1920,15 @@ function Metric({
 }) {
     return (
         <div
-            className="flex h-full min-h-[68px] min-w-0 items-center gap-2.5 rounded-xl border border-[#EEE7F5] bg-[#FAF8FC] px-3 py-2.5"
+            className="flex h-full min-w-0 items-center gap-2.5 rounded-xl border bg-white px-3 py-3"
+            style={{
+                borderColor: "#EEE6F3",
+                boxShadow:
+                    "0 1px 4px rgba(45, 27, 78, 0.04)",
+            }}
         >
             <span
-                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px]"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl"
                 style={{
                     backgroundColor: iconBackground,
                     color: iconColor,
@@ -2078,13 +1939,13 @@ function Metric({
 
             <div className="min-w-0">
                 <p
-                    className={`${wrapValue ? "break-words text-[12px]" : "break-words text-[14px] tabular-nums"} font-bold leading-5 text-[#1A1220]`}
+                    className={`${wrapValue ? "break-words text-[13px]" : "truncate text-[15px]"} font-bold leading-5 text-[#1A1220]`}
                     title={String(value)}
                 >
                     {value}
                 </p>
 
-                <p className="mt-0.5 text-[11px] leading-4 text-[#806A8C]">
+                <p className="mt-0.5 text-[10px] font-medium leading-4 text-[#7A6A84] sm:text-[11px]">
                     {label}
                 </p>
             </div>
@@ -2104,9 +1965,9 @@ function EmptyBranches({
     onAction: () => void;
 }) {
     return (
-        <div className="rounded-xl border border-[#EEE7F5] bg-[#FAF8FC] px-5 py-10 text-center">
-            <h2 className="text-[15px] font-bold text-[#1A1220]">{title}</h2>
-            <p className="mx-auto mt-1 max-w-md text-[12px] text-[#86778F]">
+        <div className="rounded-[14px] border border-[#E6DDF0] bg-white px-5 py-14 text-center shadow-sm">
+            <h2 className="text-[16px] font-bold text-[#1A1220]">{title}</h2>
+            <p className="mx-auto mt-1 max-w-md text-sm text-[#7A6A84]">
                 {detail}
             </p>
 
@@ -2171,7 +2032,7 @@ function InactiveReasonFields({
                 <div className="mt-3">
                     <label
                         htmlFor={`${idPrefix}-other-inactive-reason`}
-                        className="mb-1.5 block text-[12px] font-medium text-[#25153D]"
+                        className="mb-2 block text-sm font-medium text-[#1A1220]"
                     >
                         Other reason
                     </label>
@@ -2212,7 +2073,7 @@ function TextInput({
 }) {
     return (
         <div>
-            <label className="mb-1.5 block text-[12px] font-medium text-[#25153D]">
+            <label className="mb-2 block text-sm font-medium text-[#1A1220]">
                 {label}
             </label>
 
@@ -2221,32 +2082,45 @@ function TextInput({
                 value={value}
                 placeholder={placeholder}
                 onChange={(event) => onChange(event.target.value)}
-                className="h-[38px] w-full rounded-xl border border-[#E6DDF0] bg-white px-3 text-[12px] text-[#1A1220] outline-none placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
+                className="h-[42px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-3 text-sm text-[#1A1220] outline-none placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
             />
         </div>
     );
 }
 
-function AccessToggle({
-                          label,
-                          checked,
-                          onChange,
-                      }: {
-    label: string;
-    checked: boolean;
-    onChange: (checked: boolean) => void;
-}) {
+// Branch Managers receive every Manager-role module automatically after
+// activation, so the Owner no longer assigns individual Manager permissions.
+function ManagerRoleAccessNotice() {
     return (
-        <label className="flex items-center justify-between gap-2 rounded-xl border border-[#EEE7F5] bg-[#FAF8FC] px-3 py-2.5 text-[12px] text-[#25153D]">
-            <span>{label}</span>
+        <div className="rounded-xl border border-[#EEE7F2] bg-[#FFFDF8] px-4 py-3 text-xs leading-5 text-[#5F4E75]">
+            Branch Managers automatically receive access to all Manager modules
+            for their assigned branch once they activate their account. Paid
+            features still follow your current subscription plan.
+        </div>
+    );
+}
+
+// A manager's login email is not edited from the branch form. Email changes
+// are made from Branch Managers, where the new address is verified first.
+function ReadOnlyManagerEmail({ value }: { value: string }) {
+    return (
+        <div>
+            <label className="mb-2 block text-sm font-medium text-[#1A1220]">
+                Manager email
+            </label>
 
             <input
-                type="checkbox"
-                checked={checked}
-                onChange={(event) => onChange(event.target.checked)}
-                className="h-4 w-4 accent-[#2B174C]"
+                type="email"
+                value={value}
+                readOnly
+                aria-readonly="true"
+                className="h-[42px] w-full cursor-not-allowed rounded-xl border border-[#E6DDF0] bg-[#F7F4F8] px-3 text-sm text-[#7A6A84] outline-none"
             />
-        </label>
+
+            <p className="mt-1.5 text-xs text-[#7A6A84]">
+                Change the login email from Branch Managers.
+            </p>
+        </div>
     );
 }
 

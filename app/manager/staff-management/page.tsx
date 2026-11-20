@@ -206,22 +206,12 @@ export default function ManagerStaffManagementPage() {
         const token = sessionStorage.getItem("token");
         const role = sessionStorage.getItem("role");
 
-        let savedPermissions: Record<string, boolean> = {};
-
-        try {
-            savedPermissions = JSON.parse(sessionStorage.getItem("permissions") || "{}");
-        } catch {
-            savedPermissions = {};
-        }
-
+        // Staff Management is part of the Branch Manager role. The backend
+        // still verifies the active Manager account and assigned branch on
+        // every staff request, so an older session snapshot with a disabled
+        // staff_management flag must not block an authorized Manager.
         if (!token || role !== "manager") {
             router.push("/");
-            return;
-        }
-
-        if (!savedPermissions.staff_management) {
-            alert("You do not have access to staff management.");
-            router.push("/dashboard");
             return;
         }
 

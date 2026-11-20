@@ -184,7 +184,7 @@ const careStatusColor: Record<CareKind, string> = {
 };
 const careButton = "inline-flex min-h-[30px] w-[100px] max-w-full items-center justify-center rounded-lg border border-[#E2D7FA] bg-[#F4EFFD] px-2 py-1 text-center text-[11px] font-medium leading-4 text-[#5B32C5] transition-colors hover:border-[#C6B2F1] hover:bg-[#EAE0FF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6F3FD3] enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50";
 // Issues reported while preparing a booking are saved as "Booking REF: notes".
-// The booking is shown in its own column, so show only the notes.
+// Show only the notes in maintenance confirmations; retain the booking link internally.
 function careIssueNotes(reason: string | null | undefined, bookingReference: string | null) {
     const text = String(reason || "").trim();
     const prefix = bookingReference ? `Booking ${bookingReference}: ` : "";
@@ -1174,7 +1174,6 @@ export default function StaffRentalInventory({branchName,section="inventory",que
                     {stockTask.kind==="issue"?"Report Equipment Issue":"Complete Routine Care"}
                 </h3><button type="button" disabled={rental.saving} onClick={()=>setStockTask(null)} aria-label="Close"><X size={19}/></button></div>
                 <p className="text-sm text-[#5A476A]">{stockTask.label}</p>
-                {stockTask.kind==="routine"&&<p className="text-xs text-[#5A476A]">Booking Reference: <strong className="break-all text-[#21132E]">{stockTask.bookingReference||"—"}</strong></p>}
                 {stockTask.kind==="issue"&&stockTask.bookingReference&&<p className="rounded-lg bg-[#F7F1FF] p-2 text-xs text-[#56378B]">Found while preparing booking <strong>{stockTask.bookingReference}</strong>. The issue is recorded against available equipment; the booking&apos;s allocated quantity is not silently changed.</p>}
                 <label className="block space-y-1 text-xs font-semibold text-[#5A476A]">Quantity (maximum {stockTask.max})
                     <input type="number" min={1} max={stockTask.max} step={1} value={stockQuantity} onChange={e=>setStockQuantity(e.target.value)}
@@ -1207,8 +1206,7 @@ export default function StaffRentalInventory({branchName,section="inventory",que
                     </div>
                     <button type="button" disabled={rental.saving} onClick={()=>setCareConfirm(null)} aria-label="Close"><X size={19}/></button>
                 </div>
-                <dl className="grid grid-cols-2 gap-3 text-xs">
-                    <div><dt className="text-[#86778F]">Booking Reference</dt><dd className="mt-1 break-all font-semibold text-[#21132E]">{careConfirm.bookingReference||"—"}</dd></div>
+                <dl className="text-xs">
                     <div><dt className="text-[#86778F]">Units</dt><dd className="mt-1 font-semibold text-[#21132E]">{careConfirm.units} unit(s)</dd></div>
                 </dl>
                 <div className="rounded-xl border border-[#E9E1EE] bg-[#FCFAFF] p-3">

@@ -14,9 +14,9 @@ export default function PackagesPage() {
 
     if (loading) {
         return (
-            <div className="flex min-h-screen bg-[#FDFAF4] font-sans text-[#1A1220]">
+            <div className="flex min-h-screen bg-[#FDFAF4] font-sans text-[#1A1220] lg:h-dvh lg:overflow-hidden lg:[&>aside]:min-h-0 lg:[&>aside]:max-h-dvh lg:[&>aside]:overflow-y-auto lg:[&>aside]:[scrollbar-width:none] lg:[&>aside::-webkit-scrollbar]:hidden">
                 <RoleSidebar />
-                <main className="min-w-0 flex-1 overflow-y-auto">
+                <main className="flex min-w-0 flex-1 flex-col overflow-y-auto lg:h-dvh lg:min-h-0">
                     <ModulePageSkeleton variant="packages" />
                 </main>
             </div>
@@ -27,9 +27,9 @@ export default function PackagesPage() {
 
     return (
         <RequirePermission permission="packages">
-            <div className="flex min-h-screen bg-[#FDFAF4] font-sans text-[#1A1220]">
+            <div className="flex min-h-screen bg-[#FDFAF4] font-sans text-[#1A1220] lg:h-dvh lg:overflow-hidden lg:[&>aside]:min-h-0 lg:[&>aside]:max-h-dvh lg:[&>aside]:overflow-y-auto lg:[&>aside]:[scrollbar-width:none] lg:[&>aside::-webkit-scrollbar]:hidden">
                 <RoleSidebar />
-                <main className="min-w-0 flex-1 overflow-y-auto">
+                <main className="flex min-w-0 flex-1 flex-col overflow-y-auto lg:h-dvh lg:min-h-0">
                     {role === "owner" ? (
                         <OwnerPackages />
                     ) : role === "manager" ? (

@@ -166,6 +166,7 @@ export default function AuthModal({
     const [confirmPassword, setConfirmPassword] = useState("");
     const [loading, setLoading] = useState(false);
     const [loginError, setLoginError] = useState("");
+    const [signupError, setSignupError] = useState("");
     const [loginLockNotice, setLoginLockNotice] = useState<{
         until: number; shownAt: number; lockoutCount: number; recoveryAvailable: boolean;
     } | null>(null);
@@ -287,10 +288,8 @@ export default function AuthModal({
         storefrontRef.current?.style.removeProperty("transform");
     };
 
-    const passwordChecks = {
-        length: Array.from(password).length >= 15,
-        bytes: new TextEncoder().encode(password).length <= 72,
-    };
+    const passwordChecks = getPasswordChecks(password);
+    const newPasswordChecks = getPasswordChecks(newPassword);
 
     const passwordValid = Object.values(passwordChecks).every(Boolean);
 
@@ -388,6 +387,7 @@ export default function AuthModal({
         }
 
         if (mode === "signup") {
+            setSignupError("");
             if (!ownerName || !storeName || !phone) {
                 alert("Please fill in all signup fields.");
                 return;
@@ -399,12 +399,12 @@ export default function AuthModal({
             }
 
             if (!passwordValid) {
-                alert("Create a password that meets all requirements.");
+                setSignupError(!passwordChecks.bytes ? "Your password is too long. Please use a shorter password." : "Create a password that meets all requirements.");
                 return;
             }
 
             if (password !== confirmPassword) {
-                alert("Passwords do not match.");
+                setSignupError("Passwords do not match.");
                 return;
             }
 
@@ -454,7 +454,7 @@ export default function AuthModal({
                 const data = await response.json();
 
                 if (!response.ok) {
-                    alert(data.error || "Failed to send OTP.");
+                    setSignupError(data.error || "Failed to send OTP.");
                     return;
                 }
 
@@ -467,7 +467,7 @@ export default function AuthModal({
                 setOtpBlocked(false);
                 setOtpDialogOpen(true);
             } catch {
-                alert("Something went wrong while sending OTP.");
+                setSignupError("Something went wrong while sending OTP.");
             } finally {
                 setLoading(false);
             }
@@ -569,8 +569,11 @@ export default function AuthModal({
     const submitPasswordReset = async (event: React.FormEvent) => {
         event.preventDefault();
         if (loading) return;
-        if (Array.from(newPassword).length < 15 || new TextEncoder().encode(newPassword).length > 72 || newPassword !== newConfirmPassword) {
-            setRecoveryError("Use at least 15 characters and at most 72 UTF-8 bytes. Passwords must match."); return;
+        if (!Object.values(newPasswordChecks).every(Boolean)) {
+            setRecoveryError(!newPasswordChecks.bytes ? "Your password is too long. Please use a shorter password." : "Create a password that meets all requirements."); return;
+        }
+        if (newPassword !== newConfirmPassword) {
+            setRecoveryError("Passwords do not match."); return;
         }
         setLoading(true); setRecoveryError("");
         try {
@@ -680,7 +683,7 @@ export default function AuthModal({
 
     const handleSwitchMode = () => {
         resetSignupFlow();
-        resetRecovery(); setLoginError(""); setLoginLockNotice(null);
+        resetRecovery(); setLoginError(""); setLoginLockNotice(null); setSignupError("");
         onSwitch(mode === "login" ? "signup" : "login");
     };
 
@@ -1155,7 +1158,7 @@ export default function AuthModal({
                                     <form className="space-y-5" onSubmit={submitPasswordReset}>
                                         <TextInput label="New password" placeholder="Enter new password" type="password" value={newPassword} onChange={setNewPassword} icon={<Lock className="h-5 w-5 text-[#7A6E88]" />} />
                                         <TextInput label="Confirm new password" placeholder="Confirm new password" type="password" value={newConfirmPassword} onChange={setNewConfirmPassword} icon={<Lock className="h-5 w-5 text-[#7A6E88]" />} />
-                                        <p className="text-sm text-[#7A6E88]">Use at least 15 characters and at most 72 UTF-8 bytes.</p>
+                                        <PasswordRequirements checks={newPasswordChecks} />
                                         <button disabled={loading} type="submit" className="w-full rounded-lg bg-[#2D1B4E] px-5 py-3 font-medium text-white disabled:opacity-60">{loading ? "Please wait..." : "Reset password"}</button>
                                     </form>
                                 )}
@@ -1234,7 +1237,7 @@ export default function AuthModal({
                                         placeholder="Create a password"
                                         type="password"
                                         value={password}
-                                        onChange={setPassword}
+                                        onChange={(value) => { setPassword(value); setSignupError(""); }}
                                         disabled={accountVerified}
                                         icon={
                                             <Lock className="h-5 w-5 text-[#7A6E88]" />
@@ -1247,45 +1250,17 @@ export default function AuthModal({
                                         placeholder="Repeat your password"
                                         type="password"
                                         value={confirmPassword}
-                                        onChange={setConfirmPassword}
+                                        onChange={(value) => { setConfirmPassword(value); setSignupError(""); }}
                                         disabled={accountVerified}
                                         icon={
                                             <Lock className="h-5 w-5 text-[#7A6E88]" />
                                         }
                                     />
 
-                                    <div className="rounded-xl border border-[#DED4E8] bg-[#F8F4FF] p-4 sm:p-5">
-                                        <p className="text-sm font-semibold text-[#2D1B4E]">
-                                            Password must include:
-                                        </p>
-
-                                        <div className="mt-3 grid gap-x-6 gap-y-2.5 text-sm sm:grid-cols-2">
-                                            {[
-                                                [passwordChecks.length, "At least 15 characters"],
-                                                [passwordChecks.bytes, "At most 72 UTF-8 bytes"],
-                                            ].map(([valid, requirement]) => (
-                                                <p
-                                                    key={String(requirement)}
-                                                    className={[
-                                                        "flex items-center gap-2",
-                                                        valid
-                                                            ? "font-medium text-[#168A4A]"
-                                                            : "text-[#7A6E88]",
-                                                    ].join(" ")}
-                                                >
-                                                    <CheckCircle2
-                                                        className={[
-                                                            "h-4 w-4 shrink-0",
-                                                            valid
-                                                                ? "text-[#1AA05A]"
-                                                                : "text-[#8E8497]",
-                                                        ].join(" ")}
-                                                    />
-                                                    <span>{String(requirement)}</span>
-                                                </p>
-                                            ))}
-                                        </div>
-                                    </div>
+                                    <PasswordRequirements checks={passwordChecks} />
+                                    {signupError && (
+                                        <p role="alert" className="text-sm text-red-600">{signupError}</p>
+                                    )}
                                 </div>
 
                                 <div className="flex items-start gap-2 text-sm">
@@ -2309,6 +2284,39 @@ function SignupOtpDialog({
                     @keyframes snbOtpPop { from { transform: scale(.9); opacity: .55; } to { transform: scale(1); opacity: 1; } }
                     @media (prefers-reduced-motion: reduce) { .snb-otp-filled, .snb-otp-confirmed, .snb-otp-confirmed-label, .snb-otp-success-icon { animation: none; } }
                 `}</style>
+            </div>
+        </div>
+    );
+}
+
+function getPasswordChecks(password: string) {
+    return {
+        length: Array.from(password).length >= 8,
+        uppercase: /[A-Z]/.test(password),
+        lowercase: /[a-z]/.test(password),
+        number: /[0-9]/.test(password),
+        special: /[\x21-\x2F\x3A-\x40\x5B-\x60\x7B-\x7E]/.test(password),
+        bytes: new TextEncoder().encode(password).length <= 72,
+    };
+}
+
+function PasswordRequirements({ checks }: { checks: ReturnType<typeof getPasswordChecks> }) {
+    return (
+        <div>
+            <p className="text-sm font-semibold text-[#2D1B4E]">Password must include:</p>
+            <div className="mt-2 space-y-1.5 text-sm">
+                {[
+                    [checks.length, "At least 8 characters"],
+                    [checks.uppercase, "At least one uppercase letter (A–Z)"],
+                    [checks.lowercase, "At least one lowercase letter (a–z)"],
+                    [checks.number, "At least one number (0–9)"],
+                    [checks.special, "At least one special character (!, @, #, etc.)"],
+                ].map(([valid, requirement]) => (
+                    <p key={String(requirement)} className={`flex items-center gap-2 ${valid ? "font-medium text-[#168A4A]" : "text-[#7A6E88]"}`}>
+                        <CheckCircle2 className={`h-4 w-4 shrink-0 ${valid ? "text-[#1AA05A]" : "text-[#8E8497]"}`} />
+                        <span>{String(requirement)}</span>
+                    </p>
+                ))}
             </div>
         </div>
     );

@@ -196,7 +196,7 @@ export default function ManagerPackages() {
 
     return (
         <>
-            <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur">
+            <header className="sticky top-0 z-20 shrink-0 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 font-sans backdrop-blur">
                 <div className="flex min-h-[72px] flex-wrap items-center justify-between gap-4 px-6 py-3">
                     <div className="flex min-w-0 items-center gap-3">
                         <h1 className="text-[25px] font-bold text-[#1A1220]">
@@ -236,9 +236,9 @@ export default function ManagerPackages() {
                 </div>
             </header>
 
-            <section className="px-6 py-4 font-sans">
-                <div className="space-y-3">
-                    <div className="grid gap-3 md:grid-cols-3">
+            <section className="flex flex-1 flex-col px-6 py-4 font-sans lg:min-h-[490px]">
+                <div className="flex flex-1 flex-col gap-3 lg:min-h-0">
+                    <div className="grid shrink-0 gap-3 md:grid-cols-3">
                         <PackageSummaryCard title="Total Packages" value={totalPackages}
                                             detail="Packages in your assigned branch"
                                             icon={<Boxes size={20} />} iconClassName="bg-[#F0E9FF] text-[#5A35A5]" />
@@ -250,8 +250,8 @@ export default function ManagerPackages() {
                                             icon={<CircleOff size={20} />} iconClassName="bg-[#FFF1E5] text-[#C9781B]" />
                     </div>
 
-                    <Card className="min-h-[420px]">
-                        <div className="mb-3 flex items-center justify-between gap-3">
+                    <Card className="flex min-h-[280px] flex-1 flex-col">
+                        <div className="mb-3 flex shrink-0 items-center justify-between gap-3">
                             <h2 className="text-[16px] font-bold text-[#1A1220]">Branch Package List</h2>
                             <button
                                 type="button"
@@ -269,7 +269,7 @@ export default function ManagerPackages() {
                             </button>
                         </div>
 
-                        <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_190px_160px_170px]">
+                        <div className="relative z-10 mb-5 grid shrink-0 gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_190px_160px_170px]">
                             <div className="relative min-w-0">
                                 <Search size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]" />
                                 <input
@@ -312,37 +312,39 @@ export default function ManagerPackages() {
                             </div>
                         )}
 
-                        {loading && packages.length === 0 ? (
-                            <ModuleSkeleton variant="packages" />
-                        ) : filteredPackages.length === 0 ? (
-                            <EmptyState
-                                title={search || selectedCategory !== "All" || selectedStatus !== "All"
-                                    ? "No matching packages."
-                                    : "No packages yet."}
-                                detail={search || selectedCategory !== "All" || selectedStatus !== "All"
-                                    ? "Try different search, category, or status filters."
-                                    : "Create your first package using inventory items and discounts."}
-                            />
-                        ) : (
-                            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                                {filteredPackages.map((pkg, index) => (
-                                    <PackageCard
-                                        key={pkg.id}
-                                        pkg={{
-                                            ...pkg,
-                                            name: formatText(pkg.name),
-                                            description: formatText(
-                                                pkg.description || "No description"
-                                            ),
-                                        }}
-                                        canManage
-                                        branchName={branchName}
-                                        onEdit={() => form.openEdit(pkg)}
-                                        onDelete={() => handleDelete(pkg.id)}
-                                    />
-                                ))}
-                            </div>
-                        )}
+                        <div className="min-h-0 flex-1 lg:overflow-y-auto lg:overscroll-contain lg:p-1">
+                            {loading && packages.length === 0 ? (
+                                <ModuleSkeleton variant="packages" />
+                            ) : filteredPackages.length === 0 ? (
+                                <EmptyState
+                                    title={search || selectedCategory !== "All" || selectedStatus !== "All"
+                                        ? "No matching packages."
+                                        : "No packages yet."}
+                                    detail={search || selectedCategory !== "All" || selectedStatus !== "All"
+                                        ? "Try different search, category, or status filters."
+                                        : "Create your first package using inventory items and discounts."}
+                                />
+                            ) : (
+                                <div className="grid grid-cols-1 content-start gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                                    {filteredPackages.map((pkg, index) => (
+                                        <PackageCard
+                                            key={pkg.id}
+                                            pkg={{
+                                                ...pkg,
+                                                name: formatText(pkg.name),
+                                                description: formatText(
+                                                    pkg.description || "No description"
+                                                ),
+                                            }}
+                                            canManage
+                                            branchName={branchName}
+                                            onEdit={() => form.openEdit(pkg)}
+                                            onDelete={() => handleDelete(pkg.id)}
+                                        />
+                                    ))}
+                                </div>
+                            )}
+                        </div>
                     </Card>
                 </div>
             </section>
@@ -358,9 +360,6 @@ export default function ManagerPackages() {
                 setDescription={form.setDescription}
                 category={form.category}
                 setCategory={form.setCategory}
-                coverImage={form.coverImage}
-                onCoverImageChange={form.handleCoverImageChange}
-                onRemoveCoverImage={form.removeCoverImage}
                 duration={form.duration}
                 setDuration={form.setDuration}
                 status={form.status}

@@ -53,7 +53,6 @@ type PackageItem = {
     down_payment_amount?: number;
     duration: string;
     status: "Active" | "Inactive";
-    cover_image?: string;
     inclusions: PackageInclusion[];
 };
 
@@ -238,36 +237,6 @@ function formatRentalCalendarDate(isoDate: string): string {
     }).format(new Date(Date.UTC(year, month - 1, day)));
 }
 
-
-function getPackageCoverImage(
-    pkg: Pick<PackageItem, "name" | "description" | "category" | "cover_image">
-) {
-    if (pkg.cover_image) {
-        return pkg.cover_image;
-    }
-
-    const source = `${pkg.category || ""} ${pkg.name} ${pkg.description || ""}`.toLowerCase();
-
-    if (source.includes("wedding")) {
-        return "https://images.unsplash.com/photo-1519167758481-83f550bb49b3?auto=format&fit=crop&w=1200&q=88";
-    }
-    if (source.includes("graduation")) {
-        return "https://images.unsplash.com/photo-1523580494863-6f3031224c94?auto=format&fit=crop&w=1200&q=88";
-    }
-    if (source.includes("baby") || source.includes("christening") || source.includes("baptism")) {
-        return "https://images.unsplash.com/photo-1519710164239-da123dc03ef4?auto=format&fit=crop&w=1200&q=88";
-    }
-    if (source.includes("corporate")) {
-        return "https://images.unsplash.com/photo-1492684223066-81342ee5ff30?auto=format&fit=crop&w=1200&q=88";
-    }
-    if (source.includes("birthday") || source.includes("debut") || source.includes("kids")) {
-        return "https://images.unsplash.com/photo-1530103862676-de8c9debad1d?auto=format&fit=crop&w=1200&q=88";
-    }
-    if (source.includes("anniversary")) {
-        return "https://images.unsplash.com/photo-1519741497674-611481863552?auto=format&fit=crop&w=1200&q=88";
-    }
-    return "https://images.unsplash.com/photo-1507504031003-b417219a0fde?auto=format&fit=crop&w=1200&q=88";
-}
 
 function parseVariantValues(
     value: ProductVariant["variantValues"] | ProductVariant["variant_values"]
@@ -1005,7 +974,7 @@ function PackageCardsSkeleton({ count = 6 }: { count?: number }) {
         <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3" role="status" aria-label="Loading packages">
             {Array.from({ length: count }, (_, index) => (
                 <div key={index} className="animate-pulse overflow-hidden rounded-[20px] border border-[#E6DDF0] bg-white">
-                    <div className="h-44 bg-[#EEE8F3]" />
+                    <div className="h-12 bg-[#EEE8F3]" />
                     <div className="space-y-3 p-4 sm:p-5">
                         <div className="h-5 w-3/4 rounded bg-[#EEE8F3]" />
                         <div className="h-4 w-1/2 rounded bg-[#F1EBF5]" />
@@ -1124,7 +1093,6 @@ export default function CustomerBookingPage() {
 
     const [activeCategory, setActiveCategory] = useState("All");
     const [detailsPackage, setDetailsPackage] = useState<PackageItem | null>(null);
-    const [showExpandedPackageImage, setShowExpandedPackageImage] = useState(false);
 
     const [showStatusDrawer, setShowStatusDrawer] = useState(() => !!searchParams.get("ref"));
 
@@ -2089,10 +2057,6 @@ export default function CustomerBookingPage() {
         alert("Booking reference copied.");
     }
 
-    const detailsCoverImage = detailsPackage
-        ? getPackageCoverImage(detailsPackage)
-        : "";
-
     const detailsInclusionCount = detailsPackage?.inclusions?.length || 0;
     const detailsConsumableInclusions = (detailsPackage?.inclusions || []).filter(
         (item) => item.itemType !== "rental"
@@ -2470,23 +2434,9 @@ export default function CustomerBookingPage() {
                                                 chosen ? "border-[#6B43A1] ring-2 ring-[#E9DDF7]" : "border-[#E6DDF0] hover:border-[#CBB6DF]"
                                             }`}
                                         >
-                                            <div className="relative h-44 overflow-hidden bg-[#F5EEF6]">
-                                                {/* eslint-disable-next-line @next/next/no-img-element */}
-                                                <img
-                                                    src={getPackageCoverImage(pkg)}
-                                                    alt={`${pkg.name} package`}
-                                                    loading="lazy"
-                                                    decoding="async"
-                                                    className="h-full w-full object-cover transition duration-500 group-hover:scale-105"
-                                                />
-                                                <span className="absolute left-3 top-3 max-w-[calc(100%-1.5rem)] truncate rounded-full border border-white/70 bg-white/95 px-3 py-1.5 text-[11px] font-bold text-[#4E2C66] shadow-sm">
-                                                {pkg.category || "Event"}
-                                            </span>
-                                                {chosen && (
-                                                    <span className="absolute bottom-3 right-3 inline-flex items-center gap-1 rounded-full bg-[#2B174C] px-3 py-1.5 text-[11px] font-semibold text-white shadow-sm">
-                                                    <Check size={12} /> Selected
-                                                </span>
-                                                )}
+                                            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E6DDF0] bg-[#F7F1FF] px-4 py-3">
+                                                <span className="rounded-full bg-white px-3 py-1 text-[11px] font-bold text-[#4E2C66]">{pkg.category || "Event"}</span>
+                                                {chosen && <span className="inline-flex items-center gap-1 rounded-full bg-[#2B174C] px-3 py-1 text-[11px] font-semibold text-white"><Check size={12} /> Selected</span>}
                                             </div>
 
                                             <div className="flex flex-1 flex-col p-4 sm:p-5">
@@ -3117,54 +3067,15 @@ export default function CustomerBookingPage() {
                     aria-label={`${detailsPackage.name} package details`}
                     onClick={() => {
                         setDetailsPackage(null);
-                        setShowExpandedPackageImage(false);
                     }}
                 >
                     <div
                         className="flex max-h-[92vh] w-full max-w-[1000px] flex-col overflow-hidden rounded-[22px] border border-[#E6DDF0] bg-white shadow-[0_24px_80px_rgba(20,10,35,0.28)]"
                         onClick={(event) => event.stopPropagation()}
                     >
-                        <div className="relative shrink-0 overflow-hidden bg-[#2D1B4E]">
-                            <button
-                                type="button"
-                                onClick={() => setShowExpandedPackageImage(true)}
-                                className="group/image block h-[210px] sm:h-[230px] w-full cursor-zoom-in overflow-hidden text-left"
-                                aria-label="Expand package cover image"
-                                title="Click to enlarge image"
-                            >
-                                {/* eslint-disable-next-line @next/next/no-img-element */}
-                                <img
-                                    src={detailsCoverImage}
-                                    alt={`${detailsPackage.name} package cover`}
-                                    className="h-full w-full object-cover transition duration-300 group-hover/image:scale-[1.02]"
-                                />
-                                <div className="absolute inset-0 bg-gradient-to-t from-[#160C27]/85 via-[#160C27]/15 to-transparent" />
-
-                                <span className="absolute right-5 top-5 rounded-full bg-black/45 px-3 py-1.5 text-[11px] font-semibold text-white backdrop-blur-sm transition group-hover/image:bg-black/60">
-                                    Click image to expand
-                                </span>
-                            </button>
-
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    setDetailsPackage(null);
-                                    setShowExpandedPackageImage(false);
-                                }}
-                                className="absolute left-5 top-5 flex h-10 w-10 items-center justify-center rounded-full bg-white/95 text-[#2B174C] shadow-md transition hover:scale-105 hover:bg-white"
-                                aria-label="Close package details"
-                            >
-                                <X size={18} />
-                            </button>
-
-                            <div className="pointer-events-none absolute bottom-0 left-0 right-0 p-6">
-                                <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-white/75">
-                                    Package details
-                                </p>
-                                <h2 className="mt-1 max-w-[820px] text-[28px] font-bold leading-tight text-white">
-                                    {detailsPackage.name}
-                                </h2>
-                            </div>
+                        <div className="flex shrink-0 items-center justify-between gap-4 bg-[#2D1B4E] px-6 py-5 text-white">
+                            <div className="min-w-0"><p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-white/75">Package details</p><h2 className="mt-1 break-words text-[24px] font-bold leading-tight">{detailsPackage.name}</h2></div>
+                            <button type="button" onClick={() => setDetailsPackage(null)} aria-label="Close package details" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white text-[#2B174C]"><X size={18} /></button>
                         </div>
 
                         <div className="min-h-0 flex-1 overflow-y-auto">
@@ -3326,7 +3237,6 @@ export default function CustomerBookingPage() {
                                     onClick={() => {
                                         handleSelectPackage(detailsPackage);
                                         setDetailsPackage(null);
-                                        setShowExpandedPackageImage(false);
                                     }}
                                     className="rounded-xl bg-[#2B174C] px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
                                 >
@@ -3362,36 +3272,6 @@ export default function CustomerBookingPage() {
                 </div>
             )}
 
-            {detailsPackage && showExpandedPackageImage && (
-                <div
-                    className="fixed inset-0 z-[120] flex items-center justify-center overflow-y-auto bg-black/85 p-2 backdrop-blur-sm sm:p-4"
-                    role="dialog"
-                    aria-modal="true"
-                    aria-label={`${detailsPackage.name} enlarged cover image`}
-                    onClick={() => setShowExpandedPackageImage(false)}
-                >
-                    <div
-                        className="relative flex max-h-[94vh] max-w-[94vw] items-center justify-center"
-                        onClick={(event) => event.stopPropagation()}
-                    >
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img
-                            src={detailsCoverImage}
-                            alt={`${detailsPackage.name} enlarged package cover`}
-                            className="max-h-[90vh] max-w-[90vw] rounded-[18px] object-contain shadow-2xl"
-                        />
-
-                        <button
-                            type="button"
-                            onClick={() => setShowExpandedPackageImage(false)}
-                            className="absolute right-3 top-3 flex h-10 w-10 items-center justify-center rounded-full bg-white/95 text-[#2B174C] shadow-md transition hover:scale-105 hover:bg-white"
-                            aria-label="Close enlarged image"
-                        >
-                            <X size={18} />
-                        </button>
-                    </div>
-                </div>
-            )}
         </div>
     );
 }

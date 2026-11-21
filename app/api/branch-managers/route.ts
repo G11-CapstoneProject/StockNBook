@@ -28,6 +28,12 @@ async function callLocalAuth(
     };
 
     const response = await handler(event);
+    if (!response) {
+        return NextResponse.json(
+            { error: "Authentication server did not return a response." },
+            { status: 502 },
+        );
+    }
 
     let data: unknown = {};
 
@@ -104,10 +110,19 @@ async function verifyOwner(req: NextRequest, db: Pool): Promise<number> {
     const email = String(claims.email || "").trim();
     if (!storeId || !email) throw new ManagerAccessError(403, "Invalid owner identity.");
     // The owner is the store's users row with role 'owner'.
+    // Check the exact active Owner and current auth_version. A password reset
+    // invalidates previously issued tokens even on this direct Next.js route.
+    const ownerId = validId(claims.user_id);
+    const version = claims.auth_version;
+    if (!ownerId || !Number.isSafeInteger(version) || Number(version) < 0) {
+        throw new ManagerAccessError(401, "Your session expired. Please sign in again.");
+    }
     const [stores] = await db.query<RowDataPacket[]>(
-        "SELECT store_id AS id FROM users WHERE store_id=? AND role='owner' AND LOWER(email)=LOWER(?) LIMIT 1", [storeId, email]
+        `SELECT id FROM users WHERE id=? AND store_id=? AND role='owner'
+                                AND LOWER(email)=LOWER(?) AND LOWER(status)='active' AND auth_version=? LIMIT 1`,
+        [ownerId, storeId, email, version]
     );
-    if (!stores.length) throw new ManagerAccessError(403, "Owner account could not be verified.");
+    if (!stores.length) throw new ManagerAccessError(401, "Your session expired. Please sign in again.");
     return storeId;
 }
 function handleOwnerError(error: unknown) {
@@ -132,7 +147,7 @@ async function setManagerAccess(req: NextRequest, body: Record<string, unknown>,
         if (!managerId) throw new ManagerAccessError(400, "A valid manager ID is required.");
         const activate = action === "reactivate_manager";
         const [result] = await db.execute<ResultSetHeader>(`
-                    UPDATE users SET status=?
+                    UPDATE users SET status=?, auth_version=auth_version+1
                     WHERE id=? AND store_id=? AND role='manager' AND status=?`,
             [activate ? "active" : "inactive", managerId, storeId,
                 activate ? "inactive" : "active"]);

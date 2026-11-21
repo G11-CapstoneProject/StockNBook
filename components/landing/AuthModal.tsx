@@ -29,7 +29,7 @@ import {
 } from "lucide-react";
 // Phone formatting stays inside this existing page/component; no helper file is required.
 const MOBILE_PHONE_PLACEHOLDER = "0912 345 6789";
-const MOBILE_PHONE_HELP = "Enter an 11-digit Philippine mobile number starting with 09.";
+const MOBILE_PHONE_HELP = "Enter your personal 11-digit Philippine mobile number starting with 09.";
 
 function normalizeMobileNumber(value: string): string {
     const digits = String(value ?? "").replace(/\D/g, "");
@@ -167,6 +167,10 @@ export default function AuthModal({
     const [loading, setLoading] = useState(false);
     const [loginError, setLoginError] = useState("");
     const [signupError, setSignupError] = useState("");
+    const [signupFieldErrors, setSignupFieldErrors] = useState<{
+        store_name?: string; email?: string; phone?: string; confirm_password?: string;
+    }>({});
+    const [branchSetupError, setBranchSetupError] = useState("");
     const [loginLockNotice, setLoginLockNotice] = useState<{
         until: number; shownAt: number; lockoutCount: number; recoveryAvailable: boolean;
     } | null>(null);
@@ -391,6 +395,7 @@ export default function AuthModal({
 
         if (mode === "signup") {
             setSignupError("");
+            setSignupFieldErrors({});
             if (!ownerName || !storeName || !phone) {
                 alert("Please fill in all signup fields.");
                 return;
@@ -406,9 +411,10 @@ export default function AuthModal({
                 return;
             }
 
+            // Keep the mismatch visible, but let the backend also check whether
+            // email and personal mobile are already registered in the same request.
             if (password !== confirmPassword) {
-                setSignupError("Passwords do not match.");
-                return;
+                setSignupFieldErrors({ confirm_password: "Passwords do not match. Try again." });
             }
 
             if (!hasViewedTerms || !hasViewedPrivacy) {
@@ -452,16 +458,27 @@ export default function AuthModal({
                     body: JSON.stringify({
                         action: "send_signup_otp",
                         ...signupBody,
+                        confirm_password: confirmPassword,
                     }),
                 });
 
                 const data = await response.json();
 
                 if (!response.ok) {
-                    setSignupError(data.error || "Failed to send OTP.");
+                    const errors = data.field_errors && typeof data.field_errors === "object"
+                        ? data.field_errors : {};
+                    setSignupFieldErrors({
+                        store_name: typeof errors.store_name === "string" ? errors.store_name : undefined,
+                        email: typeof errors.email === "string" ? errors.email : undefined,
+                        phone: typeof errors.phone === "string" ? errors.phone : undefined,
+                        confirm_password: typeof errors.confirm_password === "string" ? errors.confirm_password :
+                            password !== confirmPassword ? "Passwords do not match. Try again." : undefined,
+                    });
+                    setSignupError(Object.keys(errors).length ? "" : data.error || "Failed to send OTP.");
                     return;
                 }
 
+                setSignupFieldErrors({});
                 setPendingSignup(signupBody);
                 setOtpVerificationSuccess(false);
                 setOtpVerificationError("");
@@ -567,9 +584,7 @@ export default function AuthModal({
             if (!response.ok || data.otp_sent !== true) {
                 const retryAfter = Number(data.retry_after_seconds);
                 if (Number.isFinite(retryAfter) && retryAfter > 0) setOtpResendTimer(Math.ceil(retryAfter));
-                if (data.code === "RECOVERY_ACCOUNT_NOT_FOUND") {
-                    setRecoveryStage("email"); setOtpDialogOpen(false); setOtp(""); setOtpBlocked(false); setOtpTimer(0);
-                } else if (data.code === "RECOVERY_OTP_DELIVERY_FAILED" && recoveryStage === "otp") {
+                if (data.code === "RECOVERY_OTP_DELIVERY_FAILED" && recoveryStage === "otp") {
                     // A failed replacement has already invalidated the previous code.
                     setOtp(""); setOtpBlocked(true); setOtpTimer(0);
                 }
@@ -589,7 +604,7 @@ export default function AuthModal({
             setRecoveryError(!newPasswordChecks.bytes ? "Your password is too long. Please use a shorter password." : "Create a password that meets all requirements."); return;
         }
         if (newPassword !== newConfirmPassword) {
-            setRecoveryError("Passwords do not match."); return;
+            setRecoveryError("Passwords do not match. Try again."); return;
         }
         setLoading(true); setRecoveryError("");
         try {
@@ -624,6 +639,20 @@ export default function AuthModal({
             });
             const data = await response.json();
             if (!response.ok || !(recoveryStage === "otp" ? data.reset_token : data.token)) {
+                if (recoveryStage !== "otp" &&
+                    (data.code === "SIGNUP_FIELD_CONFLICT" || data.code === "BUSINESS_NAME_ALREADY_REGISTERED")) {
+                    const errors = data.field_errors && typeof data.field_errors === "object" ? data.field_errors : {};
+                    setSignupFieldErrors({
+                        store_name: typeof errors.store_name === "string" ? errors.store_name :
+                            data.code === "BUSINESS_NAME_ALREADY_REGISTERED" ? data.error : undefined,
+                        email: typeof errors.email === "string" ? errors.email : undefined,
+                        phone: typeof errors.phone === "string" ? errors.phone : undefined,
+                    });
+                    setOtpDialogOpen(false);
+                    setOtp("");
+                    setPendingSignup(null);
+                    return;
+                }
                 setOtpVerificationError(data.error || "OTP verification failed. Try again.");
                 if (["OTP_ATTEMPTS_EXHAUSTED", "OTP_INVALID"].includes(data.code)) setOtpBlocked(true);
                 setOtp("");
@@ -708,12 +737,13 @@ export default function AuthModal({
         field: keyof Omit<BranchSetup, "permissions" | "manager_mode">,
         value: string
     ) => {
+        setBranchSetupError("");
         setBranches((current) =>
             current.map((branch, branchIndex) =>
                 branchIndex === index
                     ? {
                         ...branch,
-                        [field]: value,
+                        [field]: field === "contact_number" ? formatMobileInput(value) : value,
                     }
                     : branch
             )
@@ -721,6 +751,7 @@ export default function AuthModal({
     };
 
     const continueToManagers = () => {
+        setBranchSetupError("");
         const incompleteBranchIndex = branches.findIndex(
             (branch) =>
                 !branch.branch_name.trim() ||
@@ -737,6 +768,30 @@ export default function AuthModal({
             return;
         }
 
+        const invalidBranchIndex = branches.findIndex(
+            (branch) => !isValidMobileNumber(branch.contact_number)
+        );
+        if (invalidBranchIndex >= 0) {
+            alert(`Enter a valid 11-digit Philippine mobile number for Branch ${invalidBranchIndex + 1}.`);
+            return;
+        }
+
+        const seenNames = new Set<string>();
+        const seenContacts = new Set<string>();
+        for (const branch of branches) {
+            const nameKey = branch.branch_name.trim().replace(/\s+/g, " ").toLowerCase();
+            const phoneKey = normalizeMobileNumber(branch.contact_number);
+            if (seenNames.has(nameKey)) {
+                setBranchSetupError("Each branch in your business must have a different name.");
+                return;
+            }
+            if (seenContacts.has(phoneKey)) {
+                setBranchSetupError("Each branch in your business must have a different contact number.");
+                return;
+            }
+            seenNames.add(nameKey);
+            seenContacts.add(phoneKey);
+        }
         setSignupStep(3);
     };
 
@@ -769,7 +824,7 @@ export default function AuthModal({
 
         const payloadBranches = branches.map((branch) => ({
             branch_name: branch.branch_name.trim(),
-            contact_number: branch.contact_number.trim(),
+            contact_number: normalizeMobileNumber(branch.contact_number),
             address: branch.address.trim(),
             manager_name: branch.manager_name.trim(),
             manager_email: branch.manager_email.trim(),
@@ -892,7 +947,7 @@ export default function AuthModal({
 
     const headerDescription =
         mode === "login"
-            ? recoveryStage === "none" ? "Enter your credentials to access your dashboard." : recoveryStage === "password" ? "Choose a new password to secure your account." : recoveryStage === "success" ? "You can now log in using your new password." : "Enter your registered email to recover your account."
+            ? recoveryStage === "none" ? "Enter your credentials to access your dashboard." : recoveryStage === "password" ? "Choose a new password to secure your account." : recoveryStage === "success" ? "You can now log in using your new password." : "Enter your email address to request a password reset code."
             : setupComplete
                 ? "Your account, first branch, and manager access are ready."
                 : signupStep === 1
@@ -1165,20 +1220,20 @@ export default function AuthModal({
                                 {(recoveryStage === "email" || recoveryStage === "otp") && (
                                     <form className="space-y-5" onSubmit={requestRecovery}>
                                         <TextInput label="Email address" placeholder="you@yourbusiness.com" value={recoveryEmail} disabled={loading || otpLoading} onChange={value => { setRecoveryEmail(value); setRecoveryError(""); setOtpVerificationError(""); setOtpResendTimer(0); if (recoveryStage === "otp") { setRecoveryStage("email"); setOtpDialogOpen(false); setOtp(""); setOtpBlocked(false); setOtpTimer(0); } }} icon={<Mail className="h-5 w-5 text-[#7A6E88]" />} errorMessage={recoveryError && <p role="alert" className="mt-1.5 text-sm text-red-600">{recoveryError}</p>} />
-                                        <p className="text-sm text-[#7A6E88]">Enter your registered email address to receive a verification code. Platform Administrators should contact their administrator for recovery.</p>
+                                        <p className="text-sm text-[#7A6E88]">If an account is registered with this email, a verification code will be sent. Platform Administrators should contact their administrator for recovery.</p>
                                         <button type="submit" disabled={loading || otpLoading || otpResendTimer > 0} className="w-full rounded-lg bg-[#2D1B4E] px-5 py-3 font-medium text-white disabled:opacity-60">{loading ? "Please wait..." : otpResendTimer > 0 ? `Try again in ${otpResendTimer}s` : "Send verification code"}</button>
                                         {recoveryStage === "otp" && <button type="button" onClick={() => setOtpDialogOpen(true)} className="w-full text-sm font-medium text-[#2D1B4E]">Enter verification code</button>}
                                     </form>
                                 )}
                                 {recoveryStage === "password" && (
                                     <form className="space-y-5" onSubmit={submitPasswordReset}>
-                                        <TextInput label="New password" placeholder="Enter new password" type="password" value={newPassword} onChange={setNewPassword} icon={<Lock className="h-5 w-5 text-[#7A6E88]" />} />
-                                        <TextInput label="Confirm new password" placeholder="Confirm new password" type="password" value={newConfirmPassword} onChange={setNewConfirmPassword} icon={<Lock className="h-5 w-5 text-[#7A6E88]" />} />
+                                        <TextInput label="New password" placeholder="Enter new password" type="password" value={newPassword} onChange={value => { setNewPassword(value); if (recoveryError === "Passwords do not match. Try again.") setRecoveryError(""); }} icon={<Lock className="h-5 w-5 text-[#7A6E88]" />} />
+                                        <TextInput label="Confirm new password" placeholder="Confirm new password" type="password" value={newConfirmPassword} onChange={value => { setNewConfirmPassword(value); if (recoveryError === "Passwords do not match. Try again.") setRecoveryError(""); }} errorMessage={recoveryError === "Passwords do not match. Try again." ? <p role="alert" className="mt-1.5 text-sm text-red-600">{recoveryError}</p> : undefined} icon={<Lock className="h-5 w-5 text-[#7A6E88]" />} />
                                         <PasswordRequirements checks={newPasswordChecks} />
                                         <button disabled={loading} type="submit" className="w-full rounded-lg bg-[#2D1B4E] px-5 py-3 font-medium text-white disabled:opacity-60">{loading ? "Please wait..." : "Reset password"}</button>
                                     </form>
                                 )}
-                                {recoveryStage === "password" && recoveryError && <p role="alert" className="text-sm text-red-600">{recoveryError}</p>}
+                                {recoveryStage === "password" && recoveryError && recoveryError !== "Passwords do not match. Try again." && <p role="alert" className="text-sm text-red-600">{recoveryError}</p>}
                                 {recoveryStage === "success" && <div role="status" className="flex items-center gap-3 rounded-xl bg-green-50 px-4 py-3 text-green-800"><CheckCircle2 className="h-6 w-6" /> Your password has been updated.</div>}
                                 <button type="button" disabled={loading || otpLoading} onClick={resetRecovery} className="w-full rounded-lg border border-[#DED3EE] px-5 py-3 font-medium text-[#2D1B4E] disabled:opacity-60">Back to login</button>
                             </div>
@@ -1215,7 +1270,8 @@ export default function AuthModal({
                                     label="Business name"
                                     placeholder="Santos Events & Party Supply"
                                     value={storeName}
-                                    onChange={setStoreName}
+                                    onChange={(value) => { setStoreName(value); setSignupFieldErrors(v => ({ ...v, store_name: undefined })); }}
+                                    errorMessage={signupFieldErrors.store_name ? <p role="alert" className="mt-1.5 text-sm text-red-600">{signupFieldErrors.store_name}</p> : undefined}
                                     disabled={accountVerified}
                                     icon={
                                         <Package className="h-5 w-5 text-[#7A6E88]" />
@@ -1223,12 +1279,13 @@ export default function AuthModal({
                                 />
 
                                 <TextInput
-                                    label="Phone number"
+                                    label="Your mobile number"
                                     placeholder={MOBILE_PHONE_PLACEHOLDER}
                                     type="tel"
                                     helperText={MOBILE_PHONE_HELP}
                                     value={phone}
-                                    onChange={(value) => setPhone(formatMobileInput(value))}
+                                    onChange={(value) => { setPhone(formatMobileInput(value)); setSignupFieldErrors(v => ({ ...v, phone: undefined })); }}
+                                    errorMessage={signupFieldErrors.phone ? <p role="alert" className="mt-1.5 text-sm text-red-600">{signupFieldErrors.phone}</p> : undefined}
                                     disabled={accountVerified}
                                     icon={
                                         <Phone className="h-5 w-5 text-[#7A6E88]" />
@@ -1239,7 +1296,8 @@ export default function AuthModal({
                                     label="Email address"
                                     placeholder="you@yourbusiness.com"
                                     value={email}
-                                    onChange={setEmail}
+                                    onChange={(value) => { setEmail(value); setSignupFieldErrors(v => ({ ...v, email: undefined })); }}
+                                    errorMessage={signupFieldErrors.email ? <p role="alert" className="mt-1.5 text-sm text-red-600">{signupFieldErrors.email}</p> : undefined}
                                     disabled={accountVerified}
                                     icon={
                                         <Mail className="h-5 w-5 text-[#7A6E88]" />
@@ -1253,7 +1311,7 @@ export default function AuthModal({
                                         placeholder="Create a password"
                                         type="password"
                                         value={password}
-                                        onChange={(value) => { setPassword(value); setSignupError(""); }}
+                                        onChange={(value) => { setPassword(value); setSignupError(""); setSignupFieldErrors(v => ({ ...v, confirm_password: undefined })); }}
                                         disabled={accountVerified}
                                         icon={
                                             <Lock className="h-5 w-5 text-[#7A6E88]" />
@@ -1266,7 +1324,8 @@ export default function AuthModal({
                                         placeholder="Repeat your password"
                                         type="password"
                                         value={confirmPassword}
-                                        onChange={(value) => { setConfirmPassword(value); setSignupError(""); }}
+                                        onChange={(value) => { setConfirmPassword(value); setSignupError(""); setSignupFieldErrors(v => ({ ...v, confirm_password: undefined })); }}
+                                        errorMessage={signupFieldErrors.confirm_password ? <p role="alert" className="mt-1.5 text-sm text-red-600">{signupFieldErrors.confirm_password}</p> : undefined}
                                         disabled={accountVerified}
                                         icon={
                                             <Lock className="h-5 w-5 text-[#7A6E88]" />
@@ -1394,7 +1453,7 @@ export default function AuthModal({
                                                 />
 
                                                 <TextInput
-                                                    label="Contact number"
+                                                    label="Branch contact number"
                                                     placeholder={MOBILE_PHONE_PLACEHOLDER}
                                                     type="tel"
                                                     value={branch.contact_number}
@@ -1429,6 +1488,7 @@ export default function AuthModal({
                                         </div>
                                     ))}
                                 </div>
+                                {branchSetupError && <p role="alert" className="mt-2 text-sm text-red-600">{branchSetupError}</p>}
 
                                 <div className="mt-4 flex items-start gap-2 rounded-xl border border-[#EEDFC0] bg-[#FFFAEF] px-4 py-3 text-xs leading-5 text-[#766342]">
                                     <Info className="mt-0.5 h-4 w-4 shrink-0 text-[#C9951A]" />
@@ -1589,10 +1649,10 @@ export default function AuthModal({
                                             </dd>
 
                                             <dt className="font-medium text-[#6F6577]">
-                                                Phone number
+                                                Your mobile number
                                             </dt>
                                             <dd className="text-[#1A1220]">
-                                                {phone}
+                                                {formatMobileInput(phone)}
                                             </dd>
 
                                             <dt className="font-medium text-[#6F6577]">
@@ -2152,7 +2212,7 @@ function SignupOtpDialog({
                     <Sparkles className="absolute -right-1 top-1 h-4 w-4 text-[#C9951A]" /><Sparkles className="absolute -left-1 bottom-3 h-3.5 w-3.5 text-[#C9951A]" />
                 </div>
                 <h2 id="signup-otp-title" className="mt-4 font-serif text-[32px] font-semibold leading-tight text-[#2D1B4E]">{verified ? "Verified Successfully" : "Verify your email"}</h2>
-                <p className="mt-2 text-sm leading-6 text-[#7A6E88]">{verified ? "Your email has been verified." : recovery ? "Enter the 6-digit password reset code sent to" : "Enter the 6-digit code sent to"}</p>
+                <p className="mt-2 text-sm leading-6 text-[#7A6E88]">{verified ? "Your email has been verified." : recovery ? "If this email is registered, enter the reset code sent to" : "Enter the 6-digit code sent to"}</p>
                 {!verified && <p className="mt-0.5 break-all text-sm font-bold text-[#2D1B4E]">{email}</p>}
                 <div className="mt-6 flex justify-center gap-2 sm:gap-3">
                     {otpDigits.map((digit, index) => (

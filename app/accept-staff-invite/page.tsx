@@ -39,7 +39,7 @@ import {
 import LandingPage from "../../components/landing/LandingPage";
 // Phone formatting stays inside this existing page/component; no helper file is required.
 const MOBILE_PHONE_PLACEHOLDER = "0912 345 6789";
-const MOBILE_PHONE_HELP = "Enter an 11-digit Philippine mobile number starting with 09.";
+const MOBILE_PHONE_HELP = "Enter your personal 11-digit Philippine mobile number starting with 09.";
 
 function normalizeMobileNumber(value: string): string {
     const digits = String(value ?? "").replace(/\D/g, "");
@@ -524,7 +524,7 @@ function AcceptStaffInviteContent() {
         }
 
         if (password !== confirmPassword) {
-            setError("The passwords do not match.");
+            setError("Passwords do not match. Try again.");
             return;
         }
 
@@ -700,8 +700,8 @@ function AcceptStaffInviteContent() {
                 <ProgressSteps currentStep={currentStep} />
                 <DetailGrid details={details} />
 
-                {error && currentStep !== 2 && (
-                    <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
+                {error && currentStep !== 2 && !(currentStep === 4 && error === "Passwords do not match. Try again.") && !(currentStep === 3 && error === "This mobile number is already registered.") && (
+                    <div className="mt-3 text-sm font-medium text-red-600">
                         {error}
                     </div>
                 )}
@@ -781,7 +781,7 @@ function AcceptStaffInviteContent() {
                     <div className="mt-6">
                         <div className="rounded-2xl border border-green-200 bg-green-50 p-4 text-sm text-green-800">
                             <p className="flex items-center gap-2 font-bold"><CheckCircle2 className="h-5 w-5" /> Your email has been verified.</p>
-                            <p className="mt-1 pl-7">Review your name and enter your phone number before continuing.</p>
+                            <p className="mt-1 pl-7">Review your name and enter your personal mobile number before continuing.</p>
                         </div>
 
                         <div className="mt-5 grid gap-4 sm:grid-cols-2">
@@ -803,17 +803,18 @@ function AcceptStaffInviteContent() {
                                 />
                             </label>
                             <label className="block sm:col-span-2">
-                                <span className="inline-flex items-center gap-2 text-sm font-semibold text-[#2D194D]"><Phone className="h-4 w-4" /> Phone number</span>
+                                <span className="inline-flex items-center gap-2 text-sm font-semibold text-[#2D194D]"><Phone className="h-4 w-4" /> Your mobile number</span>
                                 <input
                                     type="tel"
                                     inputMode="tel"
                                     autoComplete="tel-national"
                                     placeholder={MOBILE_PHONE_PLACEHOLDER}
                                     value={phone}
-                                    onChange={(event) => setPhone(formatMobileInput(event.target.value))}
+                                    onChange={(event) => { setPhone(formatMobileInput(event.target.value)); if (error === "This mobile number is already registered.") setError(""); }}
                                     className="mt-2 h-12 w-full rounded-xl border border-[#DCD2E8] px-4 text-[#261641] outline-none focus:border-[#2D1B4E] focus:ring-4 focus:ring-[#2D1B4E]/10"
                                 />
                                 <span className="mt-1.5 block text-xs text-[#74687E]">{MOBILE_PHONE_HELP}</span>
+                                {error === "This mobile number is already registered." && <span role="alert" className="mt-1.5 block text-sm text-red-600">{error}</span>}
                             </label>
                         </div>
 
@@ -840,7 +841,7 @@ function AcceptStaffInviteContent() {
                                         <input
                                             type={showPassword ? "text" : "password"}
                                             value={password}
-                                            onChange={(event) => setPassword(event.target.value)}
+                                            onChange={(event) => { setPassword(event.target.value); if (error === "Passwords do not match. Try again.") setError(""); }}
                                             className="h-12 w-full rounded-xl border border-[#DCD2E8] pl-12 pr-12 text-[#261641] outline-none focus:border-[#2D1B4E] focus:ring-4 focus:ring-[#2D1B4E]/10"
                                         />
                                         <button type="button" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? "Hide password" : "Show password"} aria-pressed={showPassword} className="absolute right-4 top-1/2 -translate-y-1/2 text-[#756A82]">
@@ -856,13 +857,16 @@ function AcceptStaffInviteContent() {
                                         <input
                                             type={showConfirmPassword ? "text" : "password"}
                                             value={confirmPassword}
-                                            onChange={(event) => setConfirmPassword(event.target.value)}
+                                            onChange={(event) => { setConfirmPassword(event.target.value); if (error === "Passwords do not match. Try again.") setError(""); }}
                                             className="h-12 w-full rounded-xl border border-[#DCD2E8] pl-12 pr-12 text-[#261641] outline-none focus:border-[#2D1B4E] focus:ring-4 focus:ring-[#2D1B4E]/10"
                                         />
                                         <button type="button" onClick={() => setShowConfirmPassword((value) => !value)} aria-label={showConfirmPassword ? "Hide confirm password" : "Show confirm password"} aria-pressed={showConfirmPassword} className="absolute right-4 top-1/2 -translate-y-1/2 text-[#756A82]">
                                             {showConfirmPassword ? <Eye className="h-5 w-5" /> : <EyeOff className="h-5 w-5" />}
                                         </button>
                                     </div>
+                                    {error === "Passwords do not match. Try again." && (
+                                        <p role="alert" className="mt-1.5 text-sm text-red-600">{error}</p>
+                                    )}
                                 </label>
 
                                 <div className="flex items-start gap-3 text-sm">
@@ -963,11 +967,18 @@ function AcceptStaffInviteContent() {
                         }}
                         className="inline-flex h-12 min-w-[180px] items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#2D1B4E] to-[#3D2560] px-6 font-bold text-white shadow-lg shadow-[#2D1B4E]/20 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
                     >
-                        {submitting ? <Loader2 className="h-5 w-5 animate-spin" /> : null}
-                        {currentStep === 1 && "Continue"}
-                        {currentStep === 3 && "Save & Continue"}
-                        {currentStep === 4 && "Activate account"}
-                        {!submitting && <ArrowRight className="h-5 w-5" />}
+                        {submitting ? (
+                            <span role="status" className="snb-invite-loading-text">
+                                {currentStep === 1 ? "Sending..." : currentStep === 3 ? "Saving..." : "Activating..."}
+                            </span>
+                        ) : (
+                            <>
+                                {currentStep === 1 && "Continue"}
+                                {currentStep === 3 && "Save & Continue"}
+                                {currentStep === 4 && "Activate account"}
+                                <ArrowRight className="h-5 w-5" />
+                            </>
+                        )}
                     </button>}
                 </div>
             </div>
@@ -976,6 +987,30 @@ function AcceptStaffInviteContent() {
 
     return (
         <main className="relative min-h-screen overflow-hidden bg-[#F7F4FB] font-sans">
+            <style>{`
+                @keyframes snbInviteStageIn {
+                    from { opacity: 0; transform: translateY(10px); }
+                    to { opacity: 1; transform: translateY(0); }
+                }
+                @keyframes snbInviteLoadingFade {
+                    0%, 100% { opacity: 1; } 50% { opacity: .4; }
+                }
+                @keyframes snbInviteDialogFade {
+                    from { opacity: 0; transform: translateY(14px) scale(.985); }
+                    to { opacity: 1; transform: translateY(0) scale(1); }
+                }
+                @keyframes snbInviteOtpFade {
+                    from { opacity: 0; transform: translateY(14px) scale(.985); }
+                    to { opacity: 1; transform: translateY(0) scale(1); }
+                }
+                .snb-invite-stage-enter { animation: snbInviteStageIn .34s ease-out both; }
+                .snb-invite-stage-enter.snb-invite-otp-stage { animation: snbInviteOtpFade .55s cubic-bezier(.2,.75,.2,1) both; }
+                .snb-invite-dialog-enter { animation: snbInviteDialogFade .38s cubic-bezier(.2,.75,.2,1) both; }
+                .snb-invite-loading-text { animation: snbInviteLoadingFade 1.15s ease-in-out infinite; }
+                @media (prefers-reduced-motion: reduce) {
+                    .snb-invite-stage-enter, .snb-invite-otp-stage, .snb-invite-dialog-enter, .snb-invite-loading-text { animation: none; }
+                }
+            `}</style>
             <div aria-hidden="true" className="pointer-events-none fixed inset-0 overflow-hidden">
                 <LandingPage onSignupSuccess={() => undefined} />
             </div>
@@ -987,7 +1022,7 @@ function AcceptStaffInviteContent() {
                     role="dialog"
                     aria-modal="true"
                     aria-label="Accept staff invitation"
-                    className="flex max-h-[94vh] w-full max-w-5xl flex-col overflow-hidden rounded-3xl border border-white/80 bg-white shadow-2xl md:h-[min(760px,94vh)] md:min-h-[680px]"
+                    className="snb-invite-dialog-enter flex max-h-[94vh] w-full max-w-5xl flex-col overflow-hidden rounded-3xl border border-white/80 bg-white shadow-2xl md:h-[min(760px,94vh)] md:min-h-[680px]"
                 >
                     <header className="relative z-20 shrink-0 overflow-hidden border-b border-white/10 bg-[linear-gradient(135deg,_#3D2468_0%,_#2D1B4E_52%,_#24143D_100%)] px-5 py-4 sm:px-6">
                         <div className="pointer-events-none absolute -left-16 -top-20 h-40 w-40 rounded-full bg-white/10 blur-2xl" />
@@ -1028,7 +1063,7 @@ function AcceptStaffInviteContent() {
                     </header>
 
                     <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]">
-                        <div className="mx-auto w-full max-w-[820px] px-5 pb-7 pt-6 sm:px-7 sm:pb-8 lg:px-8">
+                        <div key={currentStep} className={`snb-invite-stage-enter ${currentStep === 2 ? "snb-invite-otp-stage" : ""} mx-auto w-full max-w-[820px] px-5 pb-7 pt-6 sm:px-7 sm:pb-8 lg:px-8`}>
                             {renderBody()}
                         </div>
                     </div>

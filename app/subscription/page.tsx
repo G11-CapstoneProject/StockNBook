@@ -639,10 +639,6 @@ export default function SubscriptionPage() {
         },
     ];
 
-    const limitWarnings = usageItems
-        .map((item) => ({ ...item, percent: usagePercent(item.current, item.limit) }))
-        .filter((item) => item.limit !== null && item.percent >= 80);
-
     return (
         <div
             style={{ backgroundColor: "#FDFAF4" }}
@@ -736,9 +732,6 @@ export default function SubscriptionPage() {
                                 <p className="text-[14px] font-semibold leading-5 text-[#4B3E55]">Current Plan</p>
                                 <div className="mt-1 flex flex-wrap items-center gap-2">
                                     <p className="text-[28px] font-bold leading-none tracking-[-0.03em] text-[#1A1220]">{currentPlan.name}</p>
-                                    <span className="rounded-full bg-[#F4E9C6] px-2 py-1 text-[10px] font-semibold text-[#8B6B1B]">
-                                        {isExpired ? "Expired" : isExpiring ? "Expiring" : "Active"}
-                                    </span>
                                 </div>
                                 <p className="mt-2 text-[11px] leading-4 text-[#8A7D92]">{formatPrice(currentPlan.price)} / month</p>
                                 {onStarterFallback && <p className="mt-1 text-xs font-semibold text-[#B53C3C]">Effective access: {effectivePlan.name}</p>}
@@ -769,37 +762,11 @@ export default function SubscriptionPage() {
                                     {canManage ? "Owner managed" : "View only"}
                                 </p>
                                 <p className="mt-2 text-[11px] leading-4 text-[#8A7D92]">
-                                    {canManage ? "Upgrade requests require payment proof and admin approval." : "Ask the owner to change the subscription."}
+                                    {canManage ? "Upgrade requests require payment proof and admin approval." : "Only the account owner can change the plan."}
                                 </p>
                             </div>
                         </div>
                     </section>
-
-                    {!canManage && (
-                        <div className="mt-5 flex items-center gap-3 rounded-xl border border-[#E7DCEB] bg-white px-4 py-3 text-xs font-semibold text-[#5D5168] shadow-[0_2px_8px_rgba(45,27,78,0.035)]">
-                            <LockKeyhole className="h-4 w-4 shrink-0 text-[#6D35D4]" />
-                            Subscription changes are available only to the account owner.
-                        </div>
-                    )}
-
-                    {limitWarnings.length > 0 && (
-                        <div className="mt-3 flex items-start gap-3 rounded-xl border border-[#E8D8A7] bg-[#FFF9E8] px-4 py-3 text-xs font-semibold leading-5 text-[#7A5A12] shadow-[0_2px_8px_rgba(45,27,78,0.035)]">
-                            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[#B7791F]" />
-                            <div>
-                                <p>
-                                    {limitWarnings.some((item) => item.percent >= 100)
-                                        ? "One or more plan limits have been reached."
-                                        : "One or more plan limits are close to being reached."}
-                                </p>
-                                <p className="mt-0.5 font-medium text-[#8A6A20]">
-                                    {limitWarnings.map((item) => `${item.label}: ${item.current} / ${formatLimit(item.limit)}`).join(" • ")}
-                                    {canManage
-                                        ? " You can review available plans below if more capacity is needed."
-                                        : " Contact the account owner if the store needs a higher plan."}
-                                </p>
-                            </div>
-                        </div>
-                    )}
 
                     <section className="mt-3.5 grid gap-3.5 xl:grid-cols-[1.05fr_0.95fr]">
                         <div className="rounded-2xl border border-[#E6DDE8] bg-white shadow-[0_3px_10px_rgba(45,27,78,0.055)]">

@@ -242,7 +242,7 @@ async function requirePlatformAdmin(event, connection) {
     );
 
     const [rows] = await connection.execute(
-        `SELECT id AS platform_admin_id, full_name, email, role, status,
+        `SELECT id AS platform_admin_id, full_name, email, role, status, auth_version,
                 CASE WHEN LOWER(status) = 'active' THEN 1 ELSE 0 END AS is_active
          FROM platform_admins
          WHERE id = ?
@@ -257,7 +257,9 @@ async function requirePlatformAdmin(event, connection) {
     const roleIsPlatformAdmin =
         admin ? String(admin.role || "").trim().toLowerCase() === "platform_admin" : false;
 
-    if (!admin || !activeFlag || !statusActive || !roleIsPlatformAdmin) {
+    if (!admin || !activeFlag || !statusActive || !roleIsPlatformAdmin ||
+        !Number.isSafeInteger(payload.auth_version) || Number(admin.auth_version) !== payload.auth_version ||
+        String(admin.email).toLowerCase() !== String(payload.email || "").toLowerCase()) {
         throw httpError(403, "Platform Administrator access is required.");
     }
 
@@ -1148,7 +1150,7 @@ async function revertExpiredPaidSubscriptions(connection) {
             const [rows] = await connection.execute(
                 `SELECT sub.id, sub.store_id, sub.status, sub.expires_at, p.price,
                         CASE WHEN sub.expires_at IS NOT NULL AND DATE(sub.expires_at) < CURDATE()
-                             THEN 1 ELSE 0 END AS is_past_expiry
+                     THEN 1 ELSE 0 END AS is_past_expiry
                  FROM subscriptions sub
                           INNER JOIN plans p ON p.id = sub.plan_id
                  WHERE sub.id = ?
@@ -1171,8 +1173,8 @@ async function revertExpiredPaidSubscriptions(connection) {
             await connection.execute(
                 `INSERT IGNORE INTO subscription_expiry_notices
                      (subscription_id, expires_on, notice_type, delivery_status)
-                 SELECT id, DATE(expires_at), 'EXPIRED', 'PENDING'
-                 FROM subscriptions WHERE id = ? AND expires_at IS NOT NULL`,
+                SELECT id, DATE(expires_at), 'EXPIRED', 'PENDING'
+                FROM subscriptions WHERE id = ? AND expires_at IS NOT NULL`,
                 [current.id]
             );
             await connection.execute(
@@ -1295,14 +1297,14 @@ async function runExpiryNotificationJob() {
             SELECT n.subscription_id, DATE_FORMAT(n.expires_on, '%Y-%m-%d') AS expires_on_text, n.notice_type,
                    s.store_name, s.email AS owner_email,
                    COALESCE((
-                       SELECT pl.plan_name
-                       FROM subscription_payments sp
-                                INNER JOIN plans pl ON pl.id = sp.plan_id
-                       WHERE sp.subscription_id = n.subscription_id
-                         AND LOWER(sp.status) = 'approved'
-                       ORDER BY sp.reviewed_at DESC, sp.id DESC
-                       LIMIT 1
-                   ), 'paid') AS plan_name
+                                SELECT pl.plan_name
+                                FROM subscription_payments sp
+                                         INNER JOIN plans pl ON pl.id = sp.plan_id
+                                WHERE sp.subscription_id = n.subscription_id
+                                  AND LOWER(sp.status) = 'approved'
+                                ORDER BY sp.reviewed_at DESC, sp.id DESC
+                            LIMIT 1
+                       ), 'paid') AS plan_name
             FROM subscription_expiry_notices n
                      INNER JOIN subscriptions sub ON sub.id = n.subscription_id
                      INNER JOIN stores s ON s.id = sub.store_id
@@ -2001,31 +2003,12 @@ exports.handler = async (event) => {
             case "list_audit_logs":
                 return response(event, 200, { audit_logs: await listAuditLogs(connection, body.business_id) });
 
-            case "suspend_subscription": {
-                const storeId = positiveId(body.business_id || body.store_id, "business_id");
-                return response(event, 200, await setStoreStatus(connection, storeId, "suspended", admin, text(body.reason, 500)));
-            }
-
-            case "reactivate_subscription": {
-                const storeId = positiveId(body.business_id || body.store_id, "business_id");
-                return response(event, 200, await setStoreStatus(connection, storeId, "active", admin, text(body.reason, 500)));
-            }
-
             case "cancel_subscription":
                 return response(event, 200, await changeSubscriptionStatus(
                     connection,
                     positiveId(body.subscription_id, "subscription_id"),
                     admin,
                     "CANCELLED",
-                    text(body.reason, 500)
-                ));
-
-            case "extend_subscription":
-                return response(event, 200, await extendSubscription(
-                    connection,
-                    positiveId(body.subscription_id, "subscription_id"),
-                    admin,
-                    body.extension_days,
                     text(body.reason, 500)
                 ));
 
@@ -2057,12 +2040,6 @@ exports.handler = async (event) => {
             case "get_store_plan_details":
                 return response(event, 200, await getStorePlanDetails(connection, positiveId(body.store_id, "store_id")));
 
-            case "suspend_store":
-                return response(event, 200, await setStoreStatus(connection, positiveId(body.store_id, "store_id"), "suspended", admin, text(body.reason, 500)));
-
-            case "reactivate_store":
-                return response(event, 200, await setStoreStatus(connection, positiveId(body.store_id, "store_id"), "active", admin, text(body.reason, 500)));
-
             default:
                 throw httpError(400, `Unknown action: ${action}`);
         }
@@ -2088,7 +2065,7 @@ async function tryPlatformAdminLogin({
     }
 
     const [rows] = await connection.execute(
-        `SELECT id AS platform_admin_id, full_name, email, password_hash AS password, role,
+        `SELECT id AS platform_admin_id, full_name, email, password_hash AS password, role, auth_version,
                 CASE WHEN LOWER(status) = 'active' THEN 1 ELSE 0 END AS is_active
          FROM platform_admins WHERE email = ? LIMIT 1`,
         [normalizedEmail]
@@ -2123,6 +2100,7 @@ async function tryPlatformAdminLogin({
             email: admin.email,
             full_name: admin.full_name,
             role: "PLATFORM_ADMIN",
+            auth_version: Number(admin.auth_version),
         },
         process.env.JWT_SECRET,
         { expiresIn: "8h" }

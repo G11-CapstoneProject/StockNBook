@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import PlatformAdminSidebar from "../dashboard/PlatformAdminSidebar";
 import {
     AdminHeader,
@@ -17,8 +17,6 @@ import {
     ChevronDown,
     ChevronUp,
     CreditCard,
-    MoreVertical,
-    RefreshCw,
     TrendingUp,
     X,
 } from "lucide-react";
@@ -38,7 +36,6 @@ interface Store {
     subscription_status: StoreStatus | string;
     started_at: string | null;
     expires_at: string | null;
-    auto_renew: boolean;
     lifetime_paid: number;
 }
 
@@ -92,10 +89,8 @@ export default function UsersPage() {
     const [statusFilter, setStatusFilter] = useState("All statuses");
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
-    const [openMenu, setOpenMenu] = useState<number | null>(null);
     const [expandedStore, setExpandedStore] = useState<number | null>(null);
     const [storePlanDetails, setStorePlanDetails] = useState<Record<number, any>>({});
-    const [actionLoading, setActionLoading] = useState<number | null>(null);
 
     const API_ENDPOINT = "/api/subscription-admin";
 
@@ -165,48 +160,6 @@ export default function UsersPage() {
 
         return () => window.clearTimeout(timer);
     }, [query, planFilter, statusFilter]);
-
-    async function changeStoreSubscription(store: Store, action: "suspend_store" | "reactivate_store") {
-        setActionLoading(store.id);
-        setOpenMenu(null);
-
-        try {
-            const token =
-                sessionStorage.getItem("token") || localStorage.getItem("token") || "";
-
-            const reason = window.prompt(
-                action === "suspend_store"
-                    ? `Reason for suspending ${store.store_name}:`
-                    : `Reason for reactivating ${store.store_name}:`,
-            );
-
-            if (!reason?.trim()) return;
-
-            const response = await fetch(API_ENDPOINT, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${token}`,
-                },
-                body: JSON.stringify({
-                    action,
-                    store_id: store.id,
-                    reason: reason.trim(),
-                }),
-            });
-
-            const body = await response.json();
-            if (!response.ok) {
-                throw new Error(body.message || body.error || "Unable to update subscription.");
-            }
-
-            await loadStores();
-        } catch (err) {
-            setError(err instanceof Error ? err.message : "Unable to update subscription.");
-        } finally {
-            setActionLoading(null);
-        }
-    }
 
     const planOptions = useMemo(() => {
         const names = plans.map((plan) => plan.name).filter(Boolean);
@@ -308,7 +261,6 @@ export default function UsersPage() {
                                         <th className="px-5 py-3 font-semibold">Signed Up</th>
                                         <th className="px-5 py-3 font-semibold">Expires</th>
                                         <th className="px-5 py-3 font-semibold">Lifetime Paid</th>
-                                        <th className="px-5 py-3 text-right font-semibold">Actions</th>
                                     </tr>
                                     </thead>
 
@@ -318,9 +270,8 @@ export default function UsersPage() {
                                         const tone = STATUS_TONE[status] || "gold";
 
                                         return (
-                                            <>
+                                            <Fragment key={store.id}>
                                                 <tr
-                                                    key={store.id}
                                                     className="border-b border-[#F3EFE3] transition last:border-0 hover:bg-[#FAF8FF]"
                                                 >
                                                     <td className="px-5 py-4">
@@ -375,11 +326,6 @@ export default function UsersPage() {
                                                             <p className={`font-semibold ${status === "EXPIRED" ? "text-[#C32F2F]" : status === "EXPIRING" ? "text-[#A56607]" : "text-[#4B3E55]"}`}>
                                                                 {formatExpiration(store.expires_at, store.plan_name)}
                                                             </p>
-                                                            {store.expires_at && store.plan_name.toLowerCase() !== "starter" && (
-                                                                <p className="mt-0.5 text-[9px] text-[#8A7D92]">
-                                                                    {store.auto_renew ? "Auto-renew enabled" : "Manual renewal"}
-                                                                </p>
-                                                            )}
                                                         </div>
                                                     </td>
 
@@ -387,52 +333,11 @@ export default function UsersPage() {
                                                         {formatMoney(store.lifetime_paid)}
                                                     </td>
 
-                                                    <td className="relative px-5 py-4 text-right">
-                                                        <button
-                                                            type="button"
-                                                            aria-label={`Actions for ${store.store_name}`}
-                                                            onClick={() => setOpenMenu(openMenu === store.id ? null : store.id)}
-                                                            disabled={actionLoading === store.id}
-                                                            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[#8A7D92] transition hover:bg-[#F1EBFF] hover:text-[#6D35D4] disabled:opacity-50"
-                                                        >
-                                                            {actionLoading === store.id ? (
-                                                                <RefreshCw size={15} className="animate-spin" />
-                                                            ) : (
-                                                                <MoreVertical size={16} />
-                                                            )}
-                                                        </button>
-
-                                                        {openMenu === store.id && (
-                                                            <div className="absolute right-5 top-12 z-30 w-44 overflow-hidden rounded-xl border border-[#E6DDF0] bg-white py-1 text-left shadow-[0_12px_30px_rgba(45,27,78,0.14)]">
-                                                                {status === "CANCELLED" ? (
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() => void changeStoreSubscription(store, "reactivate_store")}
-                                                                        className="block w-full px-3 py-2.5 text-xs font-semibold text-[#16834A] hover:bg-[#F4FBF7]"
-                                                                    >
-                                                                        Reactivate subscription
-                                                                    </button>
-                                                                ) : status === "ACTIVE" || status === "EXPIRING" ? (
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() => void changeStoreSubscription(store, "suspend_store")}
-                                                                        className="block w-full px-3 py-2.5 text-xs font-semibold text-[#C32F2F] hover:bg-[#FFF4F4]"
-                                                                    >
-                                                                        Suspend subscription
-                                                                    </button>
-                                                                ) : (
-                                                                    <div className="px-3 py-2.5 text-xs text-[#8A7D92]">
-                                                                        No action available
-                                                                    </div>
-                                                                )}
-                                                            </div>
-                                                        )}
-                                                    </td>
                                                 </tr>
 
                                                 {expandedStore === store.id && (
                                                     <tr className="bg-[#FAF8FF]">
-                                                        <td colSpan={7} className="px-5 pb-2 pt-8">
+                                                        <td colSpan={6} className="px-5 pb-2 pt-8">
                                                             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                                                                 <div className="rounded-2xl border border-[#E6DDF0] bg-white p-6">
                                                                     <div className="flex items-start gap-3">
@@ -528,7 +433,7 @@ export default function UsersPage() {
                                                         </td>
                                                     </tr>
                                                 )}
-                                            </>
+                                            </Fragment>
                                         );
                                     })}
                                     </tbody>

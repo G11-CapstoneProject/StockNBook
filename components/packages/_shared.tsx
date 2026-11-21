@@ -1163,6 +1163,103 @@ function DetailBox({
     );
 }
 
+// Manager-only direct quantity input (Staff retains the original +/- controls).
+function ManagerPackageQuantityInput({
+                                         quantity,
+                                         maximum,
+                                         itemName,
+                                         compact = false,
+                                         disabled = false,
+                                         onSetQuantity,
+                                     }: {
+    quantity: number;
+    maximum: number;
+    itemName: string;
+    compact?: boolean;
+    disabled?: boolean;
+    onSetQuantity: (quantity: number) => void;
+}) {
+    const max = Math.max(0, Math.floor(Number(maximum) || 0));
+    const [draft, setDraft] = useState(String(quantity));
+
+    useEffect(() => {
+        setDraft(String(quantity));
+    }, [quantity]);
+
+    const applyQuantity = (raw: string) => {
+        const trimmed = raw.trim();
+        // An empty field is just temporary editing; do not remove an item.
+        if (trimmed === "") {
+            setDraft(String(quantity));
+            return;
+        }
+        if (!/^\d+$/.test(trimmed)) {
+            setDraft(String(quantity));
+            return;
+        }
+        const number = Number(trimmed);
+        if (!Number.isSafeInteger(number)) {
+            setDraft(String(quantity));
+            return;
+        }
+        const next = Math.max(0, Math.min(max, number));
+        setDraft(String(next));
+        if (next !== quantity) onSetQuantity(next);
+    };
+
+    const buttonClass = `${compact ? "h-7 w-7" : "h-8 w-8"} shrink-0 rounded-lg border border-[#E6DDF0] bg-white text-[#2B174C] hover:bg-[#F7F1FF] disabled:cursor-not-allowed disabled:opacity-30`;
+
+    return (
+        <div className="flex items-center justify-center gap-1">
+            <button
+                type="button"
+                disabled={disabled || quantity <= 0}
+                onClick={() => applyQuantity(String(quantity - 1))}
+                className={buttonClass}
+                aria-label={`Decrease ${itemName}`}
+            >−</button>
+            <input
+                type="number"
+                min={0}
+                max={max}
+                step={1}
+                inputMode="numeric"
+                value={draft}
+                disabled={disabled || (max === 0 && quantity === 0)}
+                onFocus={(event) => event.currentTarget.select()}
+                onChange={(event) => {
+                    const text = event.target.value;
+                    setDraft(text);
+                    // Apply valid positive quantities as they're typed.
+                    // Apply 0 on blur to avoid deleting while overwriting a value.
+                    if (!/^\d+$/.test(text)) return;
+                    const next = Number(text);
+                    if (Number.isSafeInteger(next) && next > 0 && next <= max && next !== quantity) {
+                        onSetQuantity(next);
+                    }
+                }}
+                onBlur={() => applyQuantity(draft)}
+                onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                        event.preventDefault(); // Do not submit the package form.
+                        event.currentTarget.blur();
+                    }
+                }}
+                className={`${compact ? "h-7 w-11" : "h-8 w-12"} min-w-0 rounded-lg border border-[#E6DDF0] bg-white px-1 text-center text-xs font-bold tabular-nums text-[#1A1220] outline-none focus:border-[#2B174C] focus:ring-1 focus:ring-[#2B174C] disabled:bg-[#FAF8FC] disabled:opacity-60 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none`}
+                aria-label={`Quantity for ${itemName}`}
+                title={`Enter 0–${max}; press Enter or click outside to apply`}
+            />
+            <button
+                type="button"
+                disabled={disabled || quantity >= max || max === 0}
+                onClick={() => applyQuantity(String(quantity + 1))}
+                className={buttonClass}
+                aria-label={`Increase ${itemName}`}
+            >+</button>
+        </div>
+    );
+}
+
 // ─── Package Form Modal ───────────────────────────────────────────────────────
 
 
@@ -1199,6 +1296,8 @@ export function PackageFormModal({
                                      packagePrice,
                                      onAddInclusion,
                                      onAdjustInclusion,
+                                     onSetInclusionQuantity,
+                                     managerDirectQuantityInput = false,
                                      onRemoveInclusion,
                                      onSubmit,
                                      onClose,
@@ -1235,6 +1334,8 @@ export function PackageFormModal({
     packagePrice: number;
     onAddInclusion: () => void;
     onAdjustInclusion: (product: PackageSelectableItem, delta: number) => void;
+    onSetInclusionQuantity?: (product: PackageSelectableItem, quantity: number) => void;
+    managerDirectQuantityInput?: boolean;
     onRemoveInclusion: (key: string) => void;
     onSubmit: (event: FormEvent<HTMLFormElement>) => void;
     onClose: () => void;
@@ -1267,7 +1368,7 @@ export function PackageFormModal({
         setRentalCatalog([]);
         void (async () => {
             try {
-                // Authenticated package catalog: show owned units, keep physical quantity limits.
+                // Authenticated catalog: packages use total owned rental units, not booking reservations.
                 const response = await fetch("/api/packages", {
                     method: "POST", cache: "no-store", signal: controller.signal,
                     headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}` },
@@ -1293,7 +1394,7 @@ export function PackageFormModal({
     const rentalProducts: PackageSelectableItem[] = rentalCatalog.map((item) => ({
         key: `rental:${item.id}`, itemType: "rental", equipmentId: item.id,
         productId: 0, productName: item.name, displayName: item.name,
-        category: item.category || "Other", stock: Math.max(0, Number(item.physicallyAvailable || 0)),
+        category: item.category || "Other", stock: Math.max(0, Number(item.totalUnits || 0)),
         totalUnits: Math.max(0, Number(item.totalUnits || 0)),
         salesPrice: Number(item.dailyRate || 0),
     }));
@@ -1434,28 +1535,37 @@ export function PackageFormModal({
                                 </div>
                                 {goodsTab === "rental" && rentalError && <p role="alert" className="mb-2 text-xs text-red-600">{rentalError}</p>}
                                 <div className="overflow-hidden rounded-xl border border-[#EAE1EF]">
-                                    <div className="grid grid-cols-[minmax(0,1fr)_80px_90px_112px] gap-2 border-b border-[#EAE1EF] bg-[#FBF8FD] px-3 py-2.5 text-[10px] font-bold uppercase tracking-wide text-[#806A8C]">
-                                        <span>Product</span><span className="text-center">{goodsTab === "rental" ? "Total Units" : "Available"}</span><span className="text-right">{goodsTab === "rental" ? "Rate / day" : "Price"}</span><span className="text-center">Qty</span>
+                                    <div className={`grid ${managerDirectQuantityInput ? "grid-cols-[minmax(0,1fr)_80px_90px_144px]" : "grid-cols-[minmax(0,1fr)_80px_90px_112px]"} gap-2 border-b border-[#EAE1EF] bg-[#FBF8FD] px-3 py-2.5 text-[10px] font-bold uppercase tracking-wide text-[#806A8C]`}>
+                                        <span>Product</span><span className="text-center">{goodsTab === "rental" ? "Total Units" : "Available Items"}</span><span className="text-right">{goodsTab === "rental" ? "Rate / day" : "Price"}</span><span className="text-center">Qty</span>
                                     </div>
                                     <div className="max-h-[340px] divide-y divide-[#F1EAF5] overflow-y-auto">
                                         {rentalLoading && goodsTab === "rental" ? <p className="p-6 text-center text-sm text-[#806A8C]">Loading branch rental equipment...</p>
                                             : filteredInclusionProducts.length === 0 ? <p className="p-6 text-center text-sm text-[#806A8C]">No {goodsTab === "rental" ? "rental equipment" : "products"} match the filters.</p>
                                                 : filteredInclusionProducts.map((product) => {
                                                     const selectedQty = getSelectedQuantity(product.key);
-                                                    return <div key={product.key} className="grid grid-cols-[minmax(0,1fr)_80px_90px_112px] items-center gap-2 px-3 py-3">
+                                                    return <div key={product.key} className={`grid ${managerDirectQuantityInput ? "grid-cols-[minmax(0,1fr)_80px_90px_144px]" : "grid-cols-[minmax(0,1fr)_80px_90px_112px]"} items-center gap-2 px-3 py-3`}>
                                                         <div className="min-w-0">
                                                             <p className="truncate text-xs font-semibold text-[#1A1220]" title={product.displayName}>{product.displayName}</p>
                                                             <p className="mt-0.5 truncate text-[11px] text-[#806F89]">{product.category || "Uncategorized"}</p>
                                                         </div>
                                                         <span className={`text-center text-xs font-semibold ${(product.totalUnits ?? product.stock) <= 0 ? "text-red-600" : "text-[#1A1220]"}`}>{product.totalUnits ?? product.stock}</span>
                                                         <span className="text-right text-xs font-semibold tabular-nums text-[#1A1220]">{peso(product.salesPrice)}</span>
-                                                        <div className="flex items-center justify-center gap-1">
-                                                            <button type="button" disabled={selectedQty <= 0} onClick={() => onAdjustInclusion(product, -1)}
-                                                                    className="h-8 w-8 rounded-lg border border-[#E6DDF0] text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-30" aria-label={`Decrease ${product.displayName}`}>−</button>
-                                                            <span className="min-w-5 text-center text-xs font-bold tabular-nums">{selectedQty}</span>
-                                                            <button type="button" disabled={product.stock <= 0 || selectedQty >= product.stock} onClick={() => onAdjustInclusion(product, 1)}
-                                                                    className="h-8 w-8 rounded-lg border border-[#E6DDF0] text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-30" title={product.itemType === "rental" ? `Currently selectable: ${product.stock}` : `Available: ${product.stock}`} aria-label={`Increase ${product.displayName}`}>+</button>
-                                                        </div>
+                                                        {managerDirectQuantityInput && onSetInclusionQuantity ? (
+                                                            <ManagerPackageQuantityInput
+                                                                quantity={selectedQty}
+                                                                maximum={product.stock}
+                                                                itemName={product.displayName}
+                                                                onSetQuantity={(next) => onSetInclusionQuantity(product, next)}
+                                                            />
+                                                        ) : (
+                                                            <div className="flex items-center justify-center gap-1">
+                                                                <button type="button" disabled={selectedQty <= 0} onClick={() => onAdjustInclusion(product, -1)}
+                                                                        className="h-8 w-8 rounded-lg border border-[#E6DDF0] text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-30" aria-label={`Decrease ${product.displayName}`}>−</button>
+                                                                <span className="min-w-5 text-center text-xs font-bold tabular-nums">{selectedQty}</span>
+                                                                <button type="button" disabled={product.stock <= 0 || selectedQty >= product.stock} onClick={() => onAdjustInclusion(product, 1)}
+                                                                        className="h-8 w-8 rounded-lg border border-[#E6DDF0] text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-30" title={product.itemType === "rental" ? `Total units: ${product.stock}` : `Available items: ${product.stock}`} aria-label={`Increase ${product.displayName}`}>+</button>
+                                                            </div>
+                                                        )}
                                                     </div>;
                                                 })}
                                     </div>
@@ -1479,11 +1589,22 @@ export function PackageFormModal({
                                                     <button type="button" onClick={() => onRemoveInclusion(key)} className="text-[#9C829F] hover:text-red-600" aria-label={`Remove ${item.productName}`}><X size={15} /></button>
                                                 </div>
                                                 <div className="mt-2 flex items-center justify-between gap-2">
-                                                    <div className="flex items-center gap-1">
-                                                        <button type="button" disabled={!product} onClick={() => product && onAdjustInclusion(product, -1)} className="h-7 w-7 rounded-lg border border-[#E6DDF0] text-[#2B174C] disabled:opacity-30" aria-label={`Decrease selected ${item.productName}`}>−</button>
-                                                        <span className="min-w-5 text-center text-xs font-semibold">{item.quantity}</span>
-                                                        <button type="button" disabled={!product || item.quantity >= (product?.stock ?? 0)} onClick={() => product && onAdjustInclusion(product, 1)} className="h-7 w-7 rounded-lg border border-[#E6DDF0] text-[#2B174C] disabled:opacity-30" aria-label={`Increase selected ${item.productName}`}>+</button>
-                                                    </div>
+                                                    {managerDirectQuantityInput && onSetInclusionQuantity ? (
+                                                        <ManagerPackageQuantityInput
+                                                            quantity={item.quantity}
+                                                            maximum={product?.stock ?? item.availableStock ?? 0}
+                                                            itemName={`selected ${item.productName}`}
+                                                            compact
+                                                            disabled={!product}
+                                                            onSetQuantity={(next) => product && onSetInclusionQuantity(product, next)}
+                                                        />
+                                                    ) : (
+                                                        <div className="flex items-center gap-1">
+                                                            <button type="button" disabled={!product} onClick={() => product && onAdjustInclusion(product, -1)} className="h-7 w-7 rounded-lg border border-[#E6DDF0] text-[#2B174C] disabled:opacity-30" aria-label={`Decrease selected ${item.productName}`}>−</button>
+                                                            <span className="min-w-5 text-center text-xs font-semibold">{item.quantity}</span>
+                                                            <button type="button" disabled={!product || item.quantity >= (product?.stock ?? 0)} onClick={() => product && onAdjustInclusion(product, 1)} className="h-7 w-7 rounded-lg border border-[#E6DDF0] text-[#2B174C] disabled:opacity-30" aria-label={`Increase selected ${item.productName}`}>+</button>
+                                                        </div>
+                                                    )}
                                                     <span className="text-xs font-bold tabular-nums text-[#2B174C]">{peso(item.lineValue)}</span>
                                                 </div>
                                             </div>;
@@ -1748,7 +1869,7 @@ export function usePackageForm(
 
         if (totalQty > product.stock) {
             setError(
-                `Only ${product.stock} stock available for ${product.displayName}.`
+                `Only ${product.stock} ${product.itemType === "rental" ? "total units" : "available items"} can be selected for ${product.displayName}.`
             );
             return;
         }
@@ -1822,7 +1943,7 @@ export function usePackageForm(
 
             if (nextQuantity > product.stock) {
                 setError(
-                    `Only ${product.stock} stock available for ${product.displayName}.`
+                    `Only ${product.stock} ${product.itemType === "rental" ? "total units" : "available items"} can be selected for ${product.displayName}.`
                 );
                 return previous;
             }
@@ -1865,6 +1986,44 @@ export function usePackageForm(
                 },
             ];
         });
+    }
+
+    // Set an exact quantity. Catalog limits are the Available Items for
+    // consumables and Total Units for rentals (per the previous inventory fix).
+    function setInclusionQuantity(product: PackageSelectableItem, quantity: number) {
+        const limit = Math.max(0, Math.floor(Number(product.stock) || 0));
+        if (!Number.isSafeInteger(quantity) || quantity < 0 || quantity > limit) {
+            setError(`Enter a whole-number quantity from 0 to ${limit} for ${product.displayName}.`);
+            return;
+        }
+
+        const unitSalesPrice = Number(product.salesPrice || 0);
+        setInclusions((previous) => {
+            const existing = previous.find((item) => getInclusionKey(item) === product.key);
+            if (quantity === 0) {
+                return previous.filter((item) => getInclusionKey(item) !== product.key);
+            }
+            if (existing) {
+                return previous.map((item) => getInclusionKey(item) === product.key
+                    ? { ...item, quantity, unitSalesPrice, lineValue: unitSalesPrice * quantity, availableStock: limit }
+                    : item
+                );
+            }
+            return [...previous, {
+                inventoryKey: product.key,
+                itemType: product.itemType || "consumable",
+                equipmentId: product.equipmentId ?? null,
+                productId: product.productId,
+                variantId: product.variantId ?? null,
+                productName: product.displayName,
+                variantName: product.variantName,
+                quantity,
+                unitSalesPrice,
+                lineValue: unitSalesPrice * quantity,
+                availableStock: limit,
+            }];
+        });
+        setError("");
     }
 
     function removeInclusion(key: string) {
@@ -2047,6 +2206,7 @@ export function usePackageForm(
         openEdit,
         addInclusion,
         adjustInclusion,
+        setInclusionQuantity,
         removeInclusion,
         handleSubmit,
         handleDelete,

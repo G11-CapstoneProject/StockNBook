@@ -654,7 +654,7 @@ async function attachV2Inclusions(connection, rows) {
                 CASE WHEN v.is_default = 1 THEN '' ELSE v.variant_name END AS variantName,
                 pi.equipment_id AS equipmentId, e.equipment_name AS equipmentName,
                 CASE WHEN pi.item_type = 'rental'
-                         THEN GREATEST(COALESCE(bi.on_hand_quantity, 0) - COALESCE(bi.unavailable_quantity, 0), 0)
+                         THEN GREATEST(COALESCE(bi.on_hand_quantity, 0), 0)
                      ELSE GREATEST(COALESCE(bi.on_hand_quantity, 0) - COALESCE(bi.reserved_quantity, 0)
                                        - COALESCE(bi.unavailable_quantity, 0), 0) END AS availableStock
          FROM package_items pi
@@ -773,11 +773,13 @@ async function replacePackageItemsV2(connection, packageId, storeId, branchId, i
              FROM equipment e
                       JOIN branch_inventory bi ON bi.equipment_id = e.id
              WHERE e.id = ? AND e.store_id = ? AND bi.branch_id = ?
-               AND e.deleted_at IS NULL LIMIT 1`, [inclusion.equipmentId, storeId, branchId]);
+               AND bi.store_id = e.store_id AND e.deleted_at IS NULL
+               AND LOWER(e.status) = 'active' AND LOWER(bi.status) = 'active'
+               LIMIT 1`, [inclusion.equipmentId, storeId, branchId]);
         if (!rows.length) throw new Error(`Rental equipment ${inclusion.equipmentId} is not available in this branch.`);
         const equipment = rows[0];
-        const physical = Number(equipment.total_units) - Number(equipment.held_units);
-        if (inclusion.quantity > physical) throw new Error(`${equipment.name}: not enough physical rental units.`);
+        const totalUnits = Math.max(0, Number(equipment.total_units) || 0);
+        if (inclusion.quantity > totalUnits) throw new Error(`${equipment.name}: only ${totalUnits} total rental units can be included.`);
         if (Number(equipment.rental_rate_per_day) <= 0 ||
             Math.abs(Number(equipment.rental_rate_per_day) - Number(inclusion.unitSalesPrice)) > 0.005)
             throw new Error(`${equipment.name}: rental rate has changed. Refresh the catalog before saving.`);
@@ -817,9 +819,35 @@ async function replacePackageItemsV2(connection, packageId, storeId, branchId, i
             throw new Error(`Package product ${inclusion.productId} requires a specific variant.`);
         if (Number(rows[0].has_variants)!==1 && inclusion.variantId)
             throw new Error(`Package product ${inclusion.productId} is not variant-based.`);
+        const catalogVariantId = await v2CatalogVariantId(connection, inclusion.productId, inclusion.variantId);
+        const [stocks] = await connection.execute(
+            `SELECT bi.on_hand_quantity, bi.reserved_quantity, bi.unavailable_quantity,
+                    bi.expiration_date, bi.status
+             FROM branch_inventory bi
+             WHERE bi.store_id = ? AND bi.branch_id = ? AND bi.variant_id = ?
+             LIMIT 1`,
+            [storeId, branchId, catalogVariantId]
+        );
+        const stock = stocks[0];
+        const todayPH = new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'Asia/Manila', year: 'numeric', month: '2-digit', day: '2-digit'
+        }).format(new Date());
+        const expiryDate = stock?.expiration_date;
+        const expiryDay = expiryDate instanceof Date
+            ? `${expiryDate.getFullYear()}-${String(expiryDate.getMonth() + 1).padStart(2, '0')}-${String(expiryDate.getDate()).padStart(2, '0')}`
+            : String(expiryDate || '').slice(0, 10);
+        const expired = Boolean(expiryDay && expiryDay < todayPH);
+        const availableItems = stock && String(stock.status).toLowerCase() === 'active' && !expired
+            ? Math.max(0, Number(stock.on_hand_quantity || 0)
+                - Number(stock.reserved_quantity || 0)
+                - Number(stock.unavailable_quantity || 0))
+            : 0;
+        if (inclusion.quantity > availableItems) {
+            throw new Error(`Consumable ${inclusion.productName || inclusion.productId}: only ${availableItems} available items can be included.`);
+        }
         consumableLines.push({
             ...inclusion,
-            catalogVariantId: await v2CatalogVariantId(connection, inclusion.productId, inclusion.variantId),
+            catalogVariantId,
         });
     }
     await connection.execute(

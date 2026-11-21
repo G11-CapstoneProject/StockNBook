@@ -66,6 +66,14 @@ function isValidPhilippineMobile(value: string) {
     return /^09\d{9}$/.test(local);
 }
 
+function formatPersonalMobile(value: string): string {
+    const raw = String(value ?? "").trim();
+    const digits = raw.replace(/\D/g, "");
+    const local = digits.startsWith("63") ? `0${digits.slice(2)}` : digits.length === 10 && digits.startsWith("9") ? `0${digits}` : digits;
+    if (!/^09\d{0,9}$/.test(local)) return raw;
+    return [local.slice(0, 4), local.slice(4, 7), local.slice(7, 11)].filter(Boolean).join(" ");
+}
+
 type ManagerInviteDelivery = {
     link: string;
     email: string;
@@ -513,7 +521,7 @@ export default function BranchManagersPage() {
     const openManagerEditor = (manager: BranchManager) => {
         setEditingManager(manager);
         setEditName(manager.name === "Unnamed manager" ? "" : manager.name);
-        setEditPhone(manager.phone);
+        setEditPhone(formatPersonalMobile(manager.phone));
         setEditBranchId(manager.branchId);
         setEditError("");
         setNewEmail("");
@@ -546,7 +554,7 @@ export default function BranchManagersPage() {
             const result = await postManagerAction("update_manager_details", {
                 manager_id: editingManager.id,
                 full_name: name,
-                phone: editPhone.trim(),
+                phone: editPhone.replace(/\D/g, ""),
                 branch_id: editBranchId || undefined,
             });
             if (!result.ok) {
@@ -1047,8 +1055,8 @@ export default function BranchManagersPage() {
                                     <input id="manager-edit-name" value={editName} onChange={e => setEditName(e.target.value)} disabled={savingDetails} placeholder="Manager full name" className="h-[44px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-3.5 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:cursor-not-allowed disabled:bg-[#F7F4F8] disabled:text-[#8A7D92]" />
                                 </div>
                                 <div>
-                                    <label htmlFor="manager-edit-phone" className="mb-1.5 block text-sm font-medium text-[#1A1220]">Phone number</label>
-                                    <input id="manager-edit-phone" type="tel" inputMode="tel" value={editPhone} onChange={e => setEditPhone(e.target.value)} disabled={savingDetails} placeholder="0912 345 6789" className="h-[44px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-3.5 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:cursor-not-allowed disabled:bg-[#F7F4F8] disabled:text-[#8A7D92]" />
+                                    <label htmlFor="manager-edit-phone" className="mb-1.5 block text-sm font-medium text-[#1A1220]">Personal mobile number</label>
+                                    <input id="manager-edit-phone" type="tel" inputMode="tel" value={editPhone} onChange={e => setEditPhone(formatPersonalMobile(e.target.value))} disabled={savingDetails} placeholder="0912 345 6789" className="h-[44px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-3.5 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:cursor-not-allowed disabled:bg-[#F7F4F8] disabled:text-[#8A7D92]" />
                                     <p className="mt-1 text-xs text-[#7A6A84]">Enter an 11-digit Philippine mobile number starting with 09.</p>
                                 </div>
                                 <div>

@@ -12,7 +12,7 @@ type CurrentUserResult = {
 // Several client components can ask for the current user at the same time.
 // A tiny per-token cache + in-flight de-duplication prevents those requests
 // from invoking the auth Lambda repeatedly during the same render burst.
-const CACHE_TTL_MS = 3_000;
+const CACHE_TTL_MS = 0; // Do not cache authentication status after password-reset revocation.
 const currentUserCache = new Map<string, CurrentUserResult & { expiresAt: number }>();
 const currentUserInFlight = new Map<string, Promise<CurrentUserResult>>();
 
@@ -37,6 +37,12 @@ async function resolveCurrentUser(authorization: string): Promise<CurrentUserRes
     };
 
     const response = await handler(event);
+    if (!response) {
+        return {
+            data: { error: "Authentication server did not return a response." },
+            status: 502,
+        };
+    }
     let data: unknown = {};
 
     try {
@@ -74,7 +80,7 @@ export async function GET(req: NextRequest) {
             return NextResponse.json(cached.data, {
                 status: cached.status,
                 headers: {
-                    "Cache-Control": "private, max-age=3",
+                    "Cache-Control": "no-store",
                     Vary: "Authorization",
                 },
             });
@@ -96,7 +102,7 @@ export async function GET(req: NextRequest) {
         }
 
         // Cache only successful authenticated responses.
-        if (result.status >= 200 && result.status < 300) {
+        if (CACHE_TTL_MS > 0 && result.status >= 200 && result.status < 300) {
             currentUserCache.set(key, {
                 ...result,
                 expiresAt: Date.now() + CACHE_TTL_MS,
@@ -106,7 +112,7 @@ export async function GET(req: NextRequest) {
         return NextResponse.json(result.data, {
             status: result.status,
             headers: {
-                "Cache-Control": "private, max-age=3",
+                "Cache-Control": "no-store",
                 Vary: "Authorization",
             },
         });

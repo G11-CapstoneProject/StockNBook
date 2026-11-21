@@ -22,6 +22,22 @@ import {
     LockKeyhole, ArrowUpRight,
 } from "lucide-react";
 
+
+// Consistent Philippine mobile display; preserve existing landline contacts.
+function formatBranchContact(value: string): string {
+    const raw = String(value ?? "").trim();
+    const digits = raw.replace(/\D/g, "");
+    const local = digits.startsWith("63") ? `0${digits.slice(2)}` : digits.length === 10 && digits.startsWith("9") ? `0${digits}` : digits;
+    if (!/^09\d{0,9}$/.test(local)) return raw;
+    return [local.slice(0, 4), local.slice(4, 7), local.slice(7, 11)].filter(Boolean).join(" ");
+}
+
+function normalizeBranchContact(value: string): string {
+    const formatted = formatBranchContact(value);
+    const digits = formatted.replace(/\D/g, "");
+    return /^09\d{9}$/.test(digits) ? digits : String(value ?? "").trim();
+}
+
 type Permissions = {
     dashboard: boolean;
     bookings: boolean;
@@ -867,7 +883,7 @@ export default function BranchesPage() {
                     branches: [
                         {
                             branch_name: addBranchName.trim(),
-                            contact_number: addContactNumber.trim(),
+                            contact_number: normalizeBranchContact(addContactNumber),
                             address: addAddress.trim(),
                             status: addBranchStatus,
                             branch_status: addBranchStatus,
@@ -934,7 +950,7 @@ export default function BranchesPage() {
     const openEditModal = (branch: Branch) => {
         setEditingBranch(branch);
         setEditBranchName(branch.branch_name || "");
-        setEditContactNumber(branch.contact_number || "");
+        setEditContactNumber(formatBranchContact(branch.contact_number || ""));
         setEditAddress(branch.address || "");
         setEditBranchStatus(getBranchStatus(branch));
 
@@ -1004,7 +1020,7 @@ export default function BranchesPage() {
                 body: JSON.stringify({
                     branch_id: editingBranch.id,
                     branch_name: editBranchName.trim(),
-                    contact_number: editContactNumber,
+                    contact_number: normalizeBranchContact(editContactNumber),
                     address: editAddress,
                     status: editBranchStatus,
                     branch_status: editBranchStatus,
@@ -1299,9 +1315,9 @@ export default function BranchesPage() {
                                         />
 
                                         <TextInput
-                                            label="Contact number"
+                                            label="Branch contact number"
                                             value={addContactNumber}
-                                            onChange={setAddContactNumber}
+                                            onChange={(value) => setAddContactNumber(formatBranchContact(value))}
                                             placeholder="0912 345 6789"
                                         />
                                     </div>
@@ -1540,9 +1556,9 @@ export default function BranchesPage() {
                                         onChange={setEditBranchName}
                                     />
                                     <TextInput
-                                        label="Contact number"
+                                        label="Branch contact number"
                                         value={editContactNumber}
-                                        onChange={setEditContactNumber}
+                                        onChange={(value) => setEditContactNumber(formatBranchContact(value))}
                                     />
                                 </div>
 
@@ -1862,8 +1878,8 @@ function BranchCard({
                     />
                 </div>
                 <Metric
-                    value={branch.contact_number || "No phone number"}
-                    label="Phone Number"
+                    value={formatBranchContact(branch.contact_number || "") || "No contact number"}
+                    label="Branch Contact Number"
                     icon={<Phone size={18} strokeWidth={2} aria-hidden="true" />}
                     iconBackground="#EAF3FF"
                     iconColor="#2E78DA"

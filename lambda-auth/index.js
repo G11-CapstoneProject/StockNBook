@@ -12,6 +12,79 @@ function normalizePhilippineMobile(value) {
         : (digits.length === 10 && digits.startsWith("9") ? `0${digits}` : digits);
     return /^09\d{9}$/.test(local) ? local : null;
 }
+// A personal mobile number may be used for separate businesses by accounts
+// with the SAME full name; different names cannot claim an existing number.
+// Within one business, a personal number still belongs to a single account.
+// Email uniqueness is checked separately. Branch contact numbers are separate.
+// This compares recorded names, not verified legal identities or phone ownership.
+function normalizedAccountName(value) {
+    return String(value ?? "").normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
+}
+async function accountPhoneConflict(connection, phone, fullName, storeId = null, excludeUserId = null) {
+    const normalized = normalizePhilippineMobile(phone);
+    if (!normalized) return null;
+    const [rows] = await connection.execute(
+        `SELECT id, store_id, full_name FROM users
+         WHERE phone IS NOT NULL AND phone <> ''
+           AND RIGHT(REPLACE(REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '(', ''), ')', ''), 10) = ?
+           AND (? IS NULL OR id <> ?)`,
+        [normalized.slice(-10), excludeUserId, excludeUserId]
+    );
+    const requestedName = normalizedAccountName(fullName);
+    // Check ALL matches, not only the first; the number could already appear
+    // in more than one business belonging to the same person.
+    if (rows.some(row => normalizedAccountName(row.full_name) !== requestedName)) {
+        return {
+            code: "PHONE_NAME_MISMATCH",
+            error: "This mobile number is registered under a different name.",
+        };
+    }
+    if (storeId != null && rows.some(row => String(row.store_id) === String(storeId))) {
+        return {
+            code: "PHONE_ALREADY_REGISTERED",
+            error: "This mobile number is already registered for this business.",
+        };
+    }
+    return null;
+}
+
+// stores.slug already has a global UNIQUE index; this check gives an actionable
+// field error before sending an OTP rather than failing at INSERT time.
+const DUPLICATE_BUSINESS_MESSAGE = "This business name is already registered. Please use a different business name.";
+async function businessNameAlreadyRegistered(connection, slug) {
+    const [rows] = await connection.execute(
+        "SELECT id FROM stores WHERE slug = ? LIMIT 1",
+        [slug]
+    );
+    return rows.length > 0;
+}
+
+function normalizedBranchLabel(value) {
+    return String(value ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+function normalizedBranchPhone(value) {
+    // Branch contacts use the existing stored format. The last ten digits
+    // identify the same PH mobile number whether written as 09... or +639...
+    const digits = String(value ?? '').replace(/\D/g, '');
+    return digits.length >= 10 ? digits.slice(-10) : digits;
+}
+async function findStoreBranchConflict(connection, storeId, name, contact, excludeBranchId = null) {
+    const [rows] = await connection.execute(
+        `SELECT id, branch_name, phone FROM branches
+         WHERE store_id = ? AND (? IS NULL OR id <> ?)`,
+        [storeId, excludeBranchId, excludeBranchId]
+    );
+    const nameKey = normalizedBranchLabel(name);
+    const phoneKey = normalizedBranchPhone(contact);
+    if (nameKey && rows.some(row => normalizedBranchLabel(row.branch_name) === nameKey)) {
+        return { code: 'BRANCH_NAME_EXISTS', error: 'This branch name is already used in your business.' };
+    }
+    if (phoneKey && rows.some(row => normalizedBranchPhone(row.phone) === phoneKey)) {
+        return { code: 'BRANCH_PHONE_EXISTS', error: 'This branch contact number is already used by another branch in your business.' };
+    }
+    return null;
+}
+
 // ===== BEGIN StockNBook identification numbers (identical in lambda-auth, lambda-pos, lambda-products, lambda-rental-inventory) =====
 const identifiers = (() => {
     /*
@@ -944,13 +1017,25 @@ async function recoveryAction(connection, action, body, headers) {
         await authLock(connection, `account:${email}`);
         const [rows] = await connection.execute("SELECT id, email, store_id FROM users WHERE email = ? AND status = 'active' AND email_verified_at IS NOT NULL AND password_hash IS NOT NULL LIMIT 1", [email]);
         // Platform administrators use a controlled recovery procedure, not email-only reset.
-        if (!rows.length) throw securityError(404, "No account found for password recovery. Check your email or contact your administrator.", "RECOVERY_ACCOUNT_NOT_FOUND");
+        if (!rows.length) {
+            // Do not reveal registration status; only eligible verified accounts receive email.
+            await bcrypt.compare(String(email), DUMMY_PASSWORD_HASH);
+            securityEvent("password_reset_requested_unknown", { purpose: "password_reset" });
+            return respond(200, { message: "If this email has a registered account, a verification code will be sent.", otp_sent: true, expires_in: 300, resend_in: 60 });
+        }
         const user = rows[0];
         // Send only to the canonical, already verified email stored on the account.
         // MySQL's case/accent-insensitive comparison can match a differently spelled input.
         const verifiedEmail = String(user.email).trim();
         const scope = otpScope("password_reset", verifiedEmail);
-        await guardOtpSend(connection, scope);
+        // A cooldown response must not distinguish registered from unregistered email.
+        try { await guardOtpSend(connection, scope); }
+        catch (error) {
+            if (Number(error?.statusCode) === 429) {
+                return respond(200, { message: "If this email has a registered account, a verification code will be sent.", otp_sent: true, expires_in: 300, resend_in: 60 });
+            }
+            throw error;
+        }
         const otp = generateOtp();
         const challenge = crypto.randomBytes(16).toString("hex");
         await connection.beginTransaction();
@@ -967,9 +1052,9 @@ async function recoveryAction(connection, action, body, headers) {
         } catch {
             await connection.execute("UPDATE otp_codes SET invalidated_at = UTC_TIMESTAMP(), used_at = UTC_TIMESTAMP() WHERE challenge_id = ?", [challenge]);
             securityEvent("password_reset_delivery_failed", { account_id: String(user.id) });
-            return respond(503, { error: "Unable to send a verification code. Please try again later.", code: "RECOVERY_OTP_DELIVERY_FAILED", retry_after_seconds: 60 });
+            return respond(200, { message: "If this email has a registered account, a verification code will be sent.", otp_sent: true, expires_in: 300, resend_in: 60 });
         }
-        return respond(200, { message: "Verification code sent.", otp_sent: true, expires_in: 300, resend_in: 60 });
+        return respond(200, { message: "If this email has a registered account, a verification code will be sent.", otp_sent: true, expires_in: 300, resend_in: 60 });
     }
     if (action === "verify_password_reset_otp") {
         await authLock(connection, `account:${email}`);
@@ -1001,7 +1086,7 @@ async function recoveryAction(connection, action, body, headers) {
             user = rows[0];
             if (!user) throw securityError(400, "Invalid or expired password reset authorization.", "RESET_INVALID");
             const hash = await bcrypt.hash(password, 12);
-            await connection.execute(`UPDATE users SET password_hash = ?, password_changed_at = UTC_TIMESTAMP(),
+            await connection.execute(`UPDATE users SET password_hash = ?, password_changed_at = UTC_TIMESTAMP(), auth_version = auth_version + 1,
                                                        failed_login_attempts = 0, first_failed_login_at = NULL, locked_until = NULL, lockout_count = 0, last_lockout_at = NULL WHERE id = ?`, [hash, user.id]);
             await connection.execute(`UPDATE otp_codes SET invalidated_at = UTC_TIMESTAMP(), used_at = COALESCE(used_at,UTC_TIMESTAMP()), reset_token_hash = NULL WHERE purpose = 'password_reset' AND user_id = ? AND invalidated_at IS NULL`, [user.id]);
             await connection.commit();
@@ -1078,6 +1163,7 @@ async function getManagerInviteRecord(connection, inviteToken) {
              users.email AS manager_email,
              users.phone AS manager_phone,
              users.permissions,
+             users.auth_version,
              users.status,
              users.store_id,
              users.branch_id,
@@ -1186,6 +1272,7 @@ async function getStaffInviteRecord(connection, inviteToken) {
              staff.email AS staff_email,
              staff.phone AS staff_phone,
              staff.permissions,
+             staff.auth_version,
              staff.status,
              staff.store_id,
              staff.branch_id,
@@ -2383,6 +2470,42 @@ const dbPool = mysql.createPool({
 
 
 
+
+// Session revocation is enforced against existing users/platform_admins.auth_version.
+// Every newly issued account JWT includes this claim; tokens from prior builds
+// are intentionally rejected, so users must sign in once after deployment.
+async function isCurrentAccountSession(connection, decoded) {
+    const version = decoded?.auth_version;
+    if (!Number.isSafeInteger(version) || version < 0) return false;
+    const role = String(decoded?.role || "").trim().toLowerCase();
+    if (role === "platform_admin") {
+        const adminId = Number(decoded.platform_admin_id);
+        if (!Number.isSafeInteger(adminId) || adminId < 1) return false;
+        const [rows] = await connection.execute(
+            "SELECT auth_version, email, status, role FROM platform_admins WHERE id = ? LIMIT 1", [adminId]);
+        const admin = rows[0];
+        return !!admin && String(admin.status).toLowerCase() === "active" &&
+            String(admin.role).toLowerCase() === "platform_admin" &&
+            Number(admin.auth_version) === version &&
+            String(admin.email).toLowerCase() === String(decoded.email || "").toLowerCase();
+    }
+    if (!["owner", "manager", "staff"].includes(role)) return false;
+    const accountId = Number(role === "owner" ? decoded.user_id :
+        role === "manager" ? decoded.manager_id : decoded.staff_id);
+    const storeId = Number(decoded.store_id);
+    if (!Number.isSafeInteger(accountId) || accountId < 1 ||
+        !Number.isSafeInteger(storeId) || storeId < 1) return false;
+    const [rows] = await connection.execute(
+        "SELECT auth_version, email, status, role, store_id, branch_id FROM users WHERE id = ? LIMIT 1", [accountId]);
+    const user = rows[0];
+    if (!user || String(user.status).toLowerCase() !== "active" ||
+        String(user.role).toLowerCase() !== role ||
+        Number(user.store_id) !== storeId || Number(user.auth_version) !== version ||
+        String(user.email).toLowerCase() !== String(decoded.email || "").toLowerCase()) return false;
+    return role === "owner" ||
+        (Number.isSafeInteger(Number(decoded.branch_id)) &&
+            Number(decoded.branch_id) > 0 && Number(user.branch_id) === Number(decoded.branch_id));
+}
 
 function getBearerTokenFromEvent(event) {
     const authHeader =
@@ -3625,6 +3748,19 @@ module.exports.handler = async (event) => {
     try {
         connection = await dbPool.getConnection();
 
+        // A valid signature alone is insufficient after password reset or
+        // deactivation. Check the current account version for every bearer request.
+        const presentedToken = getBearerTokenFromEvent(event);
+        if (presentedToken) {
+            let accountSession;
+            try { accountSession = jwt.verify(presentedToken, JWT_SECRET, { algorithms: ["HS256"] }); }
+            catch { throw securityError(401, "Your session has expired. Please log in again.", "ACCOUNT_SESSION_INVALID"); }
+            if (!(await isCurrentAccountSession(connection, accountSession))) {
+                securityEvent("revoked_session_rejected", { role: String(accountSession.role || "unknown") });
+                throw securityError(401, "Your session has expired. Please log in again.", "ACCOUNT_SESSION_INVALID");
+            }
+        }
+
         if (["request_password_reset", "verify_password_reset_otp", "reset_password"].includes(action))
             return await recoveryAction(connection, action, body, headers);
 
@@ -3638,9 +3774,8 @@ module.exports.handler = async (event) => {
             if (!authenticatedAccount) {
                 // A dummy bcrypt check reduces registration timing differences; no fake account records.
                 await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
-                if (action === "login") {
-                    throw securityError(401, "No account found with this email address. Please check your email.", "ACCOUNT_NOT_FOUND");
-                }
+                // Keep the same public response for nonexistent email and wrong password.
+                securityEvent("login_failed_unknown", { outcome: "invalid_credentials" });
                 throw securityError(401, AUTH_INVALID, "AUTH_FAILED");
             }
         }
@@ -4142,11 +4277,35 @@ module.exports.handler = async (event) => {
                 [emailAddress, emailAddress]
             );
 
+            // A returning Owner can open another business using the same phone
+            // and name, but must use a different (globally unique) email.
+            await authLock(connection, `phone:${phoneNumber}`);
+            const phoneConflict = await accountPhoneConflict(connection, phoneNumber, ownerName);
+            await authLock(connection, `business-name:${slug}`);
+            const businessConflict = await businessNameAlreadyRegistered(connection, slug);
+            const fieldErrors = {};
             if (existing.length > 0) {
+                fieldErrors.email = "This email address is already registered.";
+            }
+            if (phoneConflict) {
+                fieldErrors.phone = phoneConflict.error;
+            }
+            if (businessConflict) {
+                fieldErrors.store_name = DUPLICATE_BUSINESS_MESSAGE;
+            }
+            if (Object.prototype.hasOwnProperty.call(body, "confirm_password") &&
+                String(body.confirm_password ?? "") !== accountPassword) {
+                fieldErrors.confirm_password = "Passwords do not match. Try again.";
+            }
+            if (Object.keys(fieldErrors).length > 0) {
                 return {
-                    statusCode: 400,
+                    statusCode: 409,
                     headers,
-                    body: JSON.stringify({ error: "Email already exists" }),
+                    body: JSON.stringify({
+                        error: "Please correct the highlighted fields.",
+                        code: "SIGNUP_FIELD_CONFLICT",
+                        field_errors: fieldErrors,
+                    }),
                 };
             }
 
@@ -4288,14 +4447,28 @@ module.exports.handler = async (event) => {
                 [emailAddress, emailAddress]
             );
 
-            if (existing.length > 0) {
+            // Recheck before consuming the OTP: the business or identity may
+            // have been registered by another request since the code was sent.
+            // Use the same lock order as send_signup_otp (account, phone, business).
+            await authLock(connection, `phone:${phoneNumber}`);
+            const phoneConflict = await accountPhoneConflict(connection, phoneNumber, ownerName);
+            await authLock(connection, `business-name:${slug}`);
+            const businessConflict = await businessNameAlreadyRegistered(connection, slug);
+            const fieldErrors = {};
+            if (existing.length > 0) fieldErrors.email = "This email address is already registered.";
+            if (phoneConflict) fieldErrors.phone = phoneConflict.error;
+            if (businessConflict) fieldErrors.store_name = DUPLICATE_BUSINESS_MESSAGE;
+            if (Object.keys(fieldErrors).length > 0) {
                 return {
-                    statusCode: 400,
+                    statusCode: 409,
                     headers,
-                    body: JSON.stringify({ error: "Email already exists" }),
+                    body: JSON.stringify({
+                        error: "Please correct the highlighted fields.",
+                        code: "SIGNUP_FIELD_CONFLICT",
+                        field_errors: fieldErrors,
+                    }),
                 };
             }
-
             const otpRecord = await checkOtp(connection, otpScope("signup", otpEmail), otp, false);
 
             const hashed = await bcrypt.hash(accountPassword, 10);
@@ -4307,12 +4480,20 @@ module.exports.handler = async (event) => {
             try {
                 await connection.execute("UPDATE otp_codes SET used_at = UTC_TIMESTAMP(), verified_at = UTC_TIMESTAMP() WHERE id = ?", [otpRecord.id]);
                 const storeCode = await identifiers.allocateStoreCode(connection, storeName, slug);
-                [result] = await connection.execute(
-                    `INSERT INTO stores
-                         (store_code, slug, store_name, business_name, email, phone)
-                     VALUES (?, ?, ?, ?, ?, ?)`,
-                    [storeCode, slug, storeName, storeName, emailAddress, phoneNumber]
-                );
+                try {
+                    [result] = await connection.execute(
+                        `INSERT INTO stores
+                             (store_code, slug, store_name, business_name, email, phone)
+                         VALUES (?, ?, ?, ?, ?, ?)`,
+                        [storeCode, slug, storeName, storeName, emailAddress, phoneNumber]
+                    );
+                } catch (storeInsertError) {
+                    if (storeInsertError?.code === "ER_DUP_ENTRY" &&
+                        /slug/i.test(String(storeInsertError?.sqlMessage || storeInsertError?.message || ""))) {
+                        throw securityError(409, DUPLICATE_BUSINESS_MESSAGE, "BUSINESS_NAME_ALREADY_REGISTERED");
+                    }
+                    throw storeInsertError;
+                }
                 const [ownerResult] = await connection.execute(
                     `INSERT INTO users
                      (store_id, role, full_name, email, password_hash, phone, status, email_verified_at,
@@ -4337,6 +4518,7 @@ module.exports.handler = async (event) => {
                     user_id: ownerUserId,
                     email: emailAddress,
                     role: "owner",
+                    auth_version: 0,
                 },
                 JWT_SECRET,
                 { expiresIn: "7d" }
@@ -4561,6 +4743,9 @@ module.exports.handler = async (event) => {
             await connection.beginTransaction();
 
             try {
+                // Serialize branch creations for this store to avoid two requests
+                // simultaneously accepting an identical branch name/contact.
+                await connection.execute(`SELECT id FROM stores WHERE id = ? FOR UPDATE`, [storeId]);
                 for (const branch of branches) {
                     const branchName = String(
                         branch.branch_name || ""
@@ -4621,6 +4806,15 @@ module.exports.handler = async (event) => {
 
                     if (!branchName) {
                         throw new Error("Every branch must have a branch name.");
+                    }
+                    const branchConflict = await findStoreBranchConflict(
+                        connection, storeId, branchName, contactNumber
+                    );
+                    if (branchConflict) {
+                        const duplicateError = new Error(branchConflict.error);
+                        duplicateError.code = branchConflict.code;
+                        duplicateError.statusCode = 409;
+                        throw duplicateError;
                     }
 
                     if (
@@ -4743,10 +4937,11 @@ module.exports.handler = async (event) => {
                 await connection.rollback();
 
                 return {
-                    statusCode: 500,
+                    statusCode: err?.statusCode || 500,
                     headers,
                     body: JSON.stringify({
                         error: err?.message || "Unable to save onboarding",
+                        ...(err?.code ? { code: err.code } : {}),
                     }),
                 };
             }
@@ -5020,6 +5215,14 @@ module.exports.handler = async (event) => {
                     };
                 }
 
+                await authLock(connection, `phone:${phoneNumber}`);
+                const phoneConflict = await accountPhoneConflict(
+                    connection, phoneNumber, managerName, manager.store_id, manager.manager_id
+                );
+                if (phoneConflict) {
+                    return { statusCode: 409, headers, body: JSON.stringify(phoneConflict) };
+                }
+
                 await connection.execute(
                     `UPDATE users
                      SET full_name = ?, phone = ?
@@ -5082,6 +5285,15 @@ module.exports.handler = async (event) => {
                 );
 
                 const policyVersion = requirePolicyAcceptance(body, "manager", manager.branch_id);
+                const finalManagerName = requestedManagerName || manager.manager_name || "Manager";
+
+                await authLock(connection, `phone:${phoneNumber}`);
+                const phoneConflict = await accountPhoneConflict(
+                    connection, phoneNumber, finalManagerName, manager.store_id, manager.manager_id
+                );
+                if (phoneConflict) {
+                    return { statusCode: 409, headers, body: JSON.stringify(phoneConflict) };
+                }
 
                 const passwordValid = passwordPolicy(accountPassword);
 
@@ -5096,8 +5308,6 @@ module.exports.handler = async (event) => {
                     };
                 }
 
-                const finalManagerName =
-                    requestedManagerName || manager.manager_name || "Manager";
                 const hashedPassword = await bcrypt.hash(
                     accountPassword,
                     10
@@ -5168,6 +5378,7 @@ module.exports.handler = async (event) => {
                         branch_id: manager.branch_id,
                         email: manager.manager_email,
                         role: "manager",
+                        auth_version: Number(manager.auth_version),
                     },
                     JWT_SECRET,
                     { expiresIn: "7d" }
@@ -5486,6 +5697,7 @@ module.exports.handler = async (event) => {
                     email: admin.email,
                     full_name: admin.full_name,
                     role: "PLATFORM_ADMIN",
+                    auth_version: Number(authenticatedAccount.auth_version),
                 },
                 JWT_SECRET,
                 { expiresIn: "8h" }
@@ -5521,7 +5733,7 @@ module.exports.handler = async (event) => {
             // 1. Try owner login first
             const [storeRows] = await connection.execute(
                 `SELECT s.id, s.store_name, s.slug, u.id AS user_id, u.full_name AS owner_name,
-                        u.email, u.password_hash AS password, u.status
+                        u.email, u.password_hash AS password, u.status, u.auth_version
                  FROM users u
                           JOIN stores s ON s.id = u.store_id
                  WHERE u.email = ?
@@ -5543,6 +5755,7 @@ module.exports.handler = async (event) => {
                         user_id: store.user_id,
                         email: store.email,
                         role: "owner",
+                        auth_version: Number(store.auth_version),
                     },
                     JWT_SECRET,
                     { expiresIn: "7d" }
@@ -5572,6 +5785,7 @@ module.exports.handler = async (event) => {
                      managers.email AS manager_email,
                      managers.password_hash AS password,
                      managers.permissions,
+                     managers.auth_version,
                      managers.status,
                      managers.employee_code,
                      branches.branch_name,
@@ -5646,6 +5860,7 @@ module.exports.handler = async (event) => {
                         branch_id: manager.branch_id,
                         email: manager.manager_email,
                         role: "manager",
+                        auth_version: Number(manager.auth_version),
                     },
                     JWT_SECRET,
                     { expiresIn: "7d" }
@@ -5680,6 +5895,7 @@ module.exports.handler = async (event) => {
                      staff.email AS staff_email,
                      staff.password_hash AS password,
                      staff.permissions,
+                     staff.auth_version,
                      staff.status,
                      staff.employee_code,
                      branches.branch_name,
@@ -5720,6 +5936,7 @@ module.exports.handler = async (event) => {
                         manager_id: staff.manager_id,
                         email: staff.staff_email,
                         role: "staff",
+                        auth_version: Number(staff.auth_version),
                     },
                     JWT_SECRET,
                     { expiresIn: "7d" }
@@ -5980,6 +6197,14 @@ module.exports.handler = async (event) => {
                     };
                 }
 
+                await authLock(connection, `phone:${phoneNumber}`);
+                const phoneConflict = await accountPhoneConflict(
+                    connection, phoneNumber, staffName, staff.store_id, staff.staff_id
+                );
+                if (phoneConflict) {
+                    return { statusCode: 409, headers, body: JSON.stringify(phoneConflict) };
+                }
+
                 await connection.execute(
                     `UPDATE users
                      SET full_name = ?, phone = ?
@@ -6042,6 +6267,15 @@ module.exports.handler = async (event) => {
                 );
 
                 const policyVersion = requirePolicyAcceptance(body, "staff", staff.branch_id);
+                const finalStaffName = requestedStaffName || staff.staff_name || "Staff";
+
+                await authLock(connection, `phone:${phoneNumber}`);
+                const phoneConflict = await accountPhoneConflict(
+                    connection, phoneNumber, finalStaffName, staff.store_id, staff.staff_id
+                );
+                if (phoneConflict) {
+                    return { statusCode: 409, headers, body: JSON.stringify(phoneConflict) };
+                }
 
                 const passwordValid = passwordPolicy(accountPassword);
 
@@ -6056,8 +6290,6 @@ module.exports.handler = async (event) => {
                     };
                 }
 
-                const finalStaffName =
-                    requestedStaffName || staff.staff_name || "Staff";
                 const hashedPassword = await bcrypt.hash(
                     accountPassword,
                     10
@@ -6154,6 +6386,7 @@ module.exports.handler = async (event) => {
                         branch_id: staff.branch_id,
                         email: staff.staff_email,
                         role: "staff",
+                        auth_version: Number(staff.auth_version),
                     },
                     JWT_SECRET,
                     { expiresIn: "7d" }
@@ -6476,7 +6709,7 @@ module.exports.handler = async (event) => {
             if (staffId) {
                 [result] = await connection.execute(
                     `UPDATE users
-                     SET status = ?
+                     SET status = ?, auth_version = auth_version + 1
                      WHERE id = ?
                        AND role = 'staff'
                        AND store_id = ?
@@ -6494,7 +6727,7 @@ module.exports.handler = async (event) => {
             } else {
                 [result] = await connection.execute(
                     `UPDATE users
-                     SET status = ?
+                     SET status = ?, auth_version = auth_version + 1
                      WHERE email = ?
                        AND role = 'staff'
                        AND store_id = ?
@@ -7229,6 +7462,7 @@ module.exports.handler = async (event) => {
                      managers.full_name AS manager_name,
                      managers.email AS manager_email,
                      managers.permissions,
+                     managers.auth_version,
                      managers.status,
                      managers.branch_id,
                      branches.branch_name,
@@ -7445,6 +7679,7 @@ module.exports.handler = async (event) => {
             let managerStatus = "";
             let branchName = "";
 
+            if (phoneNumber) await authLock(connection, `phone:${phoneNumber}`);
             await connection.beginTransaction();
             try {
                 const [managerRows] = await connection.execute(
@@ -7503,6 +7738,12 @@ module.exports.handler = async (event) => {
                     branchName = branchRows[0].branch_name || "";
                 }
 
+                if (phoneNumber) {
+                    const phoneConflict = await accountPhoneConflict(connection, phoneNumber, fullName, storeId, managerId);
+                    if (phoneConflict) {
+                        throw securityError(409, phoneConflict.error, phoneConflict.code);
+                    }
+                }
                 await connection.execute(
                     `UPDATE users
                      SET full_name = ?,
@@ -7774,7 +8015,7 @@ module.exports.handler = async (event) => {
                 );
                 const [updateResult] = await connection.execute(
                     `UPDATE users
-                     SET email = ?, email_verified_at = UTC_TIMESTAMP()
+                     SET email = ?, email_verified_at = UTC_TIMESTAMP(), auth_version = auth_version + 1
                      WHERE id = ? AND store_id = ? AND role = 'manager' AND email = ?`,
                     [newEmail, managerId, storeId, previousEmail]
                 );
@@ -8128,6 +8369,14 @@ module.exports.handler = async (event) => {
             await connection.beginTransaction();
 
             try {
+                await connection.execute(`SELECT id FROM stores WHERE id = ? FOR UPDATE`, [storeId]);
+                const branchConflict = await findStoreBranchConflict(
+                    connection, storeId, branch_name, contact_number, branch_id
+                );
+                if (branchConflict) {
+                    await connection.rollback();
+                    return { statusCode: 409, headers, body: JSON.stringify(branchConflict) };
+                }
                 const [branchResult] = await connection.execute(
                     `UPDATE branches
                      SET branch_name = ?,

@@ -50,6 +50,7 @@ async function tryPlatformAdminLogin({
                 email: admin.email,
                 full_name: admin.full_name,
                 role: "PLATFORM_ADMIN",
+                auth_version: Number(authenticated.auth_version),
             },
             process.env.JWT_SECRET,
             { expiresIn: "8h" }

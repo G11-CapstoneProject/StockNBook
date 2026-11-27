@@ -7,6 +7,23 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
+    // The admin session cookie is HttpOnly and must be expired by the server.
+    // Handle logout here without forwarding it to the Lambda auth handler.
+    if (body?.action === "admin_logout") {
+      const logoutResponse = NextResponse.json(
+          { success: true },
+          { headers: { "Cache-Control": "no-store" } }
+      );
+      logoutResponse.cookies.set("admin_token", "", {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
+        path: "/",
+        maxAge: 0,
+      });
+      return logoutResponse;
+    }
+
     const normalizedAction =
         body.action === "register" || body.action === "signup"
             ? "send_signup_otp"

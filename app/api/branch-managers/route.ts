@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { NextRequest, NextResponse } from "next/server";
 import { handler } from "../../../lambda-auth/index.js";
 import jwt from "jsonwebtoken";
@@ -64,6 +65,26 @@ function requiredEnv(name: string): string {
     return value;
 }
 
+// Database TLS: local DB_SSL=false; Azure DB_SSL=true requires trusted CA and hostname verification.
+function stocknbookDatabaseTlsOptions() {
+    const mode = String(process.env.DB_SSL ?? "false").trim().toLowerCase();
+    if (mode !== "true" && mode !== "false") {
+        throw new Error("DB_SSL must be true or false.");
+    }
+    if (process.env.NODE_ENV === "production" && mode !== "true") {
+        throw new Error("DB_SSL=true is required for production database connections.");
+    }
+    if (mode === "false") return undefined;
+
+    const caPath = String(process.env.DB_SSL_CA_PATH || "").trim();
+    return {
+        rejectUnauthorized: true as const,
+        verifyIdentity: true as const,
+        minVersion: "TLSv1.2" as const,
+        ...(caPath ? { ca: readFileSync(caPath, "utf8") } : {}),
+    };
+}
+
 function ownerDatabase(): Pool {
 // ===== ENV SECURITY CHANGE: Required environment variable helper END =====
     if (!ownerPool) {
@@ -75,6 +96,7 @@ function ownerDatabase(): Pool {
             password: requiredEnv("DB_PASSWORD"),
             database: requiredEnv("DB_NAME"),
             // ===== ENV SECURITY CHANGE: MySQL environment configuration END =====
+            ssl: stocknbookDatabaseTlsOptions(),
             waitForConnections: true,
             connectionLimit: 6,
             timezone: "+08:00",

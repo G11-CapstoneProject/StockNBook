@@ -3,11 +3,12 @@
 import RoleSidebar from "@/components/sidebar/RoleSidebar";
 import RequirePermission from "@/components/permissions/RequirePermission";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
     Building2,
     CheckCircle2,
+    AlertCircle,
     MapPin,
     Pencil,
     Phone,
@@ -471,6 +472,7 @@ function getBranchLimit(plan: SubscriptionPlan) {
 
 export default function BranchesPage() {
     const router = useRouter();
+    const { toast, setToast, notify, confirmation, confirmAction, resolveConfirmation } = useModuleFeedback();
 
     const [branches, setBranches] = useState<Branch[]>([]);
     const [loading, setLoading] = useState(true);
@@ -508,6 +510,8 @@ export default function BranchesPage() {
     const [editManagerName, setEditManagerName] = useState("");
     const [editManagerEmail, setEditManagerEmail] = useState("");
     const [saving, setSaving] = useState(false);
+    const [deleting, setDeleting] = useState(false);
+    const deletionInFlight = useRef(false);
 
     const loadSubscriptionPlan = useCallback(async () => {
         const token =
@@ -802,6 +806,7 @@ export default function BranchesPage() {
     };
 
     const handleCreateBranch = async () => {
+        if (adding || saving || deleting) return;
         const branchLimit = getBranchLimit(subscriptionPlan);
 
         if (Number.isFinite(branchLimit) && branches.length >= branchLimit) {
@@ -815,9 +820,7 @@ export default function BranchesPage() {
             !addContactNumber.trim() ||
             !addAddress.trim()
         ) {
-            alert(
-                "Please complete the branch name, contact number, and address."
-            );
+            notify("warning", "Missing branch details", "Please complete the branch name, contact number, and address.");
             return;
         }
 
@@ -833,9 +836,7 @@ export default function BranchesPage() {
             addBranchStatus === "inactive" &&
             !finalInactiveReason
         ) {
-            alert(
-                "Please select a reason why the branch is inactive."
-            );
+            notify("warning", "Inactive reason required", "Please select a reason why the branch is inactive.");
             return;
         }
 
@@ -847,9 +848,7 @@ export default function BranchesPage() {
         const hasManagerEmail = Boolean(normalizedManagerEmail);
 
         if (hasManagerName !== hasManagerEmail) {
-            alert(
-                "Please complete both the manager name and manager email, or leave both fields empty."
-            );
+            notify("warning", "Incomplete manager details", "Please complete both the manager name and manager email, or leave both fields empty.");
             return;
         }
 
@@ -857,7 +856,7 @@ export default function BranchesPage() {
             hasManagerEmail &&
             !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedManagerEmail)
         ) {
-            alert("Please enter a valid manager email address.");
+            notify("warning", "Invalid manager email", "Please enter a valid manager email address.");
             return;
         }
 
@@ -869,6 +868,13 @@ export default function BranchesPage() {
             router.push("/");
             return;
         }
+
+        const confirmed = await confirmAction({
+            title: "Create branch?",
+            message: `Create "${addBranchName.trim()}" as an ${addBranchStatus} branch?${hasManagerEmail ? ` A manager invitation will be sent to ${normalizedManagerEmail}.` : ""}`,
+            confirmLabel: "Create Branch",
+        });
+        if (!confirmed) return;
 
         setAdding(true);
 
@@ -901,11 +907,7 @@ export default function BranchesPage() {
             const data = await response.json();
 
             if (!response.ok) {
-                alert(
-                    data.error ||
-                    data.message ||
-                    "Unable to create the branch."
-                );
+                notify("error", "Unable to create branch", data.error || data.message || "Please try again.");
                 return;
             }
 
@@ -925,23 +927,19 @@ export default function BranchesPage() {
                     Number(data.invitation_emails_sent || 0) > 0;
 
                 if (emailWasSent) {
-                    alert(
-                        "Branch created successfully. The manager invitation email was sent."
-                    );
+                    notify("success", "Branch created successfully", `${addBranchName.trim()} was added and the manager invitation was emailed.`);
                 } else {
                     const emailError =
                         invitation?.email_error ||
                         "The email provider did not confirm delivery.";
 
-                    alert(
-                        `The branch and manager invitation were created, but the invitation email could not be sent. ${emailError}`
-                    );
+                    notify("warning", "Branch created, email not sent", `The branch and manager invitation were saved. ${emailError}`);
                 }
             } else {
-                alert("Branch created successfully.");
+                notify("success", "Branch created successfully", `${addBranchName.trim()} was added to your branch directory.`);
             }
         } catch {
-            alert("Something went wrong while creating the branch.");
+            notify("error", "Unable to create branch", "Something went wrong. Please try again.");
         } finally {
             setAdding(false);
         }
@@ -974,10 +972,10 @@ export default function BranchesPage() {
     };
 
     const handleUpdateBranch = async () => {
-        if (!editingBranch) return;
+        if (!editingBranch || adding || saving || deleting) return;
 
         if (!editBranchName.trim()) {
-            alert("Branch name is required.");
+            notify("warning", "Branch name required", "Please enter the branch name.");
             return;
         }
 
@@ -993,9 +991,7 @@ export default function BranchesPage() {
             editBranchStatus === "inactive" &&
             !finalInactiveReason
         ) {
-            alert(
-                "Please select a reason why the branch is inactive."
-            );
+            notify("warning", "Inactive reason required", "Please select a reason why the branch is inactive.");
             return;
         }
 
@@ -1007,6 +1003,14 @@ export default function BranchesPage() {
             router.push("/");
             return;
         }
+
+        const confirmed = await confirmAction({
+            title: "Save branch changes?",
+            message: `Save the updated details for "${editBranchName.trim()}"?${getBranchStatus(editingBranch) !== editBranchStatus ? ` Its operating status will change to ${editBranchStatus}.` : ""}`,
+            confirmLabel: "Save Changes",
+            danger: getBranchStatus(editingBranch) !== editBranchStatus && editBranchStatus === "inactive",
+        });
+        if (!confirmed) return;
 
         setSaving(true);
 
@@ -1034,24 +1038,29 @@ export default function BranchesPage() {
             const data = await res.json();
 
             if (!res.ok) {
-                alert(data.error || "Failed to update branch.");
+                notify("error", "Unable to update branch", data.error || "Please try again.");
                 return;
             }
 
             setShowEditModal(false);
             setEditingBranch(null);
             await loadBranches();
+            notify("success", "Branch updated successfully", `Changes to ${editBranchName.trim()} have been saved.`);
         } catch {
-            alert("Something went wrong while updating branch.");
+            notify("error", "Unable to update branch", "Something went wrong. Please try again.");
         } finally {
             setSaving(false);
         }
     };
 
     const handleDeleteBranch = async (branch: Branch) => {
-        const confirmed = confirm(
-            `Delete ${branch.branch_name}? This will also remove its assigned manager and staff records.`
-        );
+        if (deletionInFlight.current || adding || saving) return;
+        const confirmed = await confirmAction({
+            title: "Delete branch?",
+            message: `Delete "${branch.branch_name}"? This will also remove its assigned manager and staff accounts. This action cannot be undone.`,
+            confirmLabel: "Delete Branch",
+            danger: true,
+        });
 
         if (!confirmed) return;
 
@@ -1064,6 +1073,9 @@ export default function BranchesPage() {
             return;
         }
 
+        if (deletionInFlight.current) return;
+        deletionInFlight.current = true;
+        setDeleting(true);
         try {
             const res = await fetch("/api/branches", {
                 method: "DELETE",
@@ -1077,13 +1089,17 @@ export default function BranchesPage() {
             const data = await res.json();
 
             if (!res.ok) {
-                alert(data.error || "Failed to delete branch.");
+                notify("error", "Unable to delete branch", data.error || "Please try again.");
                 return;
             }
 
             await loadBranches();
+            notify("success", "Branch deleted successfully", `${branch.branch_name} was removed from your branch directory.`);
         } catch {
-            alert("Something went wrong while deleting branch.");
+            notify("error", "Unable to delete branch", "Something went wrong. Please try again.");
+        } finally {
+            deletionInFlight.current = false;
+            setDeleting(false);
         }
     };
 
@@ -1722,6 +1738,8 @@ export default function BranchesPage() {
                         </div>
                     </div>
                 )}
+                {confirmation && <ModuleConfirmationDialog confirmation={confirmation} onResolve={resolveConfirmation} />}
+                {toast && <ModuleNotification toast={toast} onClose={() => setToast(null)} />}
             </div>
         </RequirePermission>
     );
@@ -2207,6 +2225,127 @@ function PlanLimitDialog({
                     </div>
                 </div>
             </div>
+        </div>
+    );
+}
+
+// Local UI feedback keeps API operations, permissions and business rules unchanged.
+type ModuleToast = {
+    kind: "success" | "error" | "warning";
+    title: string;
+    message: string;
+};
+
+type ModuleConfirmation = {
+    title: string;
+    message: string;
+    confirmLabel: string;
+    danger?: boolean;
+};
+
+function useModuleFeedback() {
+    const [toast, setToast] = useState<ModuleToast | null>(null);
+    const [confirmation, setConfirmation] = useState<ModuleConfirmation | null>(null);
+    const pendingConfirmation = useRef<((confirmed: boolean) => void) | null>(null);
+
+    const confirmAction = useCallback((details: ModuleConfirmation): Promise<boolean> => {
+        if (pendingConfirmation.current) return Promise.resolve(false);
+        return new Promise<boolean>((resolve) => {
+            pendingConfirmation.current = resolve;
+            setConfirmation(details);
+        });
+    }, []);
+
+    const resolveConfirmation = useCallback((confirmed: boolean) => {
+        const resolve = pendingConfirmation.current;
+        pendingConfirmation.current = null;
+        setConfirmation(null);
+        resolve?.(confirmed);
+    }, []);
+
+    useEffect(() => () => {
+        pendingConfirmation.current?.(false);
+        pendingConfirmation.current = null;
+    }, []);
+
+    useEffect(() => {
+        if (!toast) return;
+        const timer = window.setTimeout(() => setToast(null), toast.kind === "success" ? 5600 : 10000);
+        return () => window.clearTimeout(timer);
+    }, [toast]);
+
+    const notify = useCallback((kind: ModuleToast["kind"], title: string, message: unknown) => {
+        setToast({ kind, title, message: String(message || "Please try again.") });
+    }, []);
+
+    return { toast, setToast, notify, confirmation, confirmAction, resolveConfirmation };
+}
+
+function ModuleConfirmationDialog({ confirmation, onResolve }: {
+    confirmation: ModuleConfirmation;
+    onResolve: (confirmed: boolean) => void;
+}) {
+    const dialogRef = useRef<HTMLDialogElement>(null);
+
+    useEffect(() => {
+        const dialog = dialogRef.current;
+        if (!dialog) return;
+        dialog.showModal();
+        dialog.querySelector<HTMLButtonElement>("[data-confirm-cancel]")?.focus();
+        return () => { if (dialog.open) dialog.close(); };
+    }, []);
+
+    return (
+        <dialog
+            ref={dialogRef}
+            aria-labelledby="module-confirmation-title"
+            aria-describedby="module-confirmation-description"
+            onCancel={(event) => { event.preventDefault(); onResolve(false); }}
+            onClick={(event) => { if (event.target === event.currentTarget) onResolve(false); }}
+            className="fixed inset-0 m-auto max-h-[85vh] w-[min(480px,calc(100vw-2rem))] max-w-none overflow-y-auto rounded-[22px] border border-[#E6DDF0] bg-white p-0 text-[#1A1220] shadow-2xl backdrop:bg-[#120A1F]/45 backdrop:backdrop-blur-sm"
+        >
+            <div onClick={(event) => event.stopPropagation()}>
+                <div className="flex items-start gap-3 border-b border-[#E9E1EE] px-5 py-5">
+                    <span className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${confirmation.danger ? "bg-[#FDEDED] text-[#C13333]" : "bg-[#F1EBFF] text-[#6D35D4]"}`}>
+                        {confirmation.danger ? <AlertCircle size={22} /> : <CheckCircle2 size={22} />}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                        <h2 id="module-confirmation-title" className="text-lg font-bold text-[#1A1220]">{confirmation.title}</h2>
+                        <p className="mt-1 text-xs text-[#806A8C]">Please confirm before continuing.</p>
+                    </div>
+                    <button type="button" aria-label="Close confirmation" onClick={() => onResolve(false)}
+                            className="rounded-lg p-1 text-[#806A8C] hover:bg-[#F7F1FF]"><X size={19} /></button>
+                </div>
+                <p id="module-confirmation-description" className="break-words px-5 py-5 text-sm leading-6 text-[#4F3E5E]">{confirmation.message}</p>
+                <div className="flex flex-wrap justify-end gap-2 border-t border-[#E9E1EE] px-5 py-4">
+                    <button type="button" data-confirm-cancel onClick={() => onResolve(false)}
+                            className="rounded-xl border border-[#DCCFE8] bg-white px-4 py-2.5 text-sm font-semibold text-[#2B174C] hover:bg-[#F7F1FF]">Cancel</button>
+                    <button type="button" onClick={() => onResolve(true)}
+                            className={`rounded-xl px-4 py-2.5 text-sm font-semibold text-white transition ${confirmation.danger ? "bg-[#A33E20] hover:bg-[#883117]" : "bg-[#2B174C] hover:bg-[#1B0D31]"}`}>{confirmation.confirmLabel}</button>
+                </div>
+            </div>
+        </dialog>
+    );
+}
+
+function ModuleNotification({ toast, onClose }: { toast: ModuleToast; onClose: () => void }) {
+    const tone = toast.kind === "success"
+        ? { border: "border-[#BCE8CA]", icon: "bg-[#E5F8EC] text-[#23834A]" }
+        : toast.kind === "warning"
+            ? { border: "border-[#F2D49C]", icon: "bg-[#FFF5DF] text-[#A76C16]" }
+            : { border: "border-[#F2C4C4]", icon: "bg-[#FDEDED] text-[#C13333]" };
+    return (
+        <div role={toast.kind === "error" ? "alert" : "status"} aria-live={toast.kind === "error" ? "assertive" : "polite"}
+             className={`fixed bottom-5 right-5 z-[140] flex w-[min(360px,calc(100vw-2.5rem))] items-start gap-3 rounded-2xl border ${tone.border} bg-white p-4 shadow-[0_18px_42px_rgba(43,23,76,0.22)]`}>
+            <span className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${tone.icon}`}>
+                {toast.kind === "success" ? <CheckCircle2 size={20} strokeWidth={2.4} /> : <AlertCircle size={20} strokeWidth={2.4} />}
+            </span>
+            <div className="min-w-0 flex-1">
+                <p className="break-words text-sm font-bold text-[#1A1220]">{toast.title}</p>
+                <p className="mt-0.5 max-h-[40vh] overflow-y-auto break-words text-xs leading-5 text-[#6A5D6F]">{toast.message}</p>
+            </div>
+            <button type="button" onClick={onClose} aria-label="Dismiss notification"
+                    className="shrink-0 text-lg leading-none text-[#9B8AAA] transition hover:text-[#2B174C]">×</button>
         </div>
     );
 }

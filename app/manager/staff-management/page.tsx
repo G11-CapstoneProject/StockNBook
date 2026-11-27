@@ -5,6 +5,7 @@ import RequirePermission from "@/components/permissions/RequirePermission";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import {
     CheckCircle2,
+    AlertCircle,
     ChevronDown,
     Clock3,
     Copy,
@@ -23,7 +24,7 @@ import {
     Download,
     X,
 } from "lucide-react";
-import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 type AccessMode = "none" | "view" | "full";
@@ -99,6 +100,7 @@ function formatCurrentDateTime(value: Date) {
 
 export default function ManagerStaffManagementPage() {
     const router = useRouter();
+    const { toast, setToast, notify, confirmation, confirmAction, resolveConfirmation } = useModuleFeedback();
 
     const [branchName, setBranchName] = useState("Assigned branch");
     const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
@@ -127,12 +129,8 @@ export default function ManagerStaffManagementPage() {
     const [updatingStaffStatusId, setUpdatingStaffStatusId] = useState<
         number | string | null
     >(null);
-    const [staffStatusTarget, setStaffStatusTarget] = useState<StaffMember | null>(null);
-    const [staffStatusToast, setStaffStatusToast] = useState<{
-        kind: "success" | "error";
-        title: string;
-        message: string;
-    } | null>(null);
+    const [resendingEmail, setResendingEmail] = useState<string | null>(null);
+    const resendInFlight = useRef(false);
 
     const getToken = () => sessionStorage.getItem("token") || "";
 
@@ -159,7 +157,7 @@ export default function ManagerStaffManagementPage() {
             const data = await res.json();
 
             if (!res.ok) {
-                alert(data.error || "Failed to load staff.");
+                notify("error", "Unable to load staff", data.error || "Please try again.");
                 return;
             }
 
@@ -171,11 +169,11 @@ export default function ManagerStaffManagementPage() {
             setStaffList(rawStaff.map(normalizeStaffMember));
             setPendingInvites(rawPending.map(normalizePendingInvite));
         } catch {
-            alert("Something went wrong while loading staff.");
+            notify("error", "Unable to load staff", "Something went wrong. Please try again.");
         } finally {
             setPageLoading(false);
         }
-    }, [router]);
+    }, [router, notify]);
 
     const exportStaffListAsPdf = () => {
         void import("@/components/dashboard/_shared")
@@ -187,7 +185,7 @@ export default function ManagerStaffManagementPage() {
                 }, { storeName: sessionStorage.getItem("store_name") || "StockNBook",
                     branch: branchName, dateRange: statusFilter === "all" ? "All statuses" : statusFilter },
                 "manager_staff_list"))
-            .catch(() => setStaffStatusToast({ kind: "error", title: "Export unavailable", message: "Could not export the staff list." }));
+            .catch(() => setToast({ kind: "error", title: "Export unavailable", message: "Could not export the staff list." }));
     };
 
     const exportPendingStaffInvitesAsPdf = () => {
@@ -199,7 +197,7 @@ export default function ManagerStaffManagementPage() {
                     invite.expiresAt, formatPermissions(invite.permissions), "Pending"]),
             }, { storeName: sessionStorage.getItem("store_name") || "StockNBook",
                 branch: branchName, dateRange: "Pending invitations" }, "manager_staff_invites"))
-            .catch(() => setStaffStatusToast({ kind: "error", title: "Export unavailable", message: "Could not export pending staff invitations." }));
+            .catch(() => setToast({ kind: "error", title: "Export unavailable", message: "Could not export pending staff invitations." }));
     };
 
     useEffect(() => {
@@ -225,12 +223,6 @@ export default function ManagerStaffManagementPage() {
         const timer = window.setInterval(updateDateTime, 30_000);
         return () => window.clearInterval(timer);
     }, []);
-
-    useEffect(() => {
-        if (!staffStatusToast) return;
-        const timer = window.setTimeout(() => setStaffStatusToast(null), 5600);
-        return () => window.clearTimeout(timer);
-    }, [staffStatusToast]);
 
     const staffSummary = useMemo(() => {
         const active = staffList.filter((staff) => staff.status === "Accepted").length;
@@ -296,8 +288,9 @@ export default function ManagerStaffManagementPage() {
     };
 
     const handleSendInvite = async () => {
+        if (loading || savingEdit || updatingStaffStatusId !== null || resendInFlight.current) return;
         if (!staffName.trim() || !staffEmail.trim()) {
-            alert("Please enter staff name and email.");
+            notify("warning", "Missing staff details", "Please enter staff name and email.");
             return;
         }
 
@@ -306,6 +299,17 @@ export default function ManagerStaffManagementPage() {
             router.push("/");
             return;
         }
+
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(staffEmail.trim())) {
+            notify("warning", "Invalid staff email", "Please enter a valid email address.");
+            return;
+        }
+        const confirmed = await confirmAction({
+            title: "Send staff invitation?",
+            message: `Invite ${staffName.trim()} (${staffEmail.trim()}) to ${branchName} with the selected staff permissions?`,
+            confirmLabel: "Send Invitation",
+        });
+        if (!confirmed) return;
 
         setLoading(true);
 
@@ -326,7 +330,7 @@ export default function ManagerStaffManagementPage() {
 
             const data = await res.json();
             if (!res.ok) {
-                alert(data.error || JSON.stringify(data));
+                notify("error", "Unable to invite staff", data.error || data.message || "Please try again.");
                 return;
             }
 
@@ -346,13 +350,13 @@ export default function ManagerStaffManagementPage() {
             setShowAddDialog(false);
             await loadStaff();
 
-            alert(
-                emailWasSent
-                    ? "Staff invitation created and emailed successfully."
-                    : "Staff invitation created successfully, but the email could not be delivered. Copy the backup invite link shown on this page or use Resend later."
-            );
+            if (emailWasSent) {
+                notify("success", "Staff invitation sent", `An invitation was emailed to ${staffEmail.trim()}.`);
+            } else {
+                notify("warning", "Invitation created, email not sent", "Copy the backup invite link shown on this page or use Resend later.");
+            }
         } catch {
-            alert("Something went wrong while creating staff invite.");
+            notify("error", "Unable to invite staff", "Something went wrong. Please try again.");
         } finally {
             setLoading(false);
         }
@@ -364,13 +368,20 @@ export default function ManagerStaffManagementPage() {
     };
 
     const handleSaveEdit = async () => {
-        if (!editingStaff) return;
+        if (!editingStaff || savingEdit || loading || updatingStaffStatusId !== null || resendInFlight.current) return;
 
         const token = getToken();
         if (!token) {
             router.push("/");
             return;
         }
+
+        const confirmed = await confirmAction({
+            title: "Update staff access?",
+            message: `Save the selected module permissions for ${editingStaff.name}? These changes determine which features the employee can access.`,
+            confirmLabel: "Save Changes",
+        });
+        if (!confirmed) return;
 
         setSavingEdit(true);
 
@@ -391,23 +402,23 @@ export default function ManagerStaffManagementPage() {
 
             const data = await res.json();
             if (!res.ok) {
-                alert(data.error || JSON.stringify(data));
+                notify("error", "Unable to update staff access", data.error || data.message || "Please try again.");
                 return;
             }
 
             window.dispatchEvent(new Event("stocknbook-permissions-updated"));
             setEditingStaff(null);
             await loadStaff();
-            alert("Staff access updated!");
+            notify("success", "Staff access updated", `Permissions for ${editingStaff.name} have been saved.`);
         } catch {
-            alert("Something went wrong while updating staff access.");
+            notify("error", "Unable to update staff access", "Something went wrong. Please try again.");
         } finally {
             setSavingEdit(false);
         }
     };
 
     const handleChangeStaffStatus = async (staff: StaffMember) => {
-        if (updatingStaffStatusId !== null) return;
+        if (updatingStaffStatusId !== null || loading || savingEdit || resendInFlight.current) return;
         const token = getToken();
         if (!token) {
             router.push("/");
@@ -416,6 +427,15 @@ export default function ManagerStaffManagementPage() {
 
         const deactivate = staff.status === "Accepted";
         const action = deactivate ? "deactivate_staff" : "reactivate_staff";
+        const confirmed = await confirmAction({
+            title: deactivate ? "Deactivate staff access?" : "Reactivate staff access?",
+            message: deactivate
+                ? `Deactivate ${staff.name}'s login access? Their employee account and history remain saved. Access can be restored later.`
+                : `Restore login access for ${staff.name}? They can use their existing account, subject to available staff slots and current permissions.`,
+            confirmLabel: deactivate ? "Deactivate Access" : "Reactivate Access",
+            danger: deactivate,
+        });
+        if (!confirmed) return;
         setUpdatingStaffStatusId(staff.id);
 
         try {
@@ -434,7 +454,7 @@ export default function ManagerStaffManagementPage() {
 
             const data = await res.json();
             if (!res.ok) {
-                setStaffStatusToast({
+                setToast({
                     kind: "error",
                     title: deactivate ? "Unable to deactivate access" : "Unable to reactivate access",
                     message: String(data.error || data.message || "Please try again."),
@@ -442,9 +462,8 @@ export default function ManagerStaffManagementPage() {
                 return;
             }
 
-            setStaffStatusTarget(null);
             await loadStaff();
-            setStaffStatusToast({
+            setToast({
                 kind: "success",
                 title: deactivate ? "Staff access deactivated" : "Staff access reactivated",
                 message: deactivate
@@ -452,7 +471,7 @@ export default function ManagerStaffManagementPage() {
                     : `${staff.name} can sign in again using their existing staff account.`,
             });
         } catch {
-            setStaffStatusToast({
+            setToast({
                 kind: "error",
                 title: deactivate ? "Unable to deactivate access" : "Unable to reactivate access",
                 message: "The request could not be completed. Please try again.",
@@ -463,11 +482,21 @@ export default function ManagerStaffManagementPage() {
     };
 
     const handleResendInvite = async (email: string) => {
+        if (resendInFlight.current || loading || savingEdit || updatingStaffStatusId !== null) return;
         const token = getToken();
         if (!token) {
             router.push("/");
             return;
         }
+
+        const confirmed = await confirmAction({
+            title: "Resend staff invitation?",
+            message: `Refresh the invitation link and send an invitation email to ${email}?`,
+            confirmLabel: "Resend Invitation",
+        });
+        if (!confirmed || resendInFlight.current) return;
+        resendInFlight.current = true;
+        setResendingEmail(email);
 
         try {
             const res = await fetch("/api/staff-management", {
@@ -505,22 +534,21 @@ export default function ManagerStaffManagementPage() {
             }
 
             if (!res.ok) {
-                alert(
-                    data.error ||
-                    data.message ||
-                    "Unable to resend the staff invitation."
-                );
+                notify("error", "Unable to resend invitation", data.error || data.message || "Please try again.");
                 return;
             }
 
             await loadStaff();
-            alert(
-                emailWasSent
-                    ? `Invitation emailed to ${email}.`
-                    : "The staff invitation link was refreshed, but the email could not be delivered. Copy the backup link shown on this page."
-            );
+            if (emailWasSent) {
+                notify("success", "Staff invitation resent", `Invitation emailed to ${email}.`);
+            } else {
+                notify("warning", "Invitation refreshed, email not sent", "Copy the backup link shown on this page.");
+            }
         } catch {
-            alert("Something went wrong while resending invite.");
+            notify("error", "Unable to resend invitation", "Something went wrong. Please try again.");
+        } finally {
+            resendInFlight.current = false;
+            setResendingEmail(null);
         }
     };
 
@@ -645,9 +673,13 @@ export default function ManagerStaffManagementPage() {
                                     />
                                     <button
                                         type="button"
-                                        onClick={() => {
-                                            navigator.clipboard.writeText(inviteLink);
-                                            alert("Staff invite link copied!");
+                                        onClick={async () => {
+                                            try {
+                                                await navigator.clipboard.writeText(inviteLink);
+                                                notify("success", "Invite link copied", "The staff invitation link was copied to your clipboard.");
+                                            } catch {
+                                                notify("error", "Unable to copy invite link", "Select and copy the link manually.");
+                                            }
                                         }}
                                         className="inline-flex h-[42px] items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
                                     >
@@ -815,7 +847,7 @@ export default function ManagerStaffManagementPage() {
                                                             <button
                                                                 type="button"
                                                                 disabled={updatingStaffStatusId !== null}
-                                                                onClick={() => setStaffStatusTarget(staff)}
+                                                                onClick={() => void handleChangeStaffStatus(staff)}
                                                                 className={`inline-flex h-[34px] items-center justify-center gap-1.5 rounded-lg px-3 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-60 ${
                                                                     staff.status === "Accepted"
                                                                         ? "bg-[#FDEDED] text-[#C13333] hover:bg-[#FADDDD]"
@@ -904,10 +936,11 @@ export default function ManagerStaffManagementPage() {
                                                                             invite.email
                                                                         )
                                                                     }
-                                                                    className="inline-flex h-[34px] items-center justify-center gap-1.5 rounded-lg bg-[#F1EBFF] px-3 text-xs font-semibold text-[#6D35D4] transition hover:bg-[#E6DCFF]"
+                                                                    disabled={resendingEmail !== null}
+                                                                    className="inline-flex h-[34px] items-center justify-center gap-1.5 rounded-lg bg-[#F1EBFF] px-3 text-xs font-semibold text-[#6D35D4] transition hover:bg-[#E6DCFF] disabled:cursor-not-allowed disabled:opacity-60"
                                                                 >
                                                                     <Send size={14} />
-                                                                    Resend
+                                                                    {resendingEmail === invite.email ? "Sending..." : "Resend"}
                                                                 </button>
                                                             </div>
                                                         </td>
@@ -923,72 +956,6 @@ export default function ManagerStaffManagementPage() {
 
                     </section>
                 </main>
-
-                {staffStatusTarget && (
-                    <div
-                        className="fixed inset-0 z-[75] flex items-center justify-center bg-black/45 p-4 backdrop-blur-[2px]"
-                        onMouseDown={(event) => {
-                            if (event.target === event.currentTarget && updatingStaffStatusId === null) {
-                                setStaffStatusTarget(null);
-                            }
-                        }}
-                    >
-                        <div role="alertdialog" aria-modal="true" aria-labelledby="staff-status-title" aria-describedby="staff-status-description"
-                             className="w-full max-w-[500px] overflow-hidden rounded-[20px] border border-[#E6DDF0] bg-white shadow-2xl">
-                            <div className="flex items-start gap-3 border-b border-[#E9E1EE] px-5 py-5">
-                                <span className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${staffStatusTarget.status === "Accepted" ? "bg-[#FDEDED] text-[#C13333]" : "bg-[#E8F7EE] text-[#138342]"}`}>
-                                    {staffStatusTarget.status === "Accepted" ? <UserX size={21} /> : <CheckCircle2 size={21} />}
-                                </span>
-                                <div className="min-w-0 flex-1">
-                                    <h2 id="staff-status-title" className="text-lg font-bold text-[#1A1220]">
-                                        {staffStatusTarget.status === "Accepted" ? "Deactivate Staff Access" : "Reactivate Staff Access"}
-                                    </h2>
-                                    <p className="mt-1 text-xs text-[#806A8C]">
-                                        {staffStatusTarget.status === "Accepted" ? "Temporarily remove login access without deleting the employee." : "Restore login access for this employee."}
-                                    </p>
-                                </div>
-                                <button type="button" aria-label="Close staff access dialog" disabled={updatingStaffStatusId !== null}
-                                        onClick={() => setStaffStatusTarget(null)} className="rounded-lg p-1 text-[#806A8C] hover:bg-[#F7F1FF] disabled:opacity-50">
-                                    <X size={19} />
-                                </button>
-                            </div>
-                            <div id="staff-status-description" className="space-y-3 px-5 py-5 text-sm text-[#4F3E5E]">
-                                <p>
-                                    {staffStatusTarget.status === "Accepted" ? "Deactivate" : "Reactivate"} <strong className="text-[#2B174C]">{staffStatusTarget.name}</strong>&apos;s staff access?
-                                </p>
-                                <div className="rounded-xl border border-[#E9E1EE] bg-[#FBF8FE] px-4 py-3 text-xs leading-6">
-                                    {staffStatusTarget.status === "Accepted"
-                                        ? "The employee will not be able to sign in again while inactive. Their name, email, account, and other existing records remain in the database. You can reactivate access later."
-                                        : "The employee can use their existing account again, subject to your store's available staff slots and current permissions. No new invitation is required."}
-                                </div>
-                            </div>
-                            <div className="flex justify-end gap-2 border-t border-[#E9E1EE] px-5 py-4">
-                                <button type="button" disabled={updatingStaffStatusId !== null} onClick={() => setStaffStatusTarget(null)}
-                                        className="rounded-xl border border-[#DCCFE8] bg-white px-4 py-2.5 text-xs font-semibold text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-50">
-                                    Cancel
-                                </button>
-                                <button type="button" disabled={updatingStaffStatusId !== null} onClick={() => void handleChangeStaffStatus(staffStatusTarget)}
-                                        className={`rounded-xl px-4 py-2.5 text-xs font-semibold text-white transition disabled:cursor-not-allowed disabled:opacity-50 ${staffStatusTarget.status === "Accepted" ? "bg-[#A33E20] hover:bg-[#883117]" : "bg-[#138342] hover:bg-[#0D6F34]"}`}>
-                                    {updatingStaffStatusId !== null ? "Updating..." : staffStatusTarget.status === "Accepted" ? "Deactivate Access" : "Reactivate Access"}
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                )}
-
-                {staffStatusToast && (
-                    <div role="status" aria-live="polite" className="fixed bottom-5 right-5 z-[100] flex w-[min(395px,calc(100vw-40px))] items-start gap-3 rounded-2xl border border-[#E6DDF0] bg-white p-4 shadow-[0_10px_35px_rgba(30,14,47,0.18)]">
-                        <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${staffStatusToast.kind === "success" ? "bg-[#E8F7EE] text-[#138342]" : "bg-[#FDEDED] text-[#C13333]"}`}>
-                            {staffStatusToast.kind === "success" ? <CheckCircle2 size={21} /> : <UserX size={21} />}
-                        </span>
-                        <div className="min-w-0 flex-1">
-                            <p className="text-sm font-bold text-[#1A1220]">{staffStatusToast.title}</p>
-                            <p className="mt-1 text-xs leading-5 text-[#806A8C]">{staffStatusToast.message}</p>
-                        </div>
-                        <button type="button" aria-label="Dismiss staff access notification" onClick={() => setStaffStatusToast(null)}
-                                className="rounded-lg p-1 text-[#806A8C] hover:bg-[#F7F1FF]"><X size={16} /></button>
-                    </div>
-                )}
 
                 {showAddDialog && (
                     <div
@@ -1106,7 +1073,9 @@ export default function ManagerStaffManagementPage() {
                             <div className="sticky bottom-0 z-10 grid gap-3 border-t border-[#E6DDF0] bg-white px-6 py-4 sm:grid-cols-2">
                                 <button
                                     type="button"
+                                    disabled={loading}
                                     onClick={() => {
+                                        if (loading) return;
                                         clearForm();
                                         setShowAddDialog(false);
                                     }}
@@ -1139,7 +1108,8 @@ export default function ManagerStaffManagementPage() {
                             </div>
                             <button
                                 type="button"
-                                onClick={() => setEditingStaff(null)}
+                                disabled={savingEdit}
+                                onClick={() => { if (!savingEdit) setEditingStaff(null); }}
                                 className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-[#E6DDF0] bg-white text-[#7A6A84] transition hover:bg-[#F7F1FF]"
                             >
                                 <X size={18} />
@@ -1182,7 +1152,8 @@ export default function ManagerStaffManagementPage() {
                         <div className="shrink-0 grid gap-3 border-t border-[#E9E0EF] bg-white px-6 py-4 sm:grid-cols-2">
                             <button
                                 type="button"
-                                onClick={() => setEditingStaff(null)}
+                                disabled={savingEdit}
+                                onClick={() => { if (!savingEdit) setEditingStaff(null); }}
                                 className="inline-flex h-[44px] items-center justify-center rounded-xl border border-[#DCCFE8] bg-white px-5 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF]"
                             >
                                 Cancel
@@ -1198,6 +1169,8 @@ export default function ManagerStaffManagementPage() {
                         </div>
                     </ModalShell>
                 )}
+                {confirmation && <ModuleConfirmationDialog confirmation={confirmation} onResolve={resolveConfirmation} />}
+                {toast && <ModuleNotification toast={toast} onClose={() => setToast(null)} />}
             </div>
         </RequirePermission>
     );
@@ -1531,4 +1504,125 @@ function getInitials(name: string) {
 
     const parts = cleaned.split(/\s+/).slice(0, 2);
     return parts.map((part) => part.charAt(0).toUpperCase()).join("");
+}
+
+// Local UI feedback keeps API operations, permissions and business rules unchanged.
+type ModuleToast = {
+    kind: "success" | "error" | "warning";
+    title: string;
+    message: string;
+};
+
+type ModuleConfirmation = {
+    title: string;
+    message: string;
+    confirmLabel: string;
+    danger?: boolean;
+};
+
+function useModuleFeedback() {
+    const [toast, setToast] = useState<ModuleToast | null>(null);
+    const [confirmation, setConfirmation] = useState<ModuleConfirmation | null>(null);
+    const pendingConfirmation = useRef<((confirmed: boolean) => void) | null>(null);
+
+    const confirmAction = useCallback((details: ModuleConfirmation): Promise<boolean> => {
+        if (pendingConfirmation.current) return Promise.resolve(false);
+        return new Promise<boolean>((resolve) => {
+            pendingConfirmation.current = resolve;
+            setConfirmation(details);
+        });
+    }, []);
+
+    const resolveConfirmation = useCallback((confirmed: boolean) => {
+        const resolve = pendingConfirmation.current;
+        pendingConfirmation.current = null;
+        setConfirmation(null);
+        resolve?.(confirmed);
+    }, []);
+
+    useEffect(() => () => {
+        pendingConfirmation.current?.(false);
+        pendingConfirmation.current = null;
+    }, []);
+
+    useEffect(() => {
+        if (!toast) return;
+        const timer = window.setTimeout(() => setToast(null), toast.kind === "success" ? 5600 : 10000);
+        return () => window.clearTimeout(timer);
+    }, [toast]);
+
+    const notify = useCallback((kind: ModuleToast["kind"], title: string, message: unknown) => {
+        setToast({ kind, title, message: String(message || "Please try again.") });
+    }, []);
+
+    return { toast, setToast, notify, confirmation, confirmAction, resolveConfirmation };
+}
+
+function ModuleConfirmationDialog({ confirmation, onResolve }: {
+    confirmation: ModuleConfirmation;
+    onResolve: (confirmed: boolean) => void;
+}) {
+    const dialogRef = useRef<HTMLDialogElement>(null);
+
+    useEffect(() => {
+        const dialog = dialogRef.current;
+        if (!dialog) return;
+        dialog.showModal();
+        dialog.querySelector<HTMLButtonElement>("[data-confirm-cancel]")?.focus();
+        return () => { if (dialog.open) dialog.close(); };
+    }, []);
+
+    return (
+        <dialog
+            ref={dialogRef}
+            aria-labelledby="module-confirmation-title"
+            aria-describedby="module-confirmation-description"
+            onCancel={(event) => { event.preventDefault(); onResolve(false); }}
+            onClick={(event) => { if (event.target === event.currentTarget) onResolve(false); }}
+            className="fixed inset-0 m-auto max-h-[85vh] w-[min(480px,calc(100vw-2rem))] max-w-none overflow-y-auto rounded-[22px] border border-[#E6DDF0] bg-white p-0 text-[#1A1220] shadow-2xl backdrop:bg-[#120A1F]/45 backdrop:backdrop-blur-sm"
+        >
+            <div onClick={(event) => event.stopPropagation()}>
+                <div className="flex items-start gap-3 border-b border-[#E9E1EE] px-5 py-5">
+                    <span className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${confirmation.danger ? "bg-[#FDEDED] text-[#C13333]" : "bg-[#F1EBFF] text-[#6D35D4]"}`}>
+                        {confirmation.danger ? <AlertCircle size={22} /> : <CheckCircle2 size={22} />}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                        <h2 id="module-confirmation-title" className="text-lg font-bold text-[#1A1220]">{confirmation.title}</h2>
+                        <p className="mt-1 text-xs text-[#806A8C]">Please confirm before continuing.</p>
+                    </div>
+                    <button type="button" aria-label="Close confirmation" onClick={() => onResolve(false)}
+                            className="rounded-lg p-1 text-[#806A8C] hover:bg-[#F7F1FF]"><X size={19} /></button>
+                </div>
+                <p id="module-confirmation-description" className="break-words px-5 py-5 text-sm leading-6 text-[#4F3E5E]">{confirmation.message}</p>
+                <div className="flex flex-wrap justify-end gap-2 border-t border-[#E9E1EE] px-5 py-4">
+                    <button type="button" data-confirm-cancel onClick={() => onResolve(false)}
+                            className="rounded-xl border border-[#DCCFE8] bg-white px-4 py-2.5 text-sm font-semibold text-[#2B174C] hover:bg-[#F7F1FF]">Cancel</button>
+                    <button type="button" onClick={() => onResolve(true)}
+                            className={`rounded-xl px-4 py-2.5 text-sm font-semibold text-white transition ${confirmation.danger ? "bg-[#A33E20] hover:bg-[#883117]" : "bg-[#2B174C] hover:bg-[#1B0D31]"}`}>{confirmation.confirmLabel}</button>
+                </div>
+            </div>
+        </dialog>
+    );
+}
+
+function ModuleNotification({ toast, onClose }: { toast: ModuleToast; onClose: () => void }) {
+    const tone = toast.kind === "success"
+        ? { border: "border-[#BCE8CA]", icon: "bg-[#E5F8EC] text-[#23834A]" }
+        : toast.kind === "warning"
+            ? { border: "border-[#F2D49C]", icon: "bg-[#FFF5DF] text-[#A76C16]" }
+            : { border: "border-[#F2C4C4]", icon: "bg-[#FDEDED] text-[#C13333]" };
+    return (
+        <div role={toast.kind === "error" ? "alert" : "status"} aria-live={toast.kind === "error" ? "assertive" : "polite"}
+             className={`fixed bottom-5 right-5 z-[140] flex w-[min(360px,calc(100vw-2.5rem))] items-start gap-3 rounded-2xl border ${tone.border} bg-white p-4 shadow-[0_18px_42px_rgba(43,23,76,0.22)]`}>
+            <span className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${tone.icon}`}>
+                {toast.kind === "success" ? <CheckCircle2 size={20} strokeWidth={2.4} /> : <AlertCircle size={20} strokeWidth={2.4} />}
+            </span>
+            <div className="min-w-0 flex-1">
+                <p className="break-words text-sm font-bold text-[#1A1220]">{toast.title}</p>
+                <p className="mt-0.5 max-h-[40vh] overflow-y-auto break-words text-xs leading-5 text-[#6A5D6F]">{toast.message}</p>
+            </div>
+            <button type="button" onClick={onClose} aria-label="Dismiss notification"
+                    className="shrink-0 text-lg leading-none text-[#9B8AAA] transition hover:text-[#2B174C]">×</button>
+        </div>
+    );
 }

@@ -30,17 +30,6 @@ const {
     buildWeeklyDemandMap,
 } = require("./forecastingRepository");
 
-const planning = require("./planningRepository");
-const {
-    addDays: planAddDays,
-    addMonthKey,
-    monthRange,
-    buildStockPlan,
-    buildAccuracy,
-    matchPastEvent,
-    buildEventForecast,
-} = require("./planningEngine");
-
 const REQUIRED_ENV = ["DB_HOST", "DB_USER", "DB_PASSWORD", "DB_NAME", "JWT_SECRET"];
 
 function missingEnvironment() {
@@ -51,6 +40,26 @@ function missingEnvironment() {
 }
 
 // Reuse one connection pool across warm invocations; Promise.all() uses separate pooled connections.
+// Database TLS: local DB_SSL=false; Azure DB_SSL=true requires trusted CA and hostname verification.
+function stocknbookDatabaseTlsOptions() {
+    const mode = String(process.env.DB_SSL ?? "false").trim().toLowerCase();
+    if (mode !== "true" && mode !== "false") {
+        throw new Error("DB_SSL must be true or false.");
+    }
+    if (process.env.NODE_ENV === "production" && mode !== "true") {
+        throw new Error("DB_SSL=true is required for production database connections.");
+    }
+    if (mode === "false") return undefined;
+
+    const caPath = String(process.env.DB_SSL_CA_PATH || "").trim();
+    return {
+        rejectUnauthorized: true,
+        verifyIdentity: true,
+        minVersion: "TLSv1.2",
+        ...(caPath ? { ca: require("node:fs").readFileSync(caPath, "utf8") } : {}),
+    };
+}
+
 let databasePool;
 
 function getDatabasePool() {
@@ -61,8 +70,8 @@ function getDatabasePool() {
             password: process.env.DB_PASSWORD,
             database: process.env.DB_NAME,
             port: Number(process.env.DB_PORT || 3306),
-            // Same as the Bookings Lambda (works for local MySQL and AWS RDS).
-            ssl: { rejectUnauthorized: false },
+            // TLS behavior is selected by DB_SSL.
+            ssl: stocknbookDatabaseTlsOptions(),
             waitForConnections: true,
             connectionLimit: 4,
             queueLimit: 0,
@@ -625,160 +634,6 @@ async function buildBookingForecastResponse({
     };
 }
 
-/* -------------------------------------------------------
- * STOCK PLAN, FORECAST ACCURACY AND EVENTS
- * ------------------------------------------------------- */
-
-const PLANNING_ACTIONS = [
-    "get_seasonal_stock_plan",
-    "get_forecast_accuracy",
-    "list_store_events",
-    "save_store_event",
-    "delete_store_event",
-    "get_event_forecast",
-];
-
-function userError(message, statusCode = 400) {
-    const error = new Error(message);
-    error.userMessage = message;
-    error.statusCode = statusCode;
-    return error;
-}
-
-// Today in the Philippines (the store's business day), YYYY-MM-DD.
-function manilaToday() {
-    return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
-}
-
-// Inventory numbers (stock on hand, units owned, how much to prepare) are hidden from Staff, like the Product Demand tab.
-const canViewStock = (role) => role === "owner" || role === "manager";
-
-// Owners, and Managers whose Forecasting access is not view-only, can add and change events.
-function canEditEvents(role, permissions) {
-    if (role === "owner") return true;
-    if (role !== "manager") return false;
-    const value = permissions?.forecasting_access ?? permissions?.forecasting;
-    return !["view", "view_only"].includes(value);
-}
-
-function validDate(value, label) {
-    const text = String(value || "").trim();
-    const date = new Date(`${text}T00:00:00Z`);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(text) || Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== text)
-        throw userError(`Enter a valid ${label} (YYYY-MM-DD).`);
-    return text;
-}
-
-async function planningResponse({ action, body, decoded, scope, permissions, connection, headers }) {
-    const today = manilaToday();
-    const { storeId, role, selectedBranchId } = scope;
-    const responseScope = { storeId, branchId: selectedBranchId, role };
-    const currentKey = today.slice(0, 7);
-    // Up to three years of complete months before this month.
-    const historyKeys = monthRange(addMonthKey(currentKey, -36), addMonthKey(currentKey, -1));
-    const lastComplete = `${historyKeys[historyKeys.length - 1]}-${String(new Date(Date.UTC(...historyKeys[historyKeys.length - 1].split("-").map(Number), 0)).getUTCDate()).padStart(2, "0")}`;
-
-    if (action === "get_seasonal_stock_plan") {
-        const monthsAhead = Math.min(3, Math.max(1, Number(body.months_ahead ?? body.monthsAhead ?? 3) || 3));
-        const horizonEnd = planAddDays(`${addMonthKey(currentKey, monthsAhead + 1)}-01`, -1);
-        const [productMonthly, productStock, equipmentOwned, rentalPeriods] = await Promise.all([
-            planning.getMonthlyProductUnits(connection, { storeId, branchId: selectedBranchId, startDate: `${historyKeys[0]}-01`, endDate: lastComplete }),
-            planning.getProductStock(connection, { storeId, branchId: selectedBranchId }),
-            planning.getEquipmentOwned(connection, { storeId, branchId: selectedBranchId }),
-            planning.getRentalPeriods(connection, { storeId, branchId: selectedBranchId, startDate: `${historyKeys[0]}-01`, endDate: horizonEnd }),
-        ]);
-        // Only months the store actually has sales for count as history.
-        const firstSales = productMonthly.reduce((min, r) => (r.monthKey < min ? r.monthKey : min), currentKey);
-        const keys = historyKeys.filter((k) => k >= firstSales);
-        return jsonResponse(200, headers, buildStockPlan({ today, monthsAhead, historyKeys: keys.length ? keys : historyKeys,
-            productMonthly, productStock, equipmentOwned, rentalPeriods, canViewStock: canViewStock(role), scope: responseScope }));
-    }
-
-    if (action === "get_forecast_accuracy") {
-        const firstTest = addMonthKey(currentKey, -6);
-        const [productMonthly, weeklyUnits] = await Promise.all([
-            planning.getMonthlyProductUnits(connection, { storeId, branchId: selectedBranchId,
-                startDate: `${addMonthKey(firstTest, -36)}-01`, endDate: lastComplete }),
-            planning.getWeeklyProductUnits(connection, { storeId, branchId: selectedBranchId,
-                startDate: planAddDays(`${firstTest}-01`, -91), endDate: lastComplete }),
-        ]);
-        const stock = await planning.getProductStock(connection, { storeId, branchId: selectedBranchId });
-        const categories = new Map(stock.map((r) => [Number(r.productId), String(r.category)]));
-        return jsonResponse(200, headers, buildAccuracy({ today, testMonths: 6, productMonthly, weeklyUnits, categories, scope: responseScope }));
-    }
-
-    if (action === "list_store_events") {
-        const events = await planning.listEvents(connection, { storeId, branchId: role === "owner" ? null : selectedBranchId });
-        return jsonResponse(200, headers, { success: true, action, scope: responseScope, today,
-            canEdit: canEditEvents(role, permissions), types: planning.EVENT_TYPES,
-            events: events.map((e) => ({ ...e, status: e.endDate < today ? "past" : e.startDate <= today ? "ongoing" : "upcoming" })) });
-    }
-
-    if (action === "save_store_event" || action === "delete_store_event") {
-        if (!canEditEvents(role, permissions)) throw userError("Only the Owner or a Manager can change events.", 403);
-        const eventId = Number(body.id ?? body.event_id) || null;
-        const existing = eventId ? await planning.getEvent(connection, { storeId, eventId }) : null;
-        if (eventId && !existing) throw userError("Event not found.", 404);
-        // Managers change only their own branch's events.
-        if (role === "manager" && existing && Number(existing.branchId) !== Number(selectedBranchId))
-            throw userError("Managers can change only their own branch's events.", 403);
-        if (action === "delete_store_event") {
-            await planning.deleteEvent(connection, { storeId, eventId });
-            return jsonResponse(200, headers, { success: true, action, deleted: eventId });
-        }
-        const name = String(body.name ?? body.event_name ?? "").trim();
-        if (name.length < 3 || name.length > 150) throw userError("Enter an event name (3–150 characters).");
-        const type = String(body.type ?? body.event_type ?? "other").trim().toLowerCase();
-        if (!planning.EVENT_TYPES.includes(type)) throw userError(`Choose an event type: ${planning.EVENT_TYPES.join(", ")}.`);
-        const startDate = validDate(body.start_date ?? body.startDate, "start date");
-        const endDate = validDate(body.end_date ?? body.endDate, "end date");
-        if (endDate < startDate) throw userError("The end date must be on or after the start date.");
-        if (planAddDays(startDate, 366) < endDate) throw userError("An event can last at most one year.");
-        const notes = String(body.notes ?? "").trim().slice(0, 500) || null;
-        let branchId = role === "manager" ? selectedBranchId : (Number(body.branch_id ?? body.branchId) || null);
-        if (role === "owner" && branchId) {
-            const ok = await ensureBranchBelongsToStore(connection, branchId, storeId);
-            if (!ok) throw userError("Invalid branch for this store.");
-        }
-        if (role === "owner" && body.all_branches === true) branchId = null;
-        const userId = Number(decoded.user_id ?? decoded.userId ?? decoded.id ?? decoded.sub) || null;
-        const id = await planning.saveEvent(connection, { storeId, eventId, branchId, name, type, startDate, endDate, notes, userId });
-        return jsonResponse(200, headers, { success: true, action, id });
-    }
-
-    // get_event_forecast: every ongoing or upcoming event in the next two years (or one event).
-    const events = await planning.listEvents(connection, { storeId, branchId: role === "owner" ? null : selectedBranchId });
-    const horizon = planAddDays(today, 730);
-    const wanted = Number(body.event_id ?? body.eventId) || null;
-    const upcoming = events.filter((e) => (wanted ? Number(e.id) === wanted : e.endDate >= today && e.startDate <= horizon))
-        .filter((e) => !selectedBranchId || !e.branchId || Number(e.branchId) === Number(selectedBranchId));
-    const results = [];
-    for (const event of upcoming.slice(0, 8)) {
-        const past = matchPastEvent(event, events, today);
-        if (!past) { results.push(buildEventForecast({ event, past: null, today, data: null })); continue; }
-        // Normal demand: the 12 months before the past event (the engine scales it to the event's length).
-        const baseStart = planAddDays(past.startDate, -365), baseEnd = planAddDays(past.startDate, -1);
-        const q = { storeId, branchId: selectedBranchId };
-        const [pastProducts, baselineProducts, pastSales, baselineSales, salesRecent, salesBefore, pastActivity, baselineActivity, stock, owned] = await Promise.all([
-            planning.getProductUnitsBetween(connection, { ...q, startDate: past.startDate, endDate: past.endDate }),
-            planning.getProductUnitsBetween(connection, { ...q, startDate: baseStart, endDate: baseEnd }),
-            planning.getSalesTotalBetween(connection, { ...q, startDate: past.startDate, endDate: past.endDate }),
-            planning.getSalesTotalBetween(connection, { ...q, startDate: baseStart, endDate: baseEnd }),
-            planning.getSalesTotalBetween(connection, { ...q, startDate: planAddDays(today, -365), endDate: planAddDays(today, -1) }),
-            planning.getSalesTotalBetween(connection, { ...q, startDate: planAddDays(past.endDate, -364), endDate: past.endDate }),
-            planning.getBookingActivityBetween(connection, { ...q, startDate: past.startDate, endDate: past.endDate }),
-            planning.getBookingActivityBetween(connection, { ...q, startDate: baseStart, endDate: baseEnd }),
-            planning.getProductStock(connection, q),
-            planning.getEquipmentOwned(connection, q),
-        ]);
-        results.push(buildEventForecast({ event, past, today, canViewStock: canViewStock(role), data: {
-                pastProducts, baselineProducts, pastSales, baselineSales, salesRecent, salesBefore,
-                pastEquipment: pastActivity.equipment, baselineEquipment: baselineActivity.equipment,
-                pastTypes: pastActivity.types, baselineTypes: baselineActivity.types, stock, owned } }));
-    }
-    return jsonResponse(200, headers, { success: true, action, scope: responseScope, today, events: results });
-}
-
 exports.handler = async (event) => {
     const headers = {
         "Access-Control-Allow-Origin": "*",
@@ -833,7 +688,6 @@ exports.handler = async (event) => {
         "get_seasonal_forecast",
         "get_booking_forecast",
         "get_forecast_report",
-        ...PLANNING_ACTIONS,
     ];
 
     if (!validActions.includes(action)) {
@@ -880,9 +734,8 @@ exports.handler = async (event) => {
         const connection = getDatabasePool();
 
         // Managers and Staff: the account must be active, and Staff need Forecasting access.
-        let permissions = null;
         if (scope.role !== "owner") {
-            permissions = await getUserPermissions(
+            const permissions = await getUserPermissions(
                 connection,
                 decoded,
                 scope.storeId,
@@ -920,10 +773,6 @@ exports.handler = async (event) => {
                     "Invalid branch for this store."
                 );
             }
-        }
-
-        if (PLANNING_ACTIONS.includes(action)) {
-            return await planningResponse({ action, body, decoded, scope, permissions, connection, headers });
         }
 
         if (action === "get_seasonal_forecast") {
@@ -982,14 +831,6 @@ exports.handler = async (event) => {
             response
         );
     } catch (error) {
-        if (error && error.code === "ER_NO_SUCH_TABLE" && /store_events/.test(String(error.message))) {
-            return jsonResponse(409, headers, {
-                error: "Events are not set up in this database yet. Run store-events-migration.sql in MySQL Workbench first.",
-            });
-        }
-        if (error && error.userMessage) {
-            return jsonResponse(error.statusCode || 400, headers, { error: error.userMessage });
-        }
         return serverError(headers, error);
     }
 };

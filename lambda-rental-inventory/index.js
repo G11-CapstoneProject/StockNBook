@@ -408,6 +408,26 @@ function requiredEnv(name) {
 const JWT_SECRET = requiredEnv("JWT_SECRET");
 // ===== ENV SECURITY CHANGE: Required JWT environment variable END =====
 
+// Database TLS: local DB_SSL=false; Azure DB_SSL=true requires trusted CA and hostname verification.
+function stocknbookDatabaseTlsOptions() {
+    const mode = String(process.env.DB_SSL ?? "false").trim().toLowerCase();
+    if (mode !== "true" && mode !== "false") {
+        throw new Error("DB_SSL must be true or false.");
+    }
+    if (process.env.NODE_ENV === "production" && mode !== "true") {
+        throw new Error("DB_SSL=true is required for production database connections.");
+    }
+    if (mode === "false") return undefined;
+
+    const caPath = String(process.env.DB_SSL_CA_PATH || "").trim();
+    return {
+        rejectUnauthorized: true,
+        verifyIdentity: true,
+        minVersion: "TLSv1.2",
+        ...(caPath ? { ca: require("node:fs").readFileSync(caPath, "utf8") } : {}),
+    };
+}
+
 const dbConfig = {
     // ===== ENV SECURITY CHANGE: MySQL environment configuration BEGIN =====
     host: requiredEnv("DB_HOST"),
@@ -416,7 +436,7 @@ const dbConfig = {
     database: requiredEnv("DB_NAME"),
     port: Number(process.env.DB_PORT || 3306),
     // ===== ENV SECURITY CHANGE: MySQL environment configuration END =====
-    ssl: { rejectUnauthorized: false },
+    ssl: stocknbookDatabaseTlsOptions(),
 };
 // Reuse a small number of MySQL connections across requests handled by this module.
 // Keep the existing connection settings and all rental operations unchanged.
@@ -676,17 +696,12 @@ const V2_BOOKING_FINANCIALS = `(SELECT
                   WHERE rl.booking_id = b.id AND rl.item_type = 'rental'
                     AND rl.item_status NOT LIKE 'claim%' AND rl.item_status <> 'cancelled'), 0) AS rental_subtotal,
         0 AS delivery_fee, 0 AS setup_fee,
-        dw.reason AS deposit_waiver_reason,
+        (SELECT JSON_UNQUOTE(JSON_EXTRACT(wa.details, '$.reason')) FROM employee_actions wa
+          WHERE wa.store_id = b.store_id AND wa.entity_id = b.id
+            AND wa.action = 'Recorded security deposit waiver'
+          ORDER BY wa.id DESC LIMIT 1) AS deposit_waiver_reason,
         b.created_at, b.updated_at
-    FROM bookings b
-             -- Latest deposit waiver per booking, read in one pass (a lookup per booking was very slow with years of activity).
-             LEFT JOIN (SELECT w.store_id, w.entity_id,
-                               SUBSTRING_INDEX(GROUP_CONCAT(JSON_UNQUOTE(JSON_EXTRACT(w.details, '$.reason'))
-                                                            ORDER BY w.id DESC SEPARATOR '\n'), '\n', 1) AS reason
-                        FROM employee_actions w
-                        WHERE w.action = 'Recorded security deposit waiver'
-                        GROUP BY w.store_id, w.entity_id) dw
-                       ON dw.store_id = b.store_id AND dw.entity_id = b.id)`;
+    FROM bookings b)`;
 
 // Customer charges for lost or damaged rental equipment.
 const V2_BOOKING_CLAIMS = `(SELECT

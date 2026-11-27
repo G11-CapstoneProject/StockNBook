@@ -36,6 +36,26 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || "*")
     .map((item) => item.trim())
     .filter(Boolean);
 
+// Database TLS: local DB_SSL=false; Azure DB_SSL=true requires trusted CA and hostname verification.
+function stocknbookDatabaseTlsOptions() {
+    const mode = String(process.env.DB_SSL ?? "false").trim().toLowerCase();
+    if (mode !== "true" && mode !== "false") {
+        throw new Error("DB_SSL must be true or false.");
+    }
+    if (process.env.NODE_ENV === "production" && mode !== "true") {
+        throw new Error("DB_SSL=true is required for production database connections.");
+    }
+    if (mode === "false") return undefined;
+
+    const caPath = String(process.env.DB_SSL_CA_PATH || "").trim();
+    return {
+        rejectUnauthorized: true,
+        verifyIdentity: true,
+        minVersion: "TLSv1.2",
+        ...(caPath ? { ca: require("node:fs").readFileSync(caPath, "utf8") } : {}),
+    };
+}
+
 const dbConfig = {
     // ===== ENV SECURITY CHANGE: MySQL environment configuration BEGIN =====
     host: requiredEnv("DB_HOST"),
@@ -44,7 +64,7 @@ const dbConfig = {
     database: requiredEnv("DB_NAME"),
     port: Number(process.env.DB_PORT || 3306),
     // ===== ENV SECURITY CHANGE: MySQL environment configuration END =====
-    ssl: { rejectUnauthorized: false },
+    ssl: stocknbookDatabaseTlsOptions(),
 };
 
 const pool = mysql.createPool({
@@ -791,7 +811,7 @@ async function getPlans(connection) {
              p.has_analytics,
              p.has_forecasting,
              p.has_multi_store,
-             (SELECT COUNT(*) FROM subscriptions s WHERE s.plan_id = p.id AND LOWER(s.status) <> 'cancelled' AND s.expires_at >= CURDATE()) AS active_subscribers
+             (SELECT COUNT(*) FROM subscriptions s WHERE s.plan_id = p.id AND LOWER(s.status) = 'active' AND (s.expires_at IS NULL OR s.expires_at >= CURDATE())) AS active_subscribers
          FROM plans p
          ORDER BY p.is_archived ASC, p.price ASC, p.id ASC`
     );
@@ -893,16 +913,6 @@ async function updatePlan(connection, body) {
     return { message: "Plan updated.", plan_id: planId };
 }
 
-
-async function setPlanArchived(connection, planId, archived) {
-    planId = positiveId(planId, "plan_id");
-    const [result] = await connection.execute(
-        "UPDATE plans SET is_archived = ? WHERE id = ?",
-        [archived ? 1 : 0, planId]
-    );
-    if (!result.affectedRows) throw httpError(404, "Plan not found.");
-    return { message: archived ? "Plan archived." : "Plan restored.", plan_id: planId };
-}
 
 // Subscription decision notification emails; database/payment handling remains unchanged.
 // ===== ENV SECURITY CHANGE: Subscription SMTP configuration comment BEGIN =====
@@ -1846,8 +1856,8 @@ async function getStorePlanDetails(connection, storeId) {
     try {
         const [bookingRows] = await connection.execute(
             `SELECT COUNT(*) AS total FROM bookings WHERE store_id = ?
-               AND created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
-               AND created_at < DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01')`,
+                                                      AND created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
+                                                      AND created_at < DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01')`,
             [storeId]
         );
         bookingCount = Number(bookingRows[0]?.total || 0);
@@ -2026,12 +2036,6 @@ exports.handler = async (event) => {
 
             case "update_plan":
                 return response(event, 200, await updatePlan(connection, body));
-
-            case "archive_plan":
-                return response(event, 200, await setPlanArchived(connection, body.plan_id, true));
-
-            case "restore_plan":
-                return response(event, 200, await setPlanArchived(connection, body.plan_id, false));
 
             case "get_platform_settings":
                 return response(event, 200, await getPlatformSettings(connection));

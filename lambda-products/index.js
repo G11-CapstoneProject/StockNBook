@@ -406,6 +406,26 @@ const JWT_SECRET = requiredEnv("JWT_SECRET");
 // ===== ENV SECURITY CHANGE: Required JWT environment variable END =====
 
 
+// Database TLS: local DB_SSL=false; Azure DB_SSL=true requires trusted CA and hostname verification.
+function stocknbookDatabaseTlsOptions() {
+    const mode = String(process.env.DB_SSL ?? "false").trim().toLowerCase();
+    if (mode !== "true" && mode !== "false") {
+        throw new Error("DB_SSL must be true or false.");
+    }
+    if (process.env.NODE_ENV === "production" && mode !== "true") {
+        throw new Error("DB_SSL=true is required for production database connections.");
+    }
+    if (mode === "false") return undefined;
+
+    const caPath = String(process.env.DB_SSL_CA_PATH || "").trim();
+    return {
+        rejectUnauthorized: true,
+        verifyIdentity: true,
+        minVersion: "TLSv1.2",
+        ...(caPath ? { ca: require("node:fs").readFileSync(caPath, "utf8") } : {}),
+    };
+}
+
 const dbConfig = {
     // ===== ENV SECURITY CHANGE: MySQL environment configuration BEGIN =====
     host: requiredEnv("DB_HOST"),
@@ -414,7 +434,7 @@ const dbConfig = {
     database: requiredEnv("DB_NAME"),
     port: Number(process.env.DB_PORT || 3306),
     // ===== ENV SECURITY CHANGE: MySQL environment configuration END =====
-    ssl: { rejectUnauthorized: false },
+    ssl: stocknbookDatabaseTlsOptions(),
 };
 
 // Reuse MySQL connections across requests instead of opening a new TCP/TLS

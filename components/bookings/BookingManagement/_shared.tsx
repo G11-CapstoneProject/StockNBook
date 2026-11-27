@@ -2223,12 +2223,13 @@ export function BookingRow({
 // Select one booking from the scrollable list; reuse BookingRow for status and API actions.
 export function BookingWorkspace({
                                      bookings, ownerView = false, managerView = false, listToolbar,
-                                     onExportSelected, reviewedBookingIds = [], ...bookingActions
+                                     onExportSelected, exportDisabled = false, reviewedBookingIds = [], ...bookingActions
                                  }: Omit<BookingRowProps, "b" | "hideSummaryRow" | "expandedByDefault" | "detailTab" | "managerView"> & {
     bookings: Booking[];
     managerView?: boolean;
     listToolbar?: ReactNode;
-    onExportSelected?: (booking: Booking, format: "pdf" | "excel", tab: BookingDetailTab) => void;
+    onExportSelected?: (booking: Booking, kind: "transaction" | "billing") => void;
+    exportDisabled?: boolean;
     reviewedBookingIds?: number[];
 }) {
     const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -2249,11 +2250,6 @@ export function BookingWorkspace({
     const tabs: BookingDetailTab[] = managerView
         ? ["Overview", "Billing", "Items"]
         : ["Overview", "Billing", "Items", "Notes"];
-    // The header export action always describes and exports the currently selected tab.
-    const exportLabel = detailTab === "Billing" ? "Billing Receipt"
-        : detailTab === "Items" ? "Booking Items"
-            : detailTab === "Notes" ? "Booking Notes" : "Booking Overview";
-
     return (
         <div className={`grid min-w-0 gap-3 ${managerView ? "xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]" : "2xl:grid-cols-[minmax(0,1.12fr)_minmax(0,0.88fr)]"}`}>
             <section aria-label="Booking list" className={`flex min-w-0 flex-col overflow-hidden rounded-[16px] border border-[#E6DDF0] bg-white shadow-sm ${managerView ? "h-[700px] xl:h-[760px] rounded-[18px]" : ""}`}>
@@ -2324,12 +2320,16 @@ export function BookingWorkspace({
                             </div>
                             <div className="flex items-center gap-2">
                                 <span className={`inline-flex shrink-0 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${STATUS_STYLE[normalizeBookingStatus(selectedBooking.status)] || "border-[#E6DDF0] bg-[#F7F1FF] text-[#2B174C]"}`}>{managerView ? getManagerBookingStatusLabel(selectedBooking.status) : normalizeBookingStatus(selectedBooking.status)}</span>
-                                {managerView && onExportSelected && <div className="relative">
-                                    <button type="button" aria-label={`Download ${exportLabel}`} title={`Download ${exportLabel}`} aria-expanded={exportOpen} onClick={() => setExportOpen(v => !v)} className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#D9C9EB] text-[#43217A] hover:bg-[#F3EEFF]"><Download size={16}/></button>
-                                    {exportOpen && <div className="absolute right-0 top-10 z-30 w-48 rounded-xl border border-[#E6DDF0] bg-white p-1.5 shadow-xl">
-                                        <p className="px-3 py-1 text-[11px] font-semibold text-[#806A8C]">Export {exportLabel}</p>
-                                        <button type="button" onClick={() => {onExportSelected(selectedBooking, "pdf", detailTab);setExportOpen(false);}} className="block w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-[#F7F1FF]">Download {exportLabel} PDF</button>
-                                        <button type="button" onClick={() => {onExportSelected(selectedBooking, "excel", detailTab);setExportOpen(false);}} className="block w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-[#F7F1FF]">Download {exportLabel} Excel (.xlsx)</button>
+                                {managerView && onExportSelected && <div className="relative"
+                                                                         onBlur={event=>{if(!event.currentTarget.contains(event.relatedTarget as Node | null))setExportOpen(false);}}>
+                                    <button type="button" aria-label="Download booking PDF" title="Download booking PDF"
+                                            aria-expanded={exportOpen} aria-haspopup="menu" disabled={exportDisabled} onClick={() => setExportOpen(v => !v)}
+                                            className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#D9C9EB] text-[#43217A] hover:bg-[#F3EEFF] disabled:cursor-not-allowed disabled:opacity-50"><Download size={16}/></button>
+                                    {exportOpen && <div role="menu" className="absolute right-0 top-10 z-30 w-56 rounded-xl border border-[#E6DDF0] bg-white p-1.5 shadow-xl">
+                                        <button type="button" role="menuitem" disabled={exportDisabled} onClick={() => {setExportOpen(false);onExportSelected(selectedBooking, "transaction");}}
+                                                className="block w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-[#F7F1FF] disabled:opacity-50">Booking Transaction (PDF)</button>
+                                        <button type="button" role="menuitem" disabled={exportDisabled} onClick={() => {setExportOpen(false);onExportSelected(selectedBooking, "billing");}}
+                                                className="block w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-[#F7F1FF] disabled:opacity-50">Booking Billing (PDF)</button>
                                     </div>}
                                 </div>}
                             </div>

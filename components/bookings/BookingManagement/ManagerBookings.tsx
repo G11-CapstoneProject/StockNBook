@@ -14,7 +14,6 @@ import {
     X,
 } from "lucide-react";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
-import { downloadBookingReceipt } from "./BookingFinancialPanel";
 import RentalReturnSettlementDialog from "./RentalReturnSettlementDialog";
 import {
     Booking,
@@ -38,320 +37,6 @@ import {
     normalizeBooking,
     peso,
 } from "./_shared";
-
-// Download PDF and Excel directly. Kept in this component to avoid adding another project file.
-/**
- * Manager-only, browser-based file downloads. No print dialog, pop-up window,
- * added dependencies, booking API calls, or changes to financial calculations.
- */
-export type ManagerBookingExportContext = {
-    storeName: string;
-    storeId: string;
-    branchName: string;
-    branchId: string;
-    exportedAt: Date;
-    selected: boolean;
-};
-
-function safeFilename(value: unknown) {
-    return String(value ?? "").replace(/[^A-Za-z0-9_-]+/g, "_").slice(0, 90) || "booking";
-}
-
-function filename(context: ManagerBookingExportContext, rows: Booking[]) {
-    const prefix = context.selected && rows.length === 1
-        ? `StockNBook_Booking_${safeFilename(rows[0].bookingReference || rows[0].id)}`
-        : "StockNBook_Manager_Booking_List";
-    return `${prefix}_${context.exportedAt.toISOString().slice(0, 10)}`;
-}
-
-function downloadBlob(blob: Blob, downloadName: string) {
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = downloadName;
-    anchor.style.display = "none";
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    // Revoking immediately can cancel downloads in some browsers.
-    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-}
-
-function money(value: number) {
-    return `PHP ${value.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
-
-// Excel XLSX (not CSV): a single-sheet Open XML workbook, packaged with an
-// uncompressed ZIP writer so no external XLSX library is required.
-const encoder = new TextEncoder();
-function xml(value: unknown) {
-    return String(value ?? "")
-        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;").replace(/'/g, "&apos;")
-        .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "");
-}
-function colName(index: number) {
-    let n = index + 1, name = "";
-    while (n > 0) { n--; name = String.fromCharCode(65 + n % 26) + name; n = Math.floor(n / 26); }
-    return name;
-}
-function xlsxCell(value: string | number, row: number, column: number) {
-    const address = `${colName(column)}${row}`;
-    if (typeof value === "number" && Number.isFinite(value)) {
-        return `<c r="${address}"><v>${value}</v></c>`;
-    }
-    // Inline text is never interpreted as an Excel formula, including user inputs.
-    return `<c r="${address}" t="inlineStr"><is><t xml:space="preserve">${xml(value)}</t></is></c>`;
-}
-function xlsxRows(rows: Array<Array<string | number>>) {
-    return rows.map((cells, index) => {
-        const rowNumber = index + 1;
-        return `<row r="${rowNumber}">${cells.map((cell, j) => xlsxCell(cell, rowNumber, j)).join("")}</row>`;
-    }).join("");
-}
-
-const crcTable = (() => {
-    const table = new Uint32Array(256);
-    for (let i = 0; i < 256; i++) {
-        let c = i;
-        for (let j = 0; j < 8; j++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
-        table[i] = c >>> 0;
-    }
-    return table;
-})();
-function crc32(bytes: Uint8Array) {
-    let crc = 0xFFFFFFFF;
-    for (const byte of bytes) crc = crcTable[(crc ^ byte) & 255] ^ (crc >>> 8);
-    return (crc ^ 0xFFFFFFFF) >>> 0;
-}
-function zipStored(files: Array<[string, string]>): Blob {
-    const local: Uint8Array[] = [];
-    const central: Uint8Array[] = [];
-    let offset = 0;
-    for (const [path, content] of files) {
-        const name = encoder.encode(path);
-        const data = encoder.encode(content);
-        const checksum = crc32(data);
-        const head = new Uint8Array(30 + name.length);
-        const h = new DataView(head.buffer);
-        h.setUint32(0, 0x04034B50, true);
-        h.setUint16(4, 20, true);
-        h.setUint16(8, 0, true); // stored (no compression)
-        h.setUint32(14, checksum, true);
-        h.setUint32(18, data.length, true);
-        h.setUint32(22, data.length, true);
-        h.setUint16(26, name.length, true);
-        head.set(name, 30);
-        local.push(head, data);
-        const record = new Uint8Array(46 + name.length);
-        const r = new DataView(record.buffer);
-        r.setUint32(0, 0x02014B50, true);
-        r.setUint16(4, 20, true);
-        r.setUint16(6, 20, true);
-        r.setUint32(16, checksum, true);
-        r.setUint32(20, data.length, true);
-        r.setUint32(24, data.length, true);
-        r.setUint16(28, name.length, true);
-        r.setUint32(42, offset, true);
-        record.set(name, 46);
-        central.push(record);
-        offset += head.length + data.length;
-    }
-    const centralLength = central.reduce((sum, bytes) => sum + bytes.length, 0);
-    const end = new Uint8Array(22);
-    const v = new DataView(end.buffer);
-    v.setUint32(0, 0x06054B50, true);
-    v.setUint16(8, files.length, true);
-    v.setUint16(10, files.length, true);
-    v.setUint32(12, centralLength, true);
-    v.setUint32(16, offset, true);
-    return new Blob([...local, ...central, end].map(bytes => new Uint8Array(bytes).buffer), { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
-}
-
-export function downloadManagerBookingsExcel(bookings: Booking[], context: ManagerBookingExportContext) {
-    const header = [
-        "Store", "Store ID", "Branch", "Branch ID", "Booking Reference", "Customer Name",
-        "Phone", "Email", "Booking Type", "Event Date", "Pickup / Delivery", "Pickup / Delivery Date", "Pickup / Delivery Time",
-        "Return Date", "Return Time", "Event Type",
-        "Theme", "Venue / Delivery Address", "Booking Status", "Payment Status", "Agreed Price (PHP)",
-        "Required Down Payment (PHP)", "Amount Paid (PHP)", "Remaining Balance (PHP)",
-        "Custom Request", "Notes",
-    ];
-    const data: Array<Array<string | number>> = bookings.map(b => [
-        context.storeName, context.storeId, getBranchGroupName(b) === "Unassigned Branch" ? context.branchName : getBranchGroupName(b),
-        String(b.branchId ?? b.branch_id ?? context.branchId), b.bookingReference || `#${b.id}`,
-        b.name || "", b.phone || "", b.email || "", getManagerBookingCompositionLabel(b), dateKey(b.date),
-        getBookingSchedule(b).label, getBookingSchedule(b).handoverDate, getBookingSchedule(b).handoverTime,
-        getBookingSchedule(b).returnDate, getBookingSchedule(b).returnTime,
-        b.eventType || b.event_type || "", b.theme || "",
-        b.venue || "", getManagerBookingStatusLabel(b.status), getManagerPaymentLabel(b),
-        getTotalPrice(b), getRequiredDownPayment(b), getAmountPaid(b), getBalance(b),
-        b.customOrder || b.custom_order || "", b.notes || "",
-    ]);
-    const rows: Array<Array<string | number>> = [
-        ["StockNBook — Manager Booking Export"],
-        [`Store: ${context.storeName} (ID: ${context.storeId})`],
-        [`Branch: ${context.branchName} (ID: ${context.branchId})`],
-        [`Generated: ${context.exportedAt.toLocaleString("en-PH")}`],
-        [`Records exported: ${bookings.length}`], header, ...data,
-    ];
-    const last = Math.max(rows.length, 6);
-    const worksheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
-        `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">` +
-        `<dimension ref="A1:V${last}"/><sheetViews><sheetView workbookViewId="0">` +
-        `<pane ySplit="6" topLeftCell="A7" activePane="bottomLeft" state="frozen"/>` +
-        `</sheetView></sheetViews><sheetFormatPr defaultRowHeight="15"/>` +
-        `<cols>${header.map((_, i) => `<col min="${i + 1}" max="${i + 1}" width="${i === 5 || i === 20 || i === 21 ? 28 : 19}" customWidth="1"/>`).join("")}</cols>` +
-        `<sheetData>${xlsxRows(rows)}</sheetData>` +
-        `<autoFilter ref="A6:V${last}"/></worksheet>`;
-    const files: Array<[string, string]> = [
-        ["[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`],
-        ["_rels/.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`],
-        ["xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Bookings" sheetId="1" r:id="rId1"/></sheets></workbook>`],
-        ["xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`],
-        ["xl/worksheets/sheet1.xml", worksheet],
-    ];
-    downloadBlob(zipStored(files), `${filename(context, bookings)}.xlsx`);
-}
-
-// Native A4 landscape PDF download, drawn directly into PDF page streams.
-// This works in browsers without requiring print(), pop-ups, or an extra library.
-const PDF_W = 842;
-const PDF_H = 595;
-function pdfSafe(value: unknown) {
-    return String(value ?? "").normalize("NFKD")
-        .replace(/[\u0300-\u036f]/g, "").replace(/₱/g, "PHP ")
-        .replace(/[—–]/g, "-").replace(/[“”]/g, '"').replace(/[‘’]/g, "'")
-        .replace(/[^\x20-\x7e]/g, "?").replace(/[\\()]/g, match => `\\${match}`);
-}
-function pdfText(value: unknown, x: number, y: number, size = 9, bold = false) {
-    return `BT /${bold ? "F2" : "F1"} ${size} Tf 1 0 0 1 ${x} ${y} Tm (${pdfSafe(value)}) Tj ET\n`;
-}
-function shortText(value: unknown, max: number) {
-    const raw = String(value ?? "");
-    return raw.length <= max ? raw : raw.slice(0, Math.max(0, max - 3)) + "...";
-}
-function pageLine(x1: number, y1: number, x2: number, y2: number) {
-    return `0.86 0.83 0.9 RG 0.5 w ${x1} ${y1} m ${x2} ${y2} l S\n`;
-}
-function renderPdfPages(rows: Booking[], context: ManagerBookingExportContext) {
-    const pages: string[][] = [];
-    let commands: string[] = [];
-    let y = 0;
-    const heading = context.selected ? "Selected Booking Details" : "Manager Booking List";
-    function startPage() {
-        commands = [];
-        pages.push(commands);
-        commands.push("0.17 0.10 0.29 rg\n");
-        commands.push(pdfText(`StockNBook  |  ${heading}`, 38, PDF_H - 43, 17, true));
-        commands.push(pdfText(`Store: ${context.storeName}   (ID: ${context.storeId})`, 38, PDF_H - 65, 10));
-        commands.push(pdfText(`Branch: ${context.branchName}   (ID: ${context.branchId})`, 38, PDF_H - 80, 10));
-        commands.push(pdfText(`Generated: ${context.exportedAt.toLocaleString("en-PH")}   |   ${rows.length} record(s)`, 38, PDF_H - 95, 9));
-        commands.push(pageLine(38, PDF_H - 106, PDF_W - 38, PDF_H - 106));
-        y = PDF_H - 124;
-    }
-    function ensureSpace(height: number) {
-        if (y - height < 47) startPage();
-    }
-    function field(label: string, value: unknown) {
-        const text = String(value ?? "-") || "-";
-        const chunks = text.match(/.{1,112}/g) || ["-"];
-        ensureSpace(17 * chunks.length + 4);
-        commands.push(pdfText(label, 43, y, 9, true));
-        chunks.forEach((part, i) => {
-            commands.push(pdfText(part, 205, y - i * 15, 9));
-        });
-        y -= chunks.length * 17 + 4;
-    }
-    startPage();
-    if (context.selected && rows.length === 1) {
-        const b = rows[0];
-        const fields: Array<[string, unknown]> = [
-            ["Booking reference", b.bookingReference || `#${b.id}`],
-            ["Customer name", b.name], ["Phone number", b.phone || "-"],
-            ["Email", b.email || "-"], ["Facebook / Messenger", b.facebookName || b.facebook_name || "-"],
-            ["Booking type", getManagerBookingCompositionLabel(b)],
-            ["Booking branch", getBranchGroupName(b) === "Unassigned Branch" ? context.branchName : getBranchGroupName(b)],
-            ["Event date", formatDate(b.date)],
-            [getBookingSchedule(b).label, getBookingSchedule(b).handoverText || "-"],
-            ...(getBookingSchedule(b).returnText ? [["Return", getBookingSchedule(b).returnText] as [string, unknown]] : []),
-            ["Event type", b.eventType || b.event_type || "-"],
-            ["Theme", b.theme || "-"], [b.handoverMethod === "delivery" ? "Delivery address" : "Venue", b.venue || "-"],
-            ["Booking status", getManagerBookingStatusLabel(b.status)],
-            ["Payment status", getManagerPaymentLabel(b)],
-            ["Agreed price", money(getTotalPrice(b))],
-            ["Required down payment", money(getRequiredDownPayment(b))],
-            ["Amount paid", money(getAmountPaid(b))],
-            ["Remaining balance", money(getBalance(b))],
-            ["Additional custom request", b.customOrder || b.custom_order || "-"],
-            ["Notes", b.notes || "-"],
-        ];
-        for (const [label, value] of fields) field(label, value);
-    } else {
-        const cols = [
-            { label: "Booking reference", x: 38, size: 29 },
-            { label: "Customer", x: 200, size: 21 },
-            { label: "Type", x: 332, size: 10 },
-            { label: "Event date", x: 395, size: 12 },
-            { label: "Status", x: 487, size: 19 },
-            { label: "Agreed (PHP)", x: 604, size: 14 },
-            { label: "Paid (PHP)", x: 694, size: 15 },
-        ];
-        function drawHeader() {
-            ensureSpace(22);
-            commands.push("0.34 0.23 0.5 rg\n");
-            cols.forEach(c => commands.push(pdfText(c.label, c.x, y, 8, true)));
-            y -= 7;
-            commands.push(pageLine(38, y, PDF_W - 38, y));
-            commands.push("0.17 0.10 0.29 rg\n");
-            y -= 17;
-        }
-        drawHeader();
-        rows.forEach((b, index) => {
-            if (y < 54) { startPage(); drawHeader(); }
-            const values = [
-                b.bookingReference || `#${b.id}`, b.name, getManagerBookingCompositionLabel(b),
-                formatDate(b.date), getManagerBookingStatusLabel(b.status),
-                money(getTotalPrice(b)).replace("PHP ", ""), money(getAmountPaid(b)).replace("PHP ", ""),
-            ];
-            values.forEach((v, i) => commands.push(pdfText(shortText(v, cols[i].size), cols[i].x, y, 8)));
-            y -= 19;
-            if (index % 2 === 0) commands.push(pageLine(38, y + 7, PDF_W - 38, y + 7));
-        });
-    }
-    pages.forEach((page, index) => {
-        page.push("0.39 0.32 0.48 rg\n");
-        page.push(pdfText(`Page ${index + 1} of ${pages.length}`, PDF_W - 110, 26, 8));
-    });
-    return pages.map(p => p.join(""));
-}
-function pdfBlob(streams: string[]) {
-    const objects: string[] = [];
-    objects.push("<< /Type /Catalog /Pages 2 0 R >>");
-    const pageIds = streams.map((_, i) => `${5 + i * 2} 0 R`).join(" ");
-    objects.push(`<< /Type /Pages /Kids [${pageIds}] /Count ${streams.length} >>`);
-    objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
-    objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>");
-    streams.forEach((stream, i) => {
-        const streamId = 6 + i * 2;
-        objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${PDF_W} ${PDF_H}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${streamId} 0 R >>`);
-        objects.push(`<< /Length ${encoder.encode(stream).length} >>\nstream\n${stream}endstream`);
-    });
-    let raw = "%PDF-1.4\n";
-    const positions = [0];
-    objects.forEach((value, index) => {
-        positions.push(encoder.encode(raw).length);
-        raw += `${index + 1} 0 obj\n${value}\nendobj\n`;
-    });
-    const crossReference = encoder.encode(raw).length;
-    raw += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
-    for (const position of positions.slice(1)) raw += `${String(position).padStart(10, "0")} 00000 n \n`;
-    raw += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${crossReference}\n%%EOF\n`;
-    return new Blob([encoder.encode(raw)], { type: "application/pdf" });
-}
-export function downloadManagerBookingsPdf(bookings: Booking[], context: ManagerBookingExportContext) {
-    downloadBlob(pdfBlob(renderPdfPages(bookings, context)), `${filename(context, bookings)}.pdf`);
-}
 
 type BookingInventoryItem = {
     id: number;
@@ -422,350 +107,746 @@ function formatCurrentDateTime(value: Date) {
 }
 
 
-// Export the selected detail tab, not a generic booking-list report.
-// Billing PDF deliberately reuses the exact portrait receipt used by the Billing tab.
-type SelectedTab = "Overview" | "Billing" | "Items" | "Notes";
-type SelectedExportLine = { label: string; value: string; section?: boolean };
-type SelectedFinancialStatement = {
-    booking?: { agreedPrice?: number | null; bookingPayments?: number; balance?: number; downPayment?: number };
-    depositRequired?: number;
-    depositCollected?: number;
-    depositApplied?: number;
-    depositRefunded?: number;
-    depositHeld?: number;
-    claimBalance?: number;
-    packageBase?: number; deliveryFee?: number; setupFee?: number;
-    salesItems?: Array<{name: string;variantName?: string;quantity: number;unitPrice: number;amount: number}>;
-    rentalItems?: Array<{name: string;quantity: number;days: number;dailyRate: number;amount: number}>;
-    claims?: Array<{
-        equipmentName?: string; sourceType?: string; quantity?: number; reason?: string;
-        status?: string; amount?: number; amountPaid?: number; depositApplied?: number;
-    }>;
-};
-type SelectedBookingItems = {
-    items: Array<{
-        product_name: string; variant_name?: string | null; source_type?: string;
-        booked_quantity: number | string; used_quantity?: number | string;
-        available_for_booking?: number | null; inventory_status?: string;
-    }>;
-    rentalItems: Array<{
-        equipment_name: string; quantity: number | string;
-        start_date?: string; end_date?: string; allocation_status?: string;
-        available_for_event?: number | null;
-    }>;
+// The booking report uses the dashboard renderer; individual PDFs use receipt and package-style layouts.
+// All data is obtained from the existing authenticated, branch-scoped booking APIs.
+type BookingPdfKind = "transaction" | "billing";
+type ManagerBookingExportContext = {
+    storeName: string;
+    branchName: string;
+    branchId: number;
+    exportedAt: Date;
 };
 
-async function getSelectedExportData(action: string, booking: Booking): Promise<Record<string, unknown>> {
+// Browser-only PDF layouts. The transaction follows the Packages module report;
+// open/closed booking billing follows the Sales/POS invoice style.
+// Canvas, as in Packages, preserves Unicode customer names and the peso symbol.
+type BookingFinancialStatement = {
+    booking: {
+        id: number; reference: string; name: string; status: string; eventDate?: string;
+        storeName?: string; branchName?: string; bookingType?: string; packageName?: string;
+        agreedPrice: number | null; downPayment: number; dpDeadline?: string | null;
+        bookingPayments: number; bookingRefunded?: number; balance: number;
+    };
+    packageBase: number; salesSubtotal?: number; rentalSubtotal: number;
+    deliveryFee: number; setupFee: number; agreedCharges?: number;
+    depositRequired: number; depositCollected: number; depositApplied: number;
+    depositRefunded: number; depositHeld: number; claimBalance: number;
+    depositWaiverReason?: string | null;
+    salesItems?: Array<{ name: string; variantName?: string; quantity: number; unitPrice: number; amount: number }>;
+    rentalItems: Array<{ name: string; quantity: number; days: number; dailyRate: number; amount: number }>;
+    claims: Array<{ equipmentName?: string; sourceType?: string; quantity: number; reason?: string;
+        status: string; amount: number; amountPaid: number; depositApplied: number }>;
+    cancellation?: { status: string; reason: string | null; closedAt: string | null; refundMethod: string | null;
+        bookingPayments: number; bookingRefunded: number; amountKept: number; depositRefunded: number } | null;
+    vat?: { rate: number; taxableCharges: number; vatableSales: number; vatAmount: number } | null;
+};
+type BookingExportItems = {
+    items: Array<{
+        product_name: string; variant_name?: string | null; source_type?: string; category?: string;
+        booked_quantity: number; reserved_quantity?: number; used_quantity?: number; restored_quantity?: number;
+        unit_price?: number; estimated_subtotal?: number; inventory_status?: string; prepared?: boolean; issued?: boolean;
+        available_for_booking?: number | null; availability_note?: string | null;
+    }>;
+    rentalItems: Array<{
+        equipment_name: string; quantity: number; start_date?: string; end_date?: string;
+        billable_days?: number; daily_rate?: number; agreed_line_total?: number; included_in_package?: boolean;
+        allocation_status?: string; returned_quantity?: number; damaged_quantity?: number; missing_quantity?: number;
+        available_for_event?: number | null; availability_note?: string | null;
+    }>;
+};
+type BookingReturnReport = {
+    equipmentName: string; issuedQuantity: number; allocationStatus: string;
+    returnedReceivedUnits?: number | null; inspectionStatus?: string | null; inspectedAt?: string | null;
+    inspectedBy?: string | null; receivedBy?: string | null; notes?: string | null;
+    damagedUnits?: number; missingUnits?: number;
+};
+type Identity = { storeName: string; branchName: string; exportedAt: Date };
+type Field = [string, unknown];
+type TransactionInfo = {
+    reference: string; customer: string; status: string; paymentStatus: string;
+    booking: Field[]; contact: Field[]; schedule: Field[]; notes: Field[];
+};
+type Column = { name: string; width: number; align?: "left" | "center" | "right" };
+type Cell = string | { name: string; detail?: string };
+type TableRow = { group: string } | { cells: Cell[]; emphasis?: boolean };
+type SummaryLine = { label: string; value: string; bold?: boolean };
+type LayoutOptions = { billing: boolean; title: string; identity: Identity; reference: string; subtitle?: string };
+
+const W = 595.28, H = 841.89, scale = 2;
+const pixelW = Math.round(W * scale), pixelH = Math.round(H * scale);
+const margin = 42, right = W - margin, width = W - margin * 2, bottom = H - 54;
+const C = {
+    cream: "#FDFAF4", white: "#FFFFFF", ink: "#241537", purple: "#2B174C",
+    muted: "#806A8C", section: "#4E2C85", border: "#E6DDF0", pale: "#FBF8FF",
+    header: "#FAF7FF", branch: "#EDE3FF", table: "#F7F2FC", alt: "#FCFAFF",
+    payments: "#F5F0FF", alert: "#FFF6F5", alertBorder: "#F2C4C4", red: "#A33E20",
+};
+const clean = (value: unknown) => String(value ?? "").replace(/\s+/g, " ").trim();
+const present = (value: unknown) => clean(value) || "—";
+const num = (value: unknown) => Number.isFinite(Number(value)) ? Number(value) : 0;
+const yesNo = (value?: boolean) => value == null ? "—" : value ? "Yes" : "No";
+const amount = (value: unknown, billing = false) => value == null || value === "" || !Number.isFinite(Number(value))
+    ? "—" : (billing ? "₱" : "PHP ") + Number(value).toLocaleString("en-PH", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const dateTime = (value: Date) => value.toLocaleString("en-PH", {
+    timeZone: "Asia/Manila", month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit",
+});
+const displayStatus = (value: unknown) => clean(value).replace(/_/g, " ").replace(/\b\w/g, m=>m.toUpperCase()) || "—";
+const join = (...parts: Array<string | false | undefined>) => parts.filter(Boolean).join("\n");
+
+class BookingDocument {
+    private pages: Uint8Array[] = [];
+    private canvas: HTMLCanvasElement | null = null;
+    private ctx!: CanvasRenderingContext2D;
+    private y = 0;
+    private opt: LayoutOptions;
+
+    constructor(opt: LayoutOptions) {
+        this.opt = opt;
+        this.newPage(false);
+    }
+    private font(size: number, bold = false) {
+        this.ctx.font = `${bold ? 700 : 400} ${size}px Helvetica, Arial, sans-serif`;
+    }
+    private text(value: unknown, x: number, baseline: number, size = 10, bold = false, color = C.ink,
+                 align: CanvasTextAlign = "left", maxWidth?: number) {
+        this.font(size, bold);
+        this.ctx.fillStyle = color;
+        this.ctx.textAlign = align;
+        if (maxWidth != null) this.ctx.fillText(clean(value), x, baseline, maxWidth);
+        else this.ctx.fillText(clean(value), x, baseline);
+        this.ctx.textAlign = "left";
+    }
+    private box(x: number, y: number, w: number, h: number, fill: string, stroke?: string, radius = 0) {
+        this.ctx.fillStyle = fill;
+        if (radius > 0) {
+            this.ctx.beginPath();
+            this.ctx.roundRect(x, y, w, h, radius);
+            this.ctx.fill();
+            if (stroke) { this.ctx.strokeStyle = stroke; this.ctx.lineWidth = 0.7; this.ctx.stroke(); }
+        } else {
+            this.ctx.fillRect(x, y, w, h);
+            if (stroke) { this.ctx.strokeStyle = stroke; this.ctx.lineWidth = 0.7; this.ctx.strokeRect(x, y, w, h); }
+        }
+    }
+    private rule(y: number, x = margin, end = right, dashed = false, color = C.border, thick = 0.6) {
+        this.ctx.strokeStyle = color; this.ctx.lineWidth = thick; this.ctx.setLineDash(dashed ? [2, 2] : []);
+        this.ctx.beginPath(); this.ctx.moveTo(x, y); this.ctx.lineTo(end, y); this.ctx.stroke(); this.ctx.setLineDash([]);
+    }
+    private wrap(value: unknown, w: number, size: number, bold = false): string[] {
+        this.font(size, bold);
+        const result: string[] = [];
+        for (const paragraph of String(value ?? "").replace(/\r/g, "").split("\n")) {
+            const words = paragraph.split(/\s+/).filter(Boolean);
+            let line = "";
+            if (!words.length) { result.push(""); continue; }
+            for (const word of words) {
+                if (line && this.ctx.measureText(line + " " + word).width <= w) { line += " " + word; continue; }
+                if (line) result.push(line);
+                line = "";
+                for (const character of word) {
+                    if (line && this.ctx.measureText(line + character).width > w) { result.push(line); line = ""; }
+                    line += character;
+                }
+            }
+            if (line) result.push(line);
+        }
+        return result.length ? result : [""];
+    }
+    private savePage() {
+        if (!this.canvas) return;
+        const bytes = atob(this.canvas.toDataURL("image/jpeg", 0.94).split(",")[1]);
+        this.pages.push(Uint8Array.from(bytes, c => c.charCodeAt(0)));
+    }
+    private newPage(continued: boolean) {
+        this.savePage();
+        this.canvas = document.createElement("canvas");
+        this.canvas.width = pixelW; this.canvas.height = pixelH;
+        const ctx = this.canvas.getContext("2d");
+        if (!ctx) throw new Error("Unable to create PDF rendering surface.");
+        this.ctx = ctx; ctx.setTransform(pixelW / W, 0, 0, pixelH / H, 0, 0);
+        this.box(0, 0, W, H, C.cream);
+        this.box(25, 24, W - 50, H - 48, C.white);
+        if (this.opt.billing) {
+            // Match the shared Sales/POS invoice: cream frame, purple top rule,
+            // centered store/branch, invoice heading and booking reference.
+            this.box(25, 24, W - 50, 6, C.purple);
+            if (continued) {
+                this.text(this.opt.identity.storeName, W / 2, 53, 17, true, C.purple, "center", width);
+                this.text("Booking Reference: " + this.opt.reference + " (continued)", W / 2, 75, 11, false, C.muted, "center", width);
+                this.rule(90);
+                this.y = 105;
+                return;
+            }
+            this.text(this.opt.identity.storeName, W / 2, 57, 23, true, C.purple, "center", width);
+            this.text("Branch: " + this.opt.identity.branchName, W / 2, 78, 12, true, C.purple, "center", width);
+            this.text(this.opt.subtitle || "Internal booking record", W / 2, 94, 10, false, "#5F4E75", "center", width);
+            this.rule(105);
+            this.text("BOOKING BILLING", W / 2, 140, 24, true, C.purple, "center", width);
+            this.text("Booking Reference: " + this.opt.reference, W / 2, 160, 12, true, C.ink, "center", width);
+            this.text("Internal transaction copy", W / 2, 176, 10, false, "#5F4E75", "center", width);
+            this.y = 185;
+        } else {
+            // Same report header, palette and geometry as Packages.
+            this.box(25, 24, W - 50, 6, C.purple);
+            if (continued) {
+                // A compact continuation header leaves room for the remaining details.
+                this.text(this.opt.identity.storeName + " · " + this.opt.identity.branchName, W / 2, 48, 11, true, C.purple, "center", width);
+                this.text(this.opt.title + " (continued)", W / 2, 69, 15, true, C.purple, "center", width);
+                this.text("Booking reference: " + this.opt.reference, W / 2, 85, 9, false, C.muted, "center", width);
+                this.rule(94);
+                this.y = 104;
+                return;
+            }
+            this.text(this.opt.identity.storeName, W / 2, 58, 21, true, C.purple, "center", width);
+            this.text("Branch: " + this.opt.identity.branchName, W / 2, 75, 11.5, true, C.purple, "center", width);
+            this.text("Generated: " + dateTime(this.opt.identity.exportedAt), W / 2, 91, 10.2, false, C.muted, "center", width);
+            this.rule(103);
+            this.text(this.opt.title + (continued ? " (continued)" : ""), W / 2, 131, continued ? 16 : 18, true, C.purple, "center", width);
+            this.text("Booking reference: " + this.opt.reference, W / 2, 148, 9, false, C.muted, "center", width);
+            this.y = 163;
+        }
+    }
+    private need(h: number) {
+        if (this.y + h > bottom) this.newPage(true);
+    }
+    private section(title: string) {
+        if (this.opt.billing) {
+            this.text(title.toUpperCase(), margin + 4, this.y + 13, 11, true, C.purple);
+            this.y += 21;
+        } else {
+            this.box(margin, this.y, width, 23, C.pale);
+            this.text(title, margin + 10, this.y + 15, 11, true, C.purple);
+            this.y += 29;
+        }
+    }
+    // Packages-style cards for transactions; Sales/POS-style field pairs for billing.
+    cards(title: string, fields: Field[], billingIdentifiers = false) {
+        if (!fields.length) return;
+        const columns = billingIdentifiers ? 2 : 3;
+        const gap = billingIdentifiers ? 10 : 8;
+        const cardWidth = (width - gap * (columns - 1)) / columns;
+        if (title) { this.need(75); this.section(title); }
+        for (let index = 0; index < fields.length; index += columns) {
+            const pair = fields.slice(index, index + columns);
+            const prepared = pair.map(([label,value]) => ({label,lines:this.wrap(present(value),cardWidth-20,billingIdentifiers?11:10,!billingIdentifiers)}));
+            // Preserve extremely long addresses instead of stretching a card off-page.
+            const max = Math.max(...prepared.map(v=>v.lines.length));
+            for (let offset = 0; offset < max; offset += 20) {
+                const pieces = prepared.map(p=>({...p,lines:p.lines.slice(offset,offset+20)}));
+                const lineCount = Math.max(1,...pieces.map(p=>p.lines.length));
+                const height = Math.max(34, 22 + lineCount * 12);
+                this.need(height + 5);
+                pieces.forEach((part,i)=>{
+                    if (!part.lines.length) return;
+                    const x=margin+i*(cardWidth+gap);
+                    if (!billingIdentifiers) this.box(x,this.y,cardWidth,height,C.white,C.border);
+                    this.text(part.label + (offset ? " (continued)" : ""),
+                        x+10,this.y+12,billingIdentifiers?9:8,true,billingIdentifiers?"#5F4E75":C.muted,"left",cardWidth-20);
+                    part.lines.forEach((line,j)=>this.text(line,x+10,this.y+(billingIdentifiers?25:24)+j*12,billingIdentifiers?11:10,!billingIdentifiers,C.ink));
+                });
+                this.y+=height+(billingIdentifiers?3:5);
+            }
+        }
+        if (billingIdentifiers) { this.y+=4; }
+        else this.y+=5;
+    }
+    notes(title: string, fields: Field[]) {
+        const visible=fields.filter(([,v])=>clean(v));
+        if (!visible.length) return;
+        this.need(60); this.section(title);
+        for (const [label,value] of visible) {
+            this.need(28);
+            this.text(label,margin+8,this.y+11,9,true,C.section); this.y+=16;
+            for(const line of this.wrap(value,width-16,9.5)) {
+                this.need(14); this.text(line,margin+8,this.y+10,9.5,false,C.ink); this.y+=14;
+            }
+            this.y+=6;
+        }
+        this.y+=3;
+    }
+    paragraph(value: unknown, color = C.muted, centered = false) {
+        const lines=this.wrap(value,width-20,8.5);
+        if(lines.length <= 5) this.need(lines.length*13);
+        for(const line of lines) {
+            this.need(13); this.text(line,centered?W/2:margin+10,this.y+10,8.5,false,color,centered?"center":"left");
+            this.y+=13;
+        }
+        this.y+=5;
+    }
+    table(title: string, columns: Column[], rows: TableRow[]) {
+        const total = columns.reduce((n,c)=>n+c.width,0);
+        let start=margin;
+        const cols=columns.map(c=>{const w=width*c.width/total;const result={...c,x:start,w};start+=w;return result;});
+        const headerSize=this.opt.billing?11:8;
+        const headerLines=cols.map(c=>this.wrap(this.opt.billing?c.name:c.name.toUpperCase(),c.w-12,headerSize,true));
+        const headerHeight=Math.max(this.opt.billing?29:22,10+Math.max(...headerLines.map(v=>v.length))*(headerSize+2));
+        const header=()=>{
+            this.box(margin,this.y,width,headerHeight,this.opt.billing?"#F9F6FD":C.table,this.opt.billing?undefined:C.border);
+            cols.forEach((c,i)=>headerLines[i].forEach((line,j)=>{
+                const a=c.align||"left";const x=a==="right"?c.x+c.w-6:a==="center"?c.x+c.w/2:c.x+6;
+                this.text(line,x,this.y+(this.opt.billing?19:12)+j*(headerSize+2),headerSize,true,this.opt.billing?C.purple:C.muted,a);
+            }));
+            this.y+=headerHeight;
+            if(this.opt.billing)this.rule(this.y);
+        };
+        this.need(29+headerHeight+40); this.section(title); header();
+        for (const [index,row] of rows.entries()) {
+            if ("group" in row) {
+                if(this.y+56>bottom){this.newPage(true);this.section(title+" (continued)");header();}
+                this.box(margin,this.y,width,18,this.opt.billing?C.white:C.alt,this.opt.billing?undefined:C.border);
+                this.text(row.group.toUpperCase(),margin+8,this.y+12,8,true,C.muted);
+                this.y+=18; continue;
+            }
+            const prepared=cols.map((c,i)=>{
+                const cell=row.cells[i]??"—";
+                const name=typeof cell==="string"?cell:cell.name;
+                const detail=typeof cell==="string"?"":cell.detail;
+                const strong=row.emphasis||(this.opt.billing?i===cols.length-1:i===0);
+                const cellSize=this.opt.billing?10:9;
+                return [
+                    ...this.wrap(name,c.w-12,cellSize,Boolean(strong)).map(s=>({s,bold:Boolean(strong),color:C.ink,size:cellSize})),
+                    ...(detail?this.wrap(detail,c.w-12,8).map(s=>({s,bold:false,color:C.muted,size:8})):[])
+                ];
+            });
+            const lineCount=Math.max(1,...prepared.map(v=>v.length));
+            for(let offset=0;offset<lineCount;offset+=26) {
+                const slices=prepared.map(v=>v.slice(offset,offset+26));
+                const rowHeight=Math.max(26,10+Math.max(...slices.map(v=>v.length))*11);
+                if(this.y+rowHeight>bottom){this.newPage(true);this.section(title+" (continued)");header();}
+                this.box(margin,this.y,width,rowHeight,this.opt.billing?C.white:row.emphasis?C.pale:index%2===0?C.white:C.alt,this.opt.billing?undefined:C.border);
+                cols.forEach((c,i)=>{
+                    const a=c.align||"left";const x=a==="right"?c.x+c.w-6:a==="center"?c.x+c.w/2:c.x+6;
+                    const lines=slices[i];
+                    lines.forEach((line,j)=>this.text(line.s,x,this.y+13+j*11,line.size,line.bold,line.color,a));
+                });
+                this.y+=rowHeight;
+                if(this.opt.billing)this.rule(this.y);
+            }
+        }
+        this.y+=8;
+    }
+    // Same highlighted total amount band as the Sales/POS invoice.
+    invoiceTotal(value: string) {
+        this.need(48);
+        this.box(margin,this.y,width,38,"#F9F6FD");
+        this.rule(this.y);
+        this.text("TOTAL AMOUNT",margin+8,this.y+25,15,true,C.purple);
+        this.text(value,right-8,this.y+25,19,true,C.purple,"right",width*.59);
+        this.y+=45;
+    }
+    summary(title: string, lines: SummaryLine[], options: {fill?: string; stroke?: string; note?: string; warning?: boolean} = {}) {
+        if(!lines.length && !options.note) return;
+        const pad=options.fill?10:0;
+        const w=width-pad*2;
+        const prepared=lines.map(line=>({...line,labels:this.wrap(line.label,w*.68-8,9.5,Boolean(line.bold)),
+            values:this.wrap(line.value,w*.32-5,9.5,Boolean(line.bold))}));
+        const heights=prepared.map(line=>Math.max(16,Math.max(line.labels.length,line.values.length)*12+4));
+        const noteLines=options.note?this.wrap(options.note,w,8.4):[];
+        const headingHeight=title?20:0;
+        const total=pad*2+headingHeight+heights.reduce((a,b)=>a+b,0)+noteLines.length*12+(noteLines.length?4:0);
+        this.need(total+6);
+        if(options.fill) this.box(margin,this.y,width,total,options.fill,options.stroke||C.border,7);
+        let y=this.y+pad;
+        if(title) { this.text(this.opt.billing?title.toUpperCase():title,margin+pad,y+12,10,true,options.warning?C.red:C.section);y+=headingHeight; }
+        prepared.forEach((line,i)=>{
+            if(line.bold&&i>0)this.rule(y,margin+pad,right-pad,true);
+            line.labels.forEach((s,j)=>this.text(s,margin+pad,y+12+j*12,9.5,Boolean(line.bold),line.bold?C.purple:C.muted));
+            line.values.forEach((s,j)=>this.text(s,right-pad,y+12+j*12,9.5,Boolean(line.bold),C.ink,"right"));
+            y+=heights[i];
+        });
+        if(noteLines.length){y+=4;noteLines.forEach((s,j)=>this.text(s,margin+pad,y+9+j*12,8.4,false,C.muted));}
+        this.y+=total+(this.opt.billing?5:9);
+    }
+    outstanding(label: string, value: string, note: string) {
+        this.need(54);
+        this.box(margin,this.y,width,48,C.purple,undefined,7);
+        this.text(label.toUpperCase(),margin+12,this.y+16,9,true,"#E5D9FF","left",width*.55);
+        this.text(value,right-12,this.y+19,16,true,C.white,"right",width*.35);
+        this.text(note,margin+12,this.y+35,8,false,"#E5D9FF","left",width-24);
+        this.y+=57;
+    }
+    finish(): Blob {
+        this.savePage();
+        // Same image-page PDF assembly as Packages; byte offsets account for JPEG data.
+        const encoder=new TextEncoder(), parts: BlobPart[]=[], offsets:number[]=[0];
+        let position=0;
+        const append=(data:string|Uint8Array)=>{
+            const bytes=typeof data==="string"?encoder.encode(data):data;
+            const copy=new Uint8Array(new ArrayBuffer(bytes.byteLength));copy.set(bytes);
+            parts.push(copy);position+=copy.byteLength;
+        };
+        const object=(id:number,data:string|Uint8Array,prefix="",suffix="")=>{
+            offsets[id]=position;append(`${id} 0 obj\n`);append(prefix);append(data);append(suffix);append("\nendobj\n");
+        };
+        append("%PDF-1.4\n%----\n");
+        object(1,"<< /Type /Catalog /Pages 2 0 R >>");
+        const pageIds=this.pages.map((_,i)=>4+i*3);
+        object(2,`<< /Type /Pages /Kids [${pageIds.map(id=>`${id} 0 R`).join(" ")}] /Count ${pageIds.length} >>`);
+        object(3,"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+        this.pages.forEach((bytes,i)=>{
+            const pageId=pageIds[i],streamId=pageId+1,imageId=pageId+2;
+            const footer=this.opt.billing?`Internal booking record - not a tax invoice | Page ${i+1} of ${this.pages.length}`:`Powered by StockNBook | Page ${i+1} of ${this.pages.length}`;
+            const commands=`q ${W} 0 0 ${H} 0 0 cm /Cover Do Q\nq 0.9 0.86 0.94 RG 0.6 w ${margin} 42 m ${right} 42 l S Q\nq 0.373 0.306 0.459 rg BT /F1 8 Tf 1 0 0 1 ${(W/2-footer.length*2.05).toFixed(2)} 26 Tm (${footer}) Tj ET Q\n`;
+            object(pageId,`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H}] /Resources << /XObject << /Cover ${imageId} 0 R >> /Font << /F1 3 0 R >> >> /Contents ${streamId} 0 R >>`);
+            object(streamId,commands,`<< /Length ${encoder.encode(commands).length} >>\nstream\n`,"endstream");
+            object(imageId,bytes,`<< /Type /XObject /Subtype /Image /Width ${pixelW} /Height ${pixelH} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${bytes.length} >>\nstream\n`,"\nendstream");
+        });
+        const xref=position,totalObjects=3+this.pages.length*3;
+        append(`xref\n0 ${totalObjects+1}\n0000000000 65535 f \n`);
+        for(let id=1;id<=totalObjects;id++)append(`${String(offsets[id]).padStart(10,"0")} 00000 n \n`);
+        append(`trailer\n<< /Size ${totalObjects+1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+        return new Blob(parts,{type:"application/pdf"});
+    }
+}
+
+function refundMethod(methods: string) {
+    const labels:Record<string,string>={gcash:"GCash",bank_transfer:"Bank transfer",cash:"Cash"};
+    return methods.split(",").map(m=>m.trim()).filter(Boolean).map(m=>labels[m]||m).join(", ");
+}
+function closedAt(value: string) {
+    const parsed=new Date(value.includes("T")?value:value.replace(" ","T")+"+08:00");
+    return Number.isNaN(parsed.getTime())?value:dateTime(parsed);
+}
+function drawFinancial(doc: BookingDocument, v: BookingFinancialStatement, billing: boolean) {
+    // Same calculations, grouping, labels and conditions as BookingFinancialPanel.
+    const b=v.booking, agreed=b.agreedPrice==null?null:Number(b.agreedPrice);
+    const depositDue=v.cancellation?0:Math.max(0,num(v.depositRequired)-num(v.depositCollected));
+    const bookingDue=Math.max(0,num(b.balance)), claimDue=Math.max(0,num(v.claimBalance));
+    const charges=v.claims.filter(c=>c.status!=="waived");
+    const approvedTotal=charges.reduce((n,c)=>n+Math.max(0,num(c.amount)),0);
+    const claimPayments=charges.reduce((n,c)=>n+Math.max(0,num(c.amountPaid)),0);
+    const cashCollected=num(b.bookingPayments)+num(v.depositCollected)+claimPayments;
+    const bookingRefunded=Math.max(0,num(b.bookingRefunded ?? v.cancellation?.bookingRefunded));
+    const netReceived=cashCollected-num(v.depositRefunded)-bookingRefunded;
+    const hasDeposit=[v.depositRequired,v.depositCollected,v.depositApplied,v.depositRefunded,v.depositHeld].some(n=>Math.abs(num(n))>0.005);
+    const hasCharges=v.claims.length>0||[v.claimBalance,v.depositApplied].some(n=>Math.abs(num(n))>0.005);
+    const hasRentals=v.rentalItems.length>0;
+    const financialMoves=Math.abs(num(v.depositCollected))>0.005||Math.abs(num(v.depositRefunded))>0.005||Math.abs(claimPayments)>0.005||bookingRefunded>0.005;
+    const totalDue=bookingDue+depositDue+claimDue, reconciled=agreed!==null&&totalDue<0.005&&claimDue<0.005;
+    const money=(value:unknown)=>amount(Math.max(0,num(value)),false);
+    const line=(label:string,value:unknown,bold=false):SummaryLine=>({label,value:money(value),bold});
+    if(v.cancellation){
+        const c=v.cancellation;
+        const lines:SummaryLine[]=[];
+        if(c.closedAt)lines.push({label:c.status==="Rejected"?"Rejected on":"Cancelled on",value:closedAt(c.closedAt)});
+        if(c.bookingPayments>0.005)lines.push(line("Booking payments received",c.bookingPayments),line("Refunded to customer",c.bookingRefunded),line("Kept by the store",c.amountKept,true));
+        if(c.depositRefunded>0.005)lines.push(line("Security deposit refunded",c.depositRefunded));
+        if(c.refundMethod)lines.push({label:"Refund method",value:refundMethod(c.refundMethod)});
+        const title=c.status==="Rejected"?"Booking request rejected":"Booking cancelled";
+        doc.summary(title,lines,{fill:C.alert,stroke:C.alertBorder,warning:true,note:c.bookingPayments<=0.005&&c.depositRefunded<=0.005?"No payment was received, so nothing was refunded.":undefined});
+        if(c.reason)doc.notes("Cancellation reason",[["Reason",c.reason]]);
+    }
+    const rows:TableRow[]=[];
+    if(v.packageBase>0)rows.push({cells:[b.packageName?"Package · "+b.packageName:"Package","1",money(v.packageBase),money(v.packageBase)]});
+    if(v.salesItems?.length){
+        rows.push({group:"Consumable items"});
+        for(const i of v.salesItems) rows.push({cells:[i.name+(i.variantName?" ("+i.variantName+")":""),String(i.quantity),money(i.unitPrice),money(i.amount)]});
+    }
+    if(hasRentals){
+        rows.push({group:"Rental items"});
+        for(const i of v.rentalItems)rows.push({cells:[{name:i.name,detail:`${i.days} ${i.days===1?"day":"days"} rental`},String(i.quantity),{name:money(i.dailyRate),detail:"per day"},money(i.amount)]});
+    }
+    if(v.deliveryFee>0||v.setupFee>0)rows.push({group:"Other charges"});
+    if(v.deliveryFee>0)rows.push({cells:["Delivery / pickup","1",money(v.deliveryFee),money(v.deliveryFee)]});
+    if(v.setupFee>0)rows.push({cells:["Setup","1",money(v.setupFee),money(v.setupFee)]});
+    const totalUnits=(v.salesItems||[]).reduce((n,i)=>n+Math.max(0,num(i.quantity)),0)+v.rentalItems.reduce((n,i)=>n+Math.max(0,num(i.quantity)),0);
+    const subtotal=num(v.packageBase)+num(v.deliveryFee)+num(v.setupFee)+(v.salesItems||[]).reduce((n,i)=>n+num(i.amount),0)+v.rentalItems.reduce((n,i)=>n+num(i.amount),0);
+    if(rows.length){
+        if(!billing&&totalUnits>0)rows.push({cells:["Total units needed",String(totalUnits),"",""],emphasis:true});
+        if(!billing&&agreed!==null&&Math.abs(subtotal-agreed)>0.005)rows.push({cells:["Itemized subtotal","","",money(subtotal)],emphasis:true});
+        doc.table(billing?"Items / services":"Booking charges",[{name:billing?"Item":"Item / service",width:245},{name:"Qty",width:42,align:"center"},{name:billing?"Price":"Unit price",width:110,align:"right"},{name:"Total",width:114,align:"right"}],rows);
+    }else doc.paragraph("No itemized charges available.");
+    const bookingLines=[line("Final agreed booking price",agreed??0,true),line("Booking payments received",b.bookingPayments),line("Remaining booking balance",bookingDue,true)];
+    if(!billing){
+        bookingLines.splice(1,0,line("Required down payment",b.downPayment));
+        if(b.dpDeadline)bookingLines.splice(2,0,{label:"Down payment deadline",value:b.dpDeadline});
+    }
+    if(billing){
+        const subtotalLines:SummaryLine[]=[line("Itemized subtotal",subtotal)];
+        // Only show saved VAT figures; never infer tax registration from a zero amount.
+        if(v.vat)subtotalLines.push(line("VATable Sales",v.vat.vatableSales),line("VAT Amount (recorded)",v.vat.vatAmount));
+        doc.summary("",subtotalLines);
+        doc.invoiceTotal(agreed===null?"Awaiting agreement":money(agreed));
+        if(agreed!==null&&Math.abs(subtotal-agreed)>0.02)doc.paragraph("Itemized amounts and agreed booking total differ; review the original booking.");
+        const paymentLines:SummaryLine[]=[
+            line("Booking Payments",b.bookingPayments),
+            {label:"Remaining Booking Balance",value:agreed===null?"Awaiting agreement":money(bookingDue),bold:true},
+        ];
+        if(!v.cancellation&&num(b.downPayment)>0&&bookingDue>0.005)paymentLines.unshift(line("Required down payment",b.downPayment));
+        if(!v.cancellation&&b.dpDeadline&&bookingDue>0.005)paymentLines.splice(1,0,{label:"Down payment deadline",value:b.dpDeadline});
+        doc.summary("",paymentLines,{note:agreed===null?"Final price has not yet been agreed.":undefined});
+    }else doc.summary("Booking payment details",bookingLines,{note:agreed===null?"Final price has not yet been agreed.":undefined});
+    if(!billing&&v.vat)doc.summary("Saved VAT breakdown",[{label:"VAT rate",value:`${v.vat.rate}%`},line("VATable sales",v.vat.vatableSales),line("VAT amount",v.vat.vatAmount),line("Taxable charges",v.vat.taxableCharges)]);
+    if(hasDeposit||hasRentals){
+        const depositLines=[
+            line("Deposit required",v.depositRequired),line("Deposit collected",v.depositCollected),
+            line("Deposit used for damage / missing charges",v.depositApplied),
+            line("Deposit already refunded to customer",v.depositRefunded),
+            line("Deposit still held",v.depositHeld,true),
+        ];
+        if(depositDue>0.005)depositLines.push(line("Deposit still to collect",depositDue));
+        const note=(hasRentals&&!hasDeposit?(b.status.toLowerCase()==="pending review"?"Deposit amount must be reviewed before approval. A zero deposit may be permitted. ":"No refundable security deposit required under the saved booking terms. "):"")
+            +"Security deposits are refundable amounts held separately from booking revenue.";
+        doc.summary(billing?"Booking billing & deposit settlement":"Refundable security deposit",depositLines,billing?{note}:{fill:C.pale,stroke:"#E8DEF3",note});
+        if(!billing&&v.depositWaiverReason)doc.notes("Deposit waiver",[["Reason",v.depositWaiverReason]]);
+    }
+    if(hasCharges){
+        const leader=(c:BookingFinancialStatement["claims"][number])=>/^combined booking-wide charge\b/i.test(clean(c.reason))&&num(c.amount)>0;
+        const companion=(c:BookingFinancialStatement["claims"][number])=>/^covered by the same combined booking-wide charge\b/i.test(clean(c.reason));
+        const combinedTotal=v.claims.filter(leader).reduce((n,c)=>n+Math.max(0,num(c.amount)),0);
+        const claimRows:TableRow[]=v.claims.map(c=>{
+            const covered=combinedTotal>0&&(leader(c)||companion(c));
+            const detail=join((c.sourceType==="missing"?"Missing":"Damaged")+(c.status==="waived"&&!covered?" · Waived":""),
+                !covered&&c.status!=="waived"?`Paid: ${money(c.amountPaid)} · Deposit used: ${money(c.depositApplied)} · Due: ${money(Math.max(0,num(c.amount)-num(c.amountPaid)-num(c.depositApplied)))}`:undefined,
+                !billing&&c.reason?c.reason:undefined);
+            return {cells:[{name:c.equipmentName||"Equipment",detail},String(c.quantity),covered?"Included":money(c.status==="waived"?0:c.amount)]};
+        });
+        if(combinedTotal>0)claimRows.push({cells:["Combined charge for all affected equipment","",money(combinedTotal)],emphasis:true});
+        if(claimRows.length)doc.table("Damage / missing charges",[{name:"Affected item",width:330},{name:"Qty",width:55,align:"center"},{name:"Charge",width:126,align:"right"}],claimRows);
+        else doc.paragraph("No damage or missing-item charges recorded.");
+        doc.summary("",[line("Total approved charges",approvedTotal),line("Additional charge payments received",claimPayments),line("Deposit applied to charges",v.depositApplied),line("Outstanding charges",claimDue,true)]);
+    }
+    if(financialMoves){
+        const lines=[line("Booking payments received",b.bookingPayments)];
+        if(num(v.depositCollected)>0)lines.push(line("Security deposit collected",v.depositCollected));
+        if(claimPayments>0)lines.push(line("Additional charge payments received",claimPayments));
+        lines.push(line("Total money collected",cashCollected,true));
+        if(num(v.depositRefunded)>0)lines.push(line("Less: deposit refunded",v.depositRefunded));
+        if(bookingRefunded>0.005)lines.push(line("Less: booking payment refunded (cancelled)",bookingRefunded));
+        lines.push(line("Net cash received",netReceived,true));
+        doc.summary("Payment summary",lines,billing?{}:{fill:C.payments});
+    }
+    if(totalDue>0.005){
+        if(billing)doc.summary("",[{label:"Total outstanding from customer",value:agreed===null?"Not set":money(totalDue),bold:true}],
+            {fill:"#F9F6FD",note:"Remaining booking balance + unpaid security deposit + unpaid approved charges."});
+        else doc.outstanding("Total outstanding from customer",agreed===null?"Not set":money(totalDue),"Remaining booking balance + unpaid security deposit + unpaid approved charges.");
+    }
+    const note=v.cancellation?(v.cancellation.status==="Rejected"?"This booking request was rejected. No payment is due.":"This booking was cancelled. Refunds are shown in the Cancellation section; no further payment is due."):
+        reconciled?(hasRentals?"Booking payment is complete. Rental release, return and any final deposit settlement are tracked separately.":"Booking fully paid."):
+            hasRentals?"Check booking payments and any deposit or charge settlement still due. Rental returns are tracked separately.":"Review outstanding booking payments before closing this booking.";
+    doc.paragraph(note+(billing?"":" This is a financial record, not a tax invoice."),C.muted,true);
+}
+
+function createBookingBillingPdf(v: BookingFinancialStatement, identity: Identity, reference: string, paymentStatus?: string): Blob {
+    const b=v.booking;
+    const sub="Sales Source: Booking" + (v.vat?" · VAT amount recorded":"");
+    const doc=new BookingDocument({billing:true,title:"Booking Billing",identity,reference,subtitle:sub});
+    const status=v.cancellation?"Closed":paymentStatus || (b.agreedPrice==null?"Awaiting agreement":num(b.balance)<=0.005?"Fully Paid":num(b.bookingPayments)>0?"Partially Paid":"Unpaid");
+    doc.cards("",[["Customer",b.name],["Event Date",b.eventDate],["Booking Status",b.status],["Payment Status",status]],true);
+    drawFinancial(doc,v,true);
+    return doc.finish();
+}
+
+function createBookingTransactionPdf(info: TransactionInfo, v: BookingFinancialStatement, items: BookingExportItems, reports: BookingReturnReport[], identity: Identity): Blob {
+    const doc=new BookingDocument({billing:false,title:"Booking Transaction",identity,reference:info.reference});
+    doc.cards("Booking information",[["Customer",info.customer],["Booking status",info.status],["Payment status",info.paymentStatus],...info.booking]);
+    doc.cards("Customer information",info.contact);
+    doc.cards("Schedule",info.schedule);
+    doc.notes("Customer requests / notes",info.notes);
+    const qty=(value:unknown)=>value==null?"—":String(value);
+    const bool=(value:unknown)=>value==null?"—":yesNo(Boolean(value));
+    const consumables:TableRow[]=items.items.map(i=>({cells:[
+            {name:i.product_name+(i.variant_name?" ("+i.variant_name+")":""),detail:join(
+                    [i.source_type?displayStatus(i.source_type):"",i.category||""].filter(Boolean).join(" · "),
+                    `Unit price: ${amount(i.unit_price)} · Estimated subtotal: ${amount(i.estimated_subtotal)}`,
+                    `Prepared: ${bool(i.prepared)} · Released: ${bool(i.issued)}`,i.availability_note||undefined)},
+            qty(i.booked_quantity),qty(i.reserved_quantity),qty(i.used_quantity),qty(i.restored_quantity),
+            i.available_for_booking==null?"Not verified":qty(i.available_for_booking),displayStatus(i.inventory_status)]}));
+    if(consumables.length){
+        doc.table("Consumable items",[{name:"Item / details",width:180},{name:"Qty",width:33,align:"center"},{name:"Reserved",width:56,align:"center"},
+            {name:"Issued",width:43,align:"center"},{name:"Restored",width:56,align:"center"},{name:"Available",width:60,align:"center"},{name:"Status",width:83,align:"center"}],consumables);
+    }else doc.paragraph("No consumable items in this booking.");
+    const rentals:TableRow[]=items.rentalItems.map(i=>({cells:[
+            {name:i.equipment_name,detail:join(`${present(i.start_date)} to ${present(i.end_date)} · ${qty(i.billable_days)} day(s)`,
+                    `Rate/day: ${amount(i.daily_rate)} · Line total: ${amount(i.agreed_line_total)}`,
+                    `Included in package: ${bool(i.included_in_package)}`,i.availability_note||undefined)},
+            qty(i.quantity),qty(i.returned_quantity),qty(i.damaged_quantity),qty(i.missing_quantity),
+            i.available_for_event==null?"Not verified":qty(i.available_for_event),displayStatus(i.allocation_status)]}));
+    if(rentals.length){
+        doc.table("Rental items",[{name:"Equipment / details",width:185},{name:"Qty",width:34,align:"center"},{name:"Returned",width:60,align:"center"},
+            {name:"Damaged",width:57,align:"center"},{name:"Missing",width:55,align:"center"},{name:"Available",width:58,align:"center"},{name:"Status",width:62,align:"center"}],rentals);
+    }else doc.paragraph("No rental items in this booking.");
+    if(reports.length){
+        doc.table("Return inspection",[{name:"Equipment / staff report",width:215},{name:"Issued",width:48,align:"center"},{name:"Received",width:60,align:"center"},
+                {name:"Damaged",width:57,align:"center"},{name:"Missing",width:55,align:"center"},{name:"Inspection",width:76,align:"center"}],
+            reports.map(r=>({cells:[{name:r.equipmentName,detail:join("Allocation: "+displayStatus(r.allocationStatus),
+                        r.receivedBy?"Received by: "+r.receivedBy:undefined,r.inspectedBy?"Inspected by: "+r.inspectedBy:undefined,
+                        r.inspectedAt?"Inspected at: "+r.inspectedAt:undefined,r.notes?"Notes: "+r.notes:undefined)},
+                    qty(r.issuedQuantity),qty(r.returnedReceivedUnits),qty(r.damagedUnits),qty(r.missingUnits),displayStatus(r.inspectionStatus)]})));
+    }
+    drawFinancial(doc,v,false);
+    return doc.finish();
+}
+
+function downloadBookingPdf(blob: Blob, filename: string) {
+    const url=URL.createObjectURL(blob), link=document.createElement("a");
+    link.href=url;link.download=filename;document.body.appendChild(link);link.click();link.remove();
+    window.setTimeout(()=>URL.revokeObjectURL(url),5000);
+}
+
+function safeFilename(value: unknown) {
+    return String(value ?? "").replace(/[^A-Za-z0-9_-]+/g, "_").slice(0, 90) || "booking";
+}
+
+function pdfBookingText(value: unknown): string {
+    // The shared dashboard uses ASCII Helvetica PDF streams. Transliterate accented letters
+    // and preserve unsupported characters as code points instead of silently dropping them.
+    const text = String(value ?? "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
+        .replace(/₱/g, "PHP ").replace(/[–—]/g, "-").replace(/[•·]/g, " / ")
+        .replace(/[“”]/g, '"').replace(/[‘’]/g, "'").replace(/\s+/g, " ").trim()
+        .replace(/[^\x20-\x7e]/gu, ch => "U+" + ch.codePointAt(0)!.toString(16).toUpperCase());
+    return text || "-";
+}
+
+function bookingCurrency(value: unknown): string {
+    if (value == null || value === "" || !Number.isFinite(Number(value))) return "Not available";
+    return "PHP " + Number(value).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function exportDay(date: Date) {
+    const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+    return ["year", "month", "day"].map(key => parts.find(part => part.type === key)?.value || "").join("-");
+}
+
+function bookingBranch(booking: Booking, context: ManagerBookingExportContext) {
+    const name = getBranchGroupName(booking);
+    return name === "Unassigned Branch" || name === "Assigned Branch" ? context.branchName : name;
+}
+
+function assertBookingBranch(booking: Booking, context: ManagerBookingExportContext) {
+    if (!(context.branchId > 0) || Number(booking.branchId ?? booking.branch_id) !== context.branchId)
+        throw new Error("Booking is not in the assigned branch.");
+}
+
+async function exportBookingTable(title: string, headers: string[], rows: string[][],
+                                  context: ManagerBookingExportContext, dateRange: string, filename: string) {
+    const { exportTableAsPdf } = await import("@/components/dashboard/_shared");
+    exportTableAsPdf(
+        { title, headers, rows: rows.map(row => row.map(pdfBookingText)) },
+        { storeName: pdfBookingText(context.storeName), branch: pdfBookingText(context.branchName), dateRange: pdfBookingText(dateRange) },
+        filename, { centerColumns: true, currencyNote: true }
+    );
+}
+
+async function downloadManagerBookingsPdf(bookings: Booking[], context: ManagerBookingExportContext) {
+    bookings.forEach(b => assertBookingBranch(b, context));
+    const dates = bookings.map(b => dateKey(b.date)).filter(Boolean).sort();
+    const dateRange = dates.length
+        ? `All bookings | ${formatDate(dates[0])} to ${formatDate(dates[dates.length - 1])}`
+        : "All booking dates";
+    const rows = [...bookings].sort((a,b) =>
+        String(b.createdAt || b.created_at || "").localeCompare(String(a.createdAt || a.created_at || "")) || b.id-a.id
+    ).map(b => {
+        const schedule = getBookingSchedule(b);
+        const agreed = b.agreed_price ?? b.agreedPrice;
+        return [
+            b.bookingReference || b.booking_reference || `#${b.id}`,
+            b.name,
+            [formatDate(b.date), schedule.handoverShort].filter(Boolean).join(" | "),
+            getManagerBookingCompositionLabel(b),
+            getManagerPaymentLabel(b),
+            getManagerBookingStatusLabel(b.status),
+            agreed == null ? "Awaiting agreement" : bookingCurrency(agreed),
+        ];
+    });
+    await exportBookingTable("Booking Report",
+        ["Booking Reference", "Customer", "Schedule", "Booking Type", "Payment Status", "Booking Status", "Agreed Price"],
+        rows, context, dateRange, `StockNBook_Booking_Report_${safeFilename(context.branchName)}_${exportDay(context.exportedAt)}`);
+}
+
+async function fetchBookingExportData(action: string, booking: Booking, context: ManagerBookingExportContext): Promise<Record<string, unknown>> {
+    assertBookingBranch(booking, context);
     const token = sessionStorage.getItem("token");
-    if (!token) throw new Error("Please log in before downloading booking details.");
+    if (!token) throw new Error("Please log in before downloading a booking PDF.");
     const response = await fetch("/api/bookings", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ action, booking_id: booking.id,
-            ...(booking.branchId || booking.branch_id ? { branch_id: Number(booking.branchId || booking.branch_id) } : {}) }),
+        body: JSON.stringify({ action, booking_id: booking.id, branch_id: context.branchId }),
+        cache: "no-store",
     });
     const data = await response.json();
     if (!response.ok || data.error || data.success === false) {
-        throw new Error(data.error || data.message || `Unable to load ${action} for the export.`);
+        throw new Error(data.error || data.message || "Unable to load the booking PDF data.");
     }
-    return data as Record<string, unknown>;
+    return data;
 }
 
-function selectedBookingExportLines(
-    booking: Booking,
-    tab: SelectedTab,
-    context: ManagerBookingExportContext,
-    statement: SelectedFinancialStatement | null,
-    data: SelectedBookingItems | null,
-): SelectedExportLine[] {
-    const lines: SelectedExportLine[] = [];
-    const section = (label: string) => lines.push({ label, value: "", section: true });
-    const add = (label: string, value: unknown) => lines.push({
-        label, value: value === null || value === undefined || String(value).trim() === "" ? "Not provided" : String(value),
-    });
-    const currency = (value: number | undefined | null) =>
-        value === null || value === undefined || !Number.isFinite(Number(value)) ? "Not available" : money(Number(value));
-
-    section("Booking identification");
-    add("Booking reference", booking.bookingReference || booking.booking_reference || `#${booking.id}`);
-    add("Customer", booking.name);
-    add("Store", context.storeName);
-    add("Branch", getBranchGroupName(booking) === "Unassigned Branch" ? context.branchName : getBranchGroupName(booking));
-    add("Booking status", getManagerBookingStatusLabel(booking.status));
-
-    if (tab === "Overview") {
-        section("Customer information");
-        add("Contact number", booking.phone);
-        add("Email address", booking.email);
-        add("Facebook / Messenger", booking.facebookName || booking.facebook_name);
-        section("Event details");
-        add("Booking type", getManagerBookingCompositionLabel(booking));
-        add("Package", booking.packageName || booking.package_name || booking.package);
-        add("Event start date", formatDate(booking.date));
-        add("Event end date", booking.eventEndDate ? formatDate(booking.eventEndDate) : "Not specified");
-        add(getBookingSchedule(booking).label, getBookingSchedule(booking).handoverText);
-        if (getBookingSchedule(booking).returnText) add("Return", getBookingSchedule(booking).returnText);
-        add("Event type", booking.eventType || booking.event_type);
-        add("Theme / motif", booking.theme);
-        add(booking.handoverMethod === "delivery" ? "Delivery address" : "Venue", booking.venue);
-        add("Payment status", getManagerPaymentLabel(booking));
-        section("Booking payment summary");
-        add("Agreed booking price", currency(statement?.booking?.agreedPrice ?? getTotalPrice(booking)));
-        add("Required down payment", currency(statement?.booking?.downPayment ?? getRequiredDownPayment(booking)));
-        add("Booking payments received", currency(statement?.booking?.bookingPayments ?? getAmountPaid(booking)));
-        add("Remaining booking balance", currency(statement?.booking?.balance ?? getBalance(booking)));
-        if (data) {
-            section("Consumable items in this booking");
-            if (!data.items.length) add("Items", "None");
-            data.items.forEach((item, index) => add(`${index + 1}. ${item.product_name}${item.variant_name ? ` - ${item.variant_name}` : ""}`,
-                `${item.booked_quantity} required`));
-            section("Rental items in this booking");
-            if (!data.rentalItems.length) add("Items", "None");
-            data.rentalItems.forEach((item, index) => add(`${index + 1}. ${item.equipment_name}`, `${item.quantity} required`));
-        }
-    } else if (tab === "Billing") {
-        if (!statement) throw new Error("Booking financial statement is unavailable for export.");
-        section("Itemized booking charges");
-        if (Number(statement.packageBase || 0)>0) add("Package price", currency(statement.packageBase));
-        for (const item of statement.salesItems || []) {
-            add(`${item.name}${item.variantName ? ` - ${item.variantName}` : ""} (qty ${item.quantity}, unit ${currency(item.unitPrice)})`, currency(item.amount));
-        }
-        for (const item of statement.rentalItems || []) {
-            add(`${item.name} (qty ${item.quantity}, ${item.days} day(s), daily rate ${currency(item.dailyRate)})`, currency(item.amount));
-        }
-        if (Number(statement.deliveryFee || 0)>0) add("Delivery fee", currency(statement.deliveryFee));
-        if (Number(statement.setupFee || 0)>0) add("Setup fee", currency(statement.setupFee));
-        section("Booking payments");
-        add("Final agreed booking price", currency(statement.booking?.agreedPrice));
-        add("Required down payment", currency(statement.booking?.downPayment));
-        add("Booking payments received", currency(statement.booking?.bookingPayments));
-        add("Remaining booking balance", currency(statement.booking?.balance));
-        const depositActivity = [statement.depositRequired, statement.depositCollected,
-            statement.depositApplied, statement.depositRefunded, statement.depositHeld]
-            .some(value => Math.abs(Number(value) || 0) > 0.005);
-        if ((statement.rentalItems || []).length > 0 || depositActivity) {
-            section("Refundable security deposit");
-            add("Deposit required", currency(statement.depositRequired));
-            add("Deposit collected", currency(statement.depositCollected));
-            add("Deposit applied to charges", currency(statement.depositApplied));
-            add("Deposit refunded to customer", currency(statement.depositRefunded));
-            add("Deposit still held", currency(statement.depositHeld));
-        }
-        const claims = statement.claims || [];
-        if (claims.length || Math.abs(Number(statement.claimBalance) || 0) > 0.005) {
-            section("Damage / missing claims");
-            claims.forEach((claim, index) => {
-                const grouped = /^covered by the same combined booking-wide charge\b/i.test(String(claim.reason || ""));
-                add(`Incident ${index + 1}`, `${claim.equipmentName || "Equipment"} - ${claim.sourceType || "Incident"}, quantity ${claim.quantity ?? "?"}, status ${grouped ? "Included in combined charge" : claim.status || "Not set"}`);
-                add("Approved amount", currency(claim.amount));
-                add("Payment received", currency(claim.amountPaid));
-                add("Deposit applied", currency(claim.depositApplied));
-            });
-            add("Outstanding damage / missing charges", currency(statement.claimBalance));
-        }
-    } else if (tab === "Items") {
-        if (!data) throw new Error("Booking item records are unavailable for export.");
-        section("Consumable items");
-        if (!data.items.length) add("Consumable items", "No consumable items included");
-        let consumableUnits = 0;
-        data.items.forEach((item, index) => {
-            const required = Math.max(0, Number(item.booked_quantity) || 0);
-            const issued = Math.max(0, Number(item.used_quantity) || 0);
-            const available = item.available_for_booking == null ? null : Number(item.available_for_booking);
-            const remaining = Math.max(0, required - issued);
-            const shortage = available == null || !Number.isFinite(available) ? "Not verified" : Math.max(0, remaining - available);
-            consumableUnits += required;
-            add(`${index + 1}. ${item.product_name}${item.variant_name ? ` - ${item.variant_name}` : ""}`,
-                `Required: ${required} | Available: ${available == null ? "Not verified" : available} | Shortage: ${shortage} | Already issued: ${issued}`);
-        });
-        add("Total consumable units", consumableUnits);
-        section("Rental items (availability for event dates)");
-        if (!data.rentalItems.length) add("Rental items", "No rental items included");
-        let rentalUnits = 0;
-        data.rentalItems.forEach((item, index) => {
-            const required = Math.max(0, Number(item.quantity) || 0);
-            const available = item.available_for_event == null ? null : Number(item.available_for_event);
-            const shortage = available == null || !Number.isFinite(available) ? "Not verified" : Math.max(0, required - available);
-            rentalUnits += required;
-            add(`${index + 1}. ${item.equipment_name}`,
-                `Required: ${required} | Available: ${available == null ? "Not verified" : available} | Shortage: ${shortage} | ${item.start_date || "?"} to ${item.end_date || "?"}`);
-        });
-        add("Total rental units", rentalUnits);
-        add("Total units included in booking", consumableUnits + rentalUnits);
-    }
-    if (tab === "Overview" || tab === "Notes") {
-        section("Customer notes and requests");
-        add("Additional custom request", getCustomerCustomRequest(booking) || "None provided");
-        add("Theme / motif request", booking.theme_motif_request || booking.themeMotifRequest || booking.theme || "None provided");
-        add("Additional notes", booking.additional_notes || booking.additionalNotes || booking.notes || "None provided");
-    }
-    return lines;
-}
-
-function selectedBookingTabPdf(lines: SelectedExportLine[], booking: Booking, tab: SelectedTab, context: ManagerBookingExportContext) {
-    const W = PDF_W, H = PDF_H, margin = 40;
-    const pages: string[][] = [];
-    let commands: string[] = [], y = 0;
-    const wrap = (value: string, width: number) => {
-        const words = value.replace(/\r/g, "").split(/(\s+)/);
-        const chunks: string[] = [];
-        let current = "";
-        for (const word of words) {
-            const candidate = current + word;
-            if (candidate.length > width && current.trim()) { chunks.push(current.trim()); current = word.trimStart(); }
-            else current = candidate;
-            while (current.length > width) { chunks.push(current.slice(0, width)); current = current.slice(width); }
-        }
-        if (current.trim() || !chunks.length) chunks.push(current.trim() || "-");
-        return chunks;
-    };
-    const startPage = () => {
-        commands = []; pages.push(commands);
-        commands.push("0.17 0.10 0.29 rg\n");
-        commands.push(pdfText(`${tab.toUpperCase()} - BOOKING DETAILS`, margin, H - 45, 16, true));
-        commands.push(pdfText(`${context.storeName}  |  ${context.branchName}`, margin, H - 67, 10));
-        commands.push(pdfText(`Booking: ${booking.bookingReference || `#${booking.id}`}  |  Exported ${context.exportedAt.toLocaleDateString("en-PH")}`, margin, H - 85, 9));
-        commands.push(pageLine(margin, H - 97, W - margin, H - 97));
-        y = H - 118;
-    };
-    startPage();
-    for (const line of lines) {
-        if (line.section) {
-            if (y < 78) startPage();
-            y -= 6;
-            commands.push("0.34 0.21 0.52 rg\n");
-            commands.push(pdfText(line.label.toUpperCase(), margin, y, 10, true));
-            y -= 9; commands.push(pageLine(margin, y, W - margin, y));
-            commands.push("0.17 0.10 0.29 rg\n");
-            y -= 19;
-        } else {
-            const labelLines = wrap(line.label, 34), valueLines = wrap(line.value, 92);
-            const length = Math.max(labelLines.length, valueLines.length);
-            if (y - length * 14 < 48) startPage();
-            for (let i = 0; i < length; i++) {
-                if (labelLines[i]) commands.push(pdfText(labelLines[i], margin + 3, y - 14 * i, 8.5, true));
-                if (valueLines[i]) commands.push(pdfText(valueLines[i], 259, y - 14 * i, 8.5));
-            }
-            y -= length * 14 + 9;
-        }
-    }
-    pages.forEach((page, i) => page.push(pdfText(`Page ${i + 1} of ${pages.length}`, W - 108, 25, 8)));
-    return pdfBlob(pages.map(p => p.join("")));
-}
-
-function selectedBookingTabExcel(lines: SelectedExportLine[], tab: SelectedTab, booking: Booking, context: ManagerBookingExportContext) {
-    const rows: Array<Array<string | number>> = [
-        [`${tab.toUpperCase()} - BOOKING DETAILS`],
-        [`Store: ${context.storeName}`], [`Branch: ${context.branchName}`],
-        [`Booking reference: ${booking.bookingReference || `#${booking.id}`}`],
-        [`Exported: ${context.exportedAt.toLocaleString("en-PH")}`],
-        ["Field", "Details"],
-        ...lines.map(line => line.section ? [line.label.toUpperCase(), ""] : [line.label, line.value]),
-    ];
-    const lastRow = rows.length;
-    const worksheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`+
-        `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">`+
-        `<dimension ref="A1:B${lastRow}"/><sheetViews><sheetView workbookViewId="0"/></sheetViews>`+
-        `<sheetFormatPr defaultRowHeight="15"/><cols><col min="1" max="1" width="40" customWidth="1"/>`+
-        `<col min="2" max="2" width="95" customWidth="1"/></cols>`+
-        `<sheetData>${xlsxRows(rows)}</sheetData><autoFilter ref="A6:B${lastRow}"/></worksheet>`;
-    const files: Array<[string, string]> = [
-        ["[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`],
-        ["_rels/.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`],
-        ["xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${tab}" sheetId="1" r:id="rId1"/></sheets></workbook>`],
-        ["xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`],
-        ["xl/worksheets/sheet1.xml", worksheet],
-    ];
-    return zipStored(files);
-}
-
-// Items exports use actual item rows and quantities, rather than the generic
-// booking-report columns. No prices or unrelated financial details are included.
-function selectedBookingItemsExcel(items: SelectedBookingItems, booking: Booking, context: ManagerBookingExportContext): Blob {
-    const rows: Array<Array<string | number>> = [
-        ["BOOKING ITEMS - PRODUCT LIST"],
-        [`Store: ${context.storeName}`],
-        [`Branch: ${context.branchName}`],
-        [`Booking reference: ${booking.bookingReference || `#${booking.id}`}`],
-        [`Exported: ${context.exportedAt.toLocaleString("en-PH")}`],
-        ["Type", "Item / Product", "Required", "Available", "Shortage", "Already Issued", "Event Start", "Event End"],
-    ];
-    let totalUnits = 0;
-    for (const item of items.items) {
-        const required = Math.max(0, Number(item.booked_quantity) || 0);
-        const issued = Math.max(0, Number(item.used_quantity) || 0);
-        const available = item.available_for_booking == null ? null : Number(item.available_for_booking);
-        const validAvailable = available !== null && Number.isFinite(available);
-        totalUnits += required;
-        rows.push([
-            "Consumable",
-            `${item.product_name}${item.variant_name ? ` - ${item.variant_name}` : ""}`,
-            required,
-            validAvailable ? available : "Not verified",
-            validAvailable ? Math.max(0, required - issued - available) : "Not verified",
-            issued,
-            "", "",
-        ]);
-    }
-    for (const item of items.rentalItems) {
-        const required = Math.max(0, Number(item.quantity) || 0);
-        const available = item.available_for_event == null ? null : Number(item.available_for_event);
-        const validAvailable = available !== null && Number.isFinite(available);
-        totalUnits += required;
-        rows.push([
-            "Rental", item.equipment_name, required,
-            validAvailable ? available : "Not verified",
-            validAvailable ? Math.max(0, required - available) : "Not verified",
-            "", item.start_date || "", item.end_date || "",
-        ]);
-    }
-    rows.push(["TOTAL UNITS REQUIRED", "", totalUnits, "", "", "", "", ""]);
-    const lastRow = rows.length;
-    const sheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`+
-        `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">`+
-        `<dimension ref="A1:H${lastRow}"/><sheetViews><sheetView workbookViewId="0"/></sheetViews>`+
-        `<sheetFormatPr defaultRowHeight="15"/>`+
-        `<cols><col min="1" max="1" width="19" customWidth="1"/><col min="2" max="2" width="65" customWidth="1"/>`+
-        `<col min="3" max="6" width="18" customWidth="1"/><col min="7" max="8" width="20" customWidth="1"/></cols>`+
-        `<sheetData>${xlsxRows(rows)}</sheetData></worksheet>`;
-    return zipStored([
-        ["[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`],
-        ["_rels/.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`],
-        ["xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Items" sheetId="1" r:id="rId1"/></sheets></workbook>`],
-        ["xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`],
-        ["xl/worksheets/sheet1.xml", sheet],
+async function downloadSelectedBookingPdf(booking: Booking, kind: BookingPdfKind, context: ManagerBookingExportContext) {
+    const [financial, itemResult] = await Promise.all([
+        fetchBookingExportData("get_booking_financial_statement", booking, context),
+        kind === "transaction" ? fetchBookingExportData("get_booking_items", booking, context) : Promise.resolve(null),
     ]);
-}
-
-async function downloadSelectedBookingTab(
-    booking: Booking, tab: SelectedTab, type: "pdf" | "excel", context: ManagerBookingExportContext,
-): Promise<void> {
-    const branchId = Number(booking.branchId || booking.branch_id || context.branchId || 0);
-    if (tab === "Billing" && type === "pdf") {
-        await downloadBookingReceipt(booking.id, branchId);
+    const v = financial.statement as BookingFinancialStatement | undefined;
+    if (!v?.booking || Number(v.booking.id) !== booking.id || !Array.isArray(v.rentalItems) || !Array.isArray(v.claims))
+        throw new Error("Booking financial statement is unavailable or incomplete.");
+    const identity = { ...context, storeName: v.booking.storeName?.trim() || context.storeName,
+        branchName: v.booking.branchName?.trim() || bookingBranch(booking, context) };
+    const reference = v.booking.reference || booking.bookingReference || String(booking.id);
+    const suffix = kind === "billing" ? "Billing" : "Booking_Transaction";
+    const filename = `StockNBook_${safeFilename(reference)}_${suffix}_${exportDay(context.exportedAt)}.pdf`;
+    const paymentStatus = getManagerPaymentLabel({
+        ...booking, status:v.booking.status, agreedPrice:v.booking.agreedPrice, agreed_price:v.booking.agreedPrice,
+        amountPaid:v.booking.bookingPayments, amount_paid:v.booking.bookingPayments, balance:v.booking.balance,
+        requiredDownPayment:v.booking.downPayment, required_down_payment:v.booking.downPayment,
+        securityDepositRequired:v.depositRequired, securityDepositCollected:v.depositCollected,
+    });
+    if (kind === "billing") {
+        // Completed bookings are actual POS sales. Use the exact same scoped
+        // invoice endpoint and renderer as Sales/POS, including saved addresses
+        // and payment/tax information. Earlier bookings are not POS sales yet.
+        if (getManagerBookingStatusLabel(v.booking.status) === "Completed" && !v.cancellation) {
+            try {
+                const {fetchOrderInvoiceDetail,createOrderInvoicePdf} = await import("../../pos/OwnerPOS");
+                const detail = await fetchOrderInvoiceDetail(reference,"BOOKING");
+                const invoice = createOrderInvoicePdf(detail);
+                downloadBookingPdf(invoice,filename);
+                return;
+            } catch {
+                // The independently authorized booking statement is still printable
+                // as an internal billing record when a POS invoice is unavailable.
+            }
+        }
+        downloadBookingPdf(createBookingBillingPdf(v, identity,reference,paymentStatus), filename);
         return;
     }
-    const [financial, items] = await Promise.all([
-        tab === "Overview" || tab === "Billing" ? getSelectedExportData("get_booking_financial_statement", booking) : Promise.resolve(null),
-        tab === "Overview" || tab === "Items" ? getSelectedExportData("get_booking_items", booking) : Promise.resolve(null),
-    ]);
-    const statement = financial?.statement as SelectedFinancialStatement | undefined;
-    if (financial && !statement) throw new Error("Booking financial statement is unavailable for this export.");
-    const itemData: SelectedBookingItems | null = items ? {
-        items: Array.isArray(items.items) ? items.items as SelectedBookingItems["items"] : [],
-        rentalItems: Array.isArray(items.rentalItems) ? items.rentalItems as SelectedBookingItems["rentalItems"] : [],
-    } : null;
-    const lines = selectedBookingExportLines(booking, tab, context, statement || null, itemData);
-    const suffix = tab === "Billing" ? "Billing_Receipt" : tab === "Items" ? "Booking_Items"
-        : tab === "Notes" ? "Booking_Notes" : "Booking_Overview";
-    const fileBase = `${safeFilename(booking.bookingReference || booking.id)}_${suffix}`;
-    if (type === "pdf") {
-        downloadBlob(selectedBookingTabPdf(lines, booking, tab, context), `${fileBase}.pdf`);
-    } else if (tab === "Items" && itemData) {
-        downloadBlob(selectedBookingItemsExcel(itemData, booking, context), `${fileBase}.xlsx`);
-    } else {
-        downloadBlob(selectedBookingTabExcel(lines, tab, booking, context), `${fileBase}.xlsx`);
+    if (!itemResult || !Array.isArray(itemResult.items) || !Array.isArray(itemResult.rentalItems))
+        throw new Error("Booking item records are unavailable.");
+    const itemBooking = itemResult.booking as { id?: number; branch_id?: number } | undefined;
+    if (!itemBooking || Number(itemBooking.id) !== booking.id || Number(itemBooking.branch_id) !== context.branchId)
+        throw new Error("Booking item records do not match the selected booking and branch.");
+    const data = itemResult as unknown as BookingExportItems;
+    let reports: BookingReturnReport[] = [];
+    if (data.rentalItems.length) {
+        const returns = await fetchBookingExportData("get_booking_claim_sources", booking, context);
+        if (!Array.isArray(returns.returnReports)) throw new Error("Rental return records are unavailable.");
+        reports = returns.returnReports as BookingReturnReport[];
     }
+    const schedule = getBookingSchedule(booking);
+    const info: TransactionInfo = {
+        reference, customer:v.booking.name || booking.name, status:getManagerBookingStatusLabel(v.booking.status), paymentStatus,
+        booking:[
+            ["Type",getManagerBookingCompositionLabel(booking)],
+            ["Package",v.booking.packageName || booking.packageName || booking.package_name || booking.package],
+            ["Event type",booking.eventType || booking.event_type],
+            ["Theme / motif",booking.theme_motif_request || booking.themeMotifRequest || booking.theme],
+            ["Created at",booking.createdAt || booking.created_at],
+            ["Approval status",booking.approvalStatus],
+        ],
+        contact:[["Phone",booking.phone],["Email",booking.email],["Facebook / Messenger",booking.facebookName || booking.facebook_name]],
+        schedule:[
+            ["Event start",formatDate(v.booking.eventDate || booking.date)],
+            ["Event end",booking.eventEndDate ? formatDate(booking.eventEndDate) : undefined],
+            [schedule.label,schedule.handoverText],
+            ...(schedule.returnText ? [["Return",schedule.returnText] as [string,unknown]] : []),
+            [booking.handoverMethod === "delivery" ? "Delivery address" : "Venue",booking.venue],
+        ],
+        notes:[
+            ["Custom request",getCustomerCustomRequest(booking) || "None"],
+            ["Additional notes",booking.additional_notes || booking.additionalNotes || booking.notes || "None"],
+            ["Approval reason",booking.approvalReason],
+        ],
+    };
+    downloadBookingPdf(createBookingTransactionPdf(info,v,data,reports,identity),filename);
 }
 
 export default function ManagerBookings() {
@@ -812,7 +893,8 @@ export default function ManagerBookings() {
     const [dateTo, setDateTo] = useState("");
     const [bookingType, setBookingType] = useState("All");
     const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
-    const [listExportOpen, setListExportOpen] = useState(false);
+    const [exporting, setExporting] = useState(false);
+    const [bookingsReady, setBookingsReady] = useState(false);
     const [priceModal, setPriceModal] = useState<Booking | null>(null);
     // Rental Return & Final Settlement dialog (opened from "Settle Deposit / Charges").
     const [settlementBooking, setSettlementBooking] = useState<Booking | null>(null);
@@ -910,6 +992,7 @@ export default function ManagerBookings() {
 
     async function loadBookings(): Promise<Booking[]> {
         setLoading(true);
+        setBookingsReady(false);
 
         const token = getToken();
         const storeId = getStoreId();
@@ -966,6 +1049,7 @@ export default function ManagerBookings() {
             );
 
             setBookings(normalizedBookings);
+            setBookingsReady(true);
             return normalizedBookings;
 
         } catch (err) {
@@ -1413,30 +1497,42 @@ export default function ManagerBookings() {
 
     const bookingTypes = ["Package", "Custom"] as const;
 
-    // Direct PDF / Excel (.xlsx) download. Never opens a print window.
-    function exportBookings(rows: Booking[], fileType: "pdf" | "excel", selected = false) {
-        const savedStoreId = getStoreId() || "Not available";
-        const savedBranchId = getBranchId() || "Not available";
-        const savedStoreName = [
-            sessionStorage.getItem("store_name"),
-            sessionStorage.getItem("stocknbook_store_name"),
-            sessionStorage.getItem("business_name"),
-            sessionStorage.getItem("storeName"),
-        ].find(value => Boolean(value?.trim())) || `Store ${savedStoreId}`;
-        const context: ManagerBookingExportContext = {
-            storeName: savedStoreName,
-            storeId: savedStoreId,
-            branchName,
-            branchId: savedBranchId,
-            exportedAt: new Date(),
-            selected,
-        };
+    function bookingExportContext(): ManagerBookingExportContext {
+        const branchId = Number(getBranchId());
+        if (!(branchId > 0) || !getToken()) throw new Error("A valid manager session and assigned branch are required.");
+        const storeName = [
+            sessionStorage.getItem("store_name"), sessionStorage.getItem("stocknbook_store_name"),
+            sessionStorage.getItem("business_name"), sessionStorage.getItem("storeName"),
+        ].find(value=>Boolean(value?.trim())) || `Store ${getStoreId() || "Not available"}`;
+        const actualBranch = bookings.find(b=>Number(b.branchId ?? b.branch_id)===branchId && b.branchName && b.branchName!=="Assigned Branch")?.branchName;
+        return { storeName, branchName: actualBranch || branchName, branchId, exportedAt: new Date() };
+    }
+
+    async function exportBookings() {
+        if (exporting || loading || !bookingsReady) return;
+        setExporting(true);
         try {
-            if (fileType === "pdf") downloadManagerBookingsPdf(rows, context);
-            else downloadManagerBookingsExcel(rows, context);
-            showBookingToast("success", "Booking export downloaded", `${rows.length} booking(s) exported as ${fileType === "pdf" ? "PDF" : "Excel"}.`);
+            // The report contains the entire assigned-branch list, not just the visible filters.
+            await downloadManagerBookingsPdf(bookings, bookingExportContext());
+            showBookingToast("success", "Booking report downloaded", `${bookings.length} booking(s) exported as PDF.`);
         } catch (err) {
-            setBookingActionError(err instanceof Error ? err.message : "Unable to download booking export.");
+            setBookingActionError(err instanceof Error ? err.message : "Unable to download booking report.");
+        } finally {
+            setExporting(false);
+        }
+    }
+
+    async function exportSelectedBooking(booking: Booking, kind: BookingPdfKind) {
+        if (exporting || loading || !bookingsReady) return;
+        setExporting(true);
+        try {
+            await downloadSelectedBookingPdf(booking, kind, bookingExportContext());
+            showBookingToast("success", kind === "billing" ? "Billing downloaded" : "Booking transaction downloaded",
+                "The PDF was downloaded.");
+        } catch (err) {
+            setBookingActionError(err instanceof Error ? err.message : "Unable to export booking details.");
+        } finally {
+            setExporting(false);
         }
     }
     function clearFilters() {
@@ -1520,13 +1616,11 @@ export default function ManagerBookings() {
                                 <div className="flex flex-wrap items-center gap-2">
                                     <h2 className="text-[17px] font-bold text-[#25143F]">All Bookings</h2>
                                 </div>
-                                <div className="relative shrink-0">
-                                    <button type="button" aria-label="Export booking list" title="Export booking list" onClick={() => setListExportOpen(v => !v)} className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#D9C9EB] text-[#43217A] hover:bg-[#F3EEFF]"><Download size={17}/></button>
-                                    {listExportOpen && <div className="absolute right-0 top-10 z-30 w-40 rounded-xl border border-[#E6DDF0] bg-white p-1.5 shadow-xl">
-                                        <button type="button" onClick={() => {exportBookings(filtered,"pdf");setListExportOpen(false);}} className="block w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-[#F7F1FF]">Download PDF</button>
-                                        <button type="button" onClick={() => {exportBookings(filtered,"excel");setListExportOpen(false);}} className="block w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-[#F7F1FF]">Download Excel (.xlsx)</button>
-                                    </div>}
-                                </div>
+                                <button type="button" aria-label="Download all bookings report PDF" title="Download all bookings report PDF"
+                                        disabled={loading || exporting || !bookingsReady} onClick={()=>void exportBookings()}
+                                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[#D9C9EB] text-[#43217A] hover:bg-[#F3EEFF] disabled:cursor-not-allowed disabled:opacity-50">
+                                    <Download size={17}/>
+                                </button>
                             </div>
                             <div className="flex flex-wrap items-center gap-2">
                                 <label className="relative min-w-[200px] flex-1">
@@ -1561,20 +1655,8 @@ export default function ManagerBookings() {
                             </div>}
                             {(search || filter !== "All" || approvalOnly || bookingType !== "All" || dateFrom || dateTo) && <div className="flex justify-end"><button type="button" onClick={clearFilters} className="text-xs font-semibold text-[#6335BC] hover:underline">Clear filters</button></div>}
                         </div>}
-                        onExportSelected={(b,type,tab)=>{
-                            const context: ManagerBookingExportContext = {
-                                storeName: [sessionStorage.getItem("store_name"), sessionStorage.getItem("stocknbook_store_name"), sessionStorage.getItem("business_name"), sessionStorage.getItem("storeName")]
-                                    .find(value => Boolean(value?.trim())) || `Store ${getStoreId() || "Not available"}`,
-                                storeId: getStoreId() || "Not available",
-                                branchName,
-                                branchId: getBranchId() || "Not available",
-                                exportedAt: new Date(),
-                                selected: true,
-                            };
-                            void downloadSelectedBookingTab(b,tab,type,context)
-                                .then(()=>showBookingToast("success", `${tab} downloaded`, `${tab} exported as ${type === "pdf" ? "PDF" : "Excel"}.`))
-                                .catch(err=>setBookingActionError(err instanceof Error ? err.message : "Unable to export selected booking details."));
-                        }}
+                        onExportSelected={(booking,kind)=>void exportSelectedBooking(booking,kind)}
+                        exportDisabled={exporting || loading || !bookingsReady}
                         reviewedBookingIds={reviewedBookingIds}
                         onUpdateStatus={canManage ? (id, status, price) => {
                             const booking = bookings.find(item => item.id === id);

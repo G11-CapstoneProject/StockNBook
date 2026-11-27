@@ -3585,14 +3585,14 @@ function ManagerInventoryTable({
                     <table className="w-full min-w-[1050px] table-auto text-center text-[10px] xl:text-[11px] [&_th]:align-middle [&_td]:align-middle [&_th]:whitespace-nowrap [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[10px] [&_th]:font-semibold [&_th]:uppercase [&_th]:leading-tight [&_th]:tracking-normal [&_th]:text-[#806A8C] [&_td]:leading-snug [&_td]:[overflow-wrap:anywhere]">
                         <colgroup>
                             <col className="w-[14%]" />
-                            <col className="w-[16%]" />
-                            <col className="w-[11%]" />
-                            <col className="w-[9%]" />
+                            <col className="w-[15%]" />
+                            <col className="w-[10%]" />
+                            <col className="w-[8%]" />
                             <col className="w-[8%]" />
                             <col className="w-[8%]" />
                             <col className="w-[10%]" />
-                            <col className="w-[8%]" />
-                            <col className="w-[16%]" />
+                            <col className="w-[7%]" />
+                            <col className="w-[20%]" />
                         </colgroup>
                         <thead className="sticky top-0 z-10 bg-[#FFFCF8]">
                         <tr className="border-b border-[#E9E1EE]">
@@ -3685,7 +3685,7 @@ function ManagerInventoryTable({
                                             <ManagerStatusBadge status={status} />
                                         </td>
                                         <td className="px-2 py-2 text-center">
-                                            <div className="flex flex-wrap items-center justify-center gap-1">
+                                            <div className="flex flex-nowrap items-center justify-center gap-1.5 whitespace-nowrap [&>button]:shrink-0">
                                                 <button
                                                     type="button"
                                                     onClick={(event) => {
@@ -3693,28 +3693,20 @@ function ManagerInventoryTable({
                                                         onRestock(product);
                                                     }}
                                                     aria-label={`Restock ${product.name}`}
-                                                    className="inline-flex items-center gap-1 rounded-lg bg-[#E5F8EC] px-2 py-1.5 text-[10px] font-semibold text-[#23834A] hover:bg-[#D5F0DF]"
+                                                    className="inline-flex items-center gap-1 rounded-lg bg-[#E5F8EC] px-2.5 py-1.5 text-[11px] font-semibold text-[#23834A] hover:bg-[#D5F0DF]"
                                                 >
-                                                    <PackagePlus size={11} />
+                                                    <PackagePlus size={13} />
                                                     Restock
                                                 </button>
-                                                {Number(product.expiredBatchUnits || 0) > 0 && !product.hasVariants && (
-                                                    <button type="button" onClick={(event) => {
-                                                        event.stopPropagation();
-                                                        onDispose(product, null);
-                                                    }} className="inline-flex items-center gap-1 rounded-lg bg-[#FFF0F0] px-2 py-1.5 text-[10px] font-semibold text-[#B42335] hover:bg-[#FFE2E2]">
-                                                        Dispose Expired ({product.expiredBatchUnits})
-                                                    </button>
-                                                )}
                                                 <button
                                                     type="button"
                                                     onClick={(event) => {
                                                         event.stopPropagation();
                                                         onEdit(product);
                                                     }}
-                                                    className="inline-flex items-center gap-1 rounded-lg bg-[#F1EBFF] px-2 py-1.5 text-[10px] font-semibold text-[#5734B3] hover:bg-[#E7DCFF]"
+                                                    className="inline-flex items-center gap-1 rounded-lg bg-[#F1EBFF] px-2.5 py-1.5 text-[11px] font-semibold text-[#5330B6] hover:bg-[#EAE0FF]"
                                                 >
-                                                    <Pencil size={11} />
+                                                    <Pencil size={13} />
                                                     Edit
                                                 </button>
                                                 <button
@@ -3723,12 +3715,20 @@ function ManagerInventoryTable({
                                                         event.stopPropagation();
                                                         onDelete(product);
                                                     }}
-                                                    className="inline-flex items-center gap-1 rounded-lg bg-[#FFF0F0] px-2 py-1.5 text-[10px] font-semibold text-[#D83A45] hover:bg-[#FFE2E2]"
+                                                    className="inline-flex items-center gap-1 rounded-lg bg-[#FFF0F0] px-2.5 py-1.5 text-[11px] font-semibold text-[#C52C45] hover:bg-[#FFE2E6]"
                                                 >
-                                                    <Trash2 size={11} />
+                                                    <Trash2 size={13} />
                                                     Delete
                                                 </button>
                                             </div>
+                                            {Number(product.expiredBatchUnits || 0) > 0 && !product.hasVariants && (
+                                                <button type="button" onClick={(event) => {
+                                                    event.stopPropagation();
+                                                    onDispose(product, null);
+                                                }} className="mt-1 inline-flex items-center justify-center gap-1 rounded-lg bg-[#FFF0F0] px-2 py-1.5 text-[10px] font-semibold text-[#B42335] hover:bg-[#FFE2E2]">
+                                                    Dispose Expired ({product.expiredBatchUnits})
+                                                </button>
+                                            )}
                                         </td>
                                     </tr>
 

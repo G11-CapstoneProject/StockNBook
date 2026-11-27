@@ -121,7 +121,24 @@ export default function PlatformAdminSidebar({ onOpenSettings }: SidebarProps) {
         };
     }, [mobileMenuOpen]);
 
-    function handleLogout() {
+    async function handleLogout() {
+        try {
+            const response = await fetch("/api/auth", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "same-origin",
+                cache: "no-store",
+                body: JSON.stringify({ action: "admin_logout" }),
+            });
+
+            if (!response.ok) {
+                throw new Error("Admin logout failed");
+            }
+        } catch {
+            window.alert("Unable to log out. Please try again.");
+            return;
+        }
+
         const sessionKeys = [
             "token",
             "accessToken",

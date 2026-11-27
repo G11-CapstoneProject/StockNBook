@@ -19,9 +19,6 @@ const jwt = require("jsonwebtoken");
 const {
     buildRange,
     buildAnalyticsPayloadV2,
-    monthComparisonRanges,
-    buildMonthComparison,
-    buildItemInsight,
 } = require("./analyticsEngine");
 
 const {
@@ -33,13 +30,6 @@ const {
     getAnalyticsBookings,
     getAnalyticsBookingItems,
     getAnalyticsRentalItems,
-    getMonthComparisonProducts,
-    getMonthComparisonRentals,
-    getItemOptions,
-    getProductItem,
-    getEquipmentItem,
-    getProductInsightRows,
-    getRentalInsightRows,
     getRolePermissions,
     hasExplicitAnalyticsDenial,
     hasAnalyticsAccess,
@@ -58,6 +48,26 @@ function missingEnvironment() {
     });
 }
 
+// Database TLS: local DB_SSL=false; Azure DB_SSL=true requires trusted CA and hostname verification.
+function stocknbookDatabaseTlsOptions() {
+    const mode = String(process.env.DB_SSL ?? "false").trim().toLowerCase();
+    if (mode !== "true" && mode !== "false") {
+        throw new Error("DB_SSL must be true or false.");
+    }
+    if (process.env.NODE_ENV === "production" && mode !== "true") {
+        throw new Error("DB_SSL=true is required for production database connections.");
+    }
+    if (mode === "false") return undefined;
+
+    const caPath = String(process.env.DB_SSL_CA_PATH || "").trim();
+    return {
+        rejectUnauthorized: true,
+        verifyIdentity: true,
+        minVersion: "TLSv1.2",
+        ...(caPath ? { ca: require("node:fs").readFileSync(caPath, "utf8") } : {}),
+    };
+}
+
 let dbPool = null;
 
 function getPool() {
@@ -68,8 +78,8 @@ function getPool() {
             password: process.env.DB_PASSWORD,
             database: process.env.DB_NAME,
             port: Number(process.env.DB_PORT || 3306),
-            // Same as the Bookings Lambda (works for local MySQL and AWS RDS).
-            ssl: { rejectUnauthorized: false },
+            // TLS behavior is selected by DB_SSL.
+            ssl: stocknbookDatabaseTlsOptions(),
             waitForConnections: true,
             connectionLimit: Number(process.env.DB_POOL_SIZE || 8),
             queueLimit: 0,
@@ -325,66 +335,6 @@ function earliestRequiredDate(range) {
 }
 
 /* -------------------------------------------------------
- * THIS MONTH VS LAST YEAR, AND ITEM INSIGHT
- * ------------------------------------------------------- */
-
-const ANALYTICS_ACTIONS = new Set(["get_analytics", "get_analytics_v2", "get_month_comparison", "get_item_options", "get_item_insight"]);
-
-// Today in the Philippines (the store's business day), YYYY-MM-DD.
-function manilaToday() {
-    return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
-}
-
-function firstOfMonthsAgo(today, months) {
-    const [y, m] = today.split("-").map(Number);
-    return new Date(Date.UTC(y, m - 1 - months, 1)).toISOString().slice(0, 10);
-}
-
-function addDaysText(date, days) {
-    return new Date(Date.parse(`${date}T00:00:00Z`) + days * 86400000).toISOString().slice(0, 10);
-}
-
-async function monthComparisonResponse(pool, scope, body) {
-    const today = manilaToday();
-    const month = String(body.month || today.slice(0, 7)).trim();
-    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month) || month > today.slice(0, 7) || month < "2000-01") {
-        throw new Error("Invalid analytics month. Choose a month up to the current month (YYYY-MM).");
-    }
-    const ranges = monthComparisonRanges(month, today);
-    const [productRows, rentalRows] = await Promise.all([
-        getMonthComparisonProducts(pool, { storeId: scope.storeId, branchId: scope.branchId, ranges }),
-        getMonthComparisonRentals(pool, { storeId: scope.storeId, branchId: scope.branchId, ranges }),
-    ]);
-    return { ...buildMonthComparison({ month, ranges, productRows, rentalRows }), scope };
-}
-
-async function itemInsightResponse(pool, scope, body) {
-    const kind = String(body.kind || body.item_kind || "product").toLowerCase() === "rental" ? "rental" : "product";
-    const itemId = toPositiveInteger(body.item_id ?? body.itemId);
-    if (!itemId) throw new Error("Invalid analytics item. Choose a product or rental item.");
-    const item = kind === "product"
-        ? await getProductItem(pool, { storeId: scope.storeId, productId: itemId })
-        : await getEquipmentItem(pool, { storeId: scope.storeId, equipmentId: itemId });
-    if (!item) throw new Error("The selected item does not belong to this store.");
-
-    const today = manilaToday();
-    // Three full years before this month, plus this month so far.
-    const historyStart = firstOfMonthsAgo(today, 36);
-    const mtdRanges = monthComparisonRanges(today.slice(0, 7), today);
-    const mtd = { ...mtdRanges, label: `${mtdRanges.label.split(" ")[0]} 1–${Number(today.slice(8, 10))}, ${today.slice(0, 4)}` };
-    const timelineStart = addDaysText(today, -89);
-    const rows = kind === "product"
-        ? await getProductInsightRows(pool, { storeId: scope.storeId, branchId: scope.branchId, productId: itemId, historyStart, today, mtd, timelineStart })
-        : await getRentalInsightRows(pool, { storeId: scope.storeId, branchId: scope.branchId, equipmentId: itemId, historyStart, mtd,
-            timelineStart, timelineEnd: addDaysText(today, 60) });
-    return {
-        ...buildItemInsight({ kind, item: { id: Number(item.id), name: String(item.name), category: String(item.category) },
-            today, historyStart, ...rows, monthToDate: { ...rows.monthToDate, label: mtd.label } }),
-        scope,
-    };
-}
-
-/* -------------------------------------------------------
  * ANALYTICS LAMBDA HANDLER
  * ------------------------------------------------------- */
 
@@ -425,11 +375,14 @@ exports.handler = async (event) => {
         );
 
         // The old action name still works; both return the V2 response.
-        if (!ANALYTICS_ACTIONS.has(action)) {
+        if (
+            action !== "get_analytics" &&
+            action !== "get_analytics_v2"
+        ) {
             return jsonResponse(400, {
                 error:
                     "Invalid Analytics action. " +
-                    `Use ${[...ANALYTICS_ACTIONS].join(", ")}.`,
+                    "Use get_analytics_v2.",
             });
         }
 
@@ -457,24 +410,11 @@ exports.handler = async (event) => {
             requestedBranchId
         );
 
+        const range = buildRange(body);
+
         // Release the connection after authentication and scope checks.
         connection.release();
         connection = null;
-
-        if (action === "get_month_comparison") {
-            return jsonResponse(200, await monthComparisonResponse(pool, scope, body));
-        }
-
-        if (action === "get_item_options") {
-            const options = await getItemOptions(pool, { storeId: scope.storeId });
-            return jsonResponse(200, { success: true, version: 2, action, scope, ...options });
-        }
-
-        if (action === "get_item_insight") {
-            return jsonResponse(200, await itemInsightResponse(pool, scope, body));
-        }
-
-        const range = buildRange(body);
 
         const historicalStart =
             earliestRequiredDate(range);
@@ -550,7 +490,7 @@ exports.handler = async (event) => {
                 .test(message);
 
         const isInputError =
-            /invalid analytics|date range|cannot exceed|required|invalid json|does not belong to this store/i
+            /invalid analytics|date range|cannot exceed|required|invalid json/i
                 .test(message);
 
         const statusCode = isAccessError

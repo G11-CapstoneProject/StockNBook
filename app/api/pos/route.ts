@@ -5,7 +5,15 @@ export const runtime = "nodejs";
 
 export async function POST(req: NextRequest) {
     try {
-        const body = await req.json();
+        // Empty or interrupted POST bodies must not surface as server errors.
+        const body = await req.json().catch(() => null);
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
+            return NextResponse.json(
+                { error: "Invalid or empty JSON request body." },
+                { status: 400 }
+            );
+        }
+
         const authHeader = req.headers.get("authorization");
 
         const event = {

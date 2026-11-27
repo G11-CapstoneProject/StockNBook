@@ -6,7 +6,8 @@ export const runtime = "nodejs";
 
 export async function POST(req: NextRequest) {
     try {
-        const body = await req.json();
+        // Empty or interrupted POST bodies must not surface as server errors.
+        const body = await req.json().catch(() => null);
         const authHeader = req.headers.get("authorization");
 
         if (!body || typeof body !== "object") {

@@ -1375,21 +1375,16 @@ async function insertPayment(db, { booking, storeId, type, amount, requestKey, a
             PAYMENT.RECORDED, requestKey ? String(requestKey).slice(0, 120) : null, actor?.id ?? null, notes || null]);
 }
 
-// ─── Subscription booking limit (v2 subscriptions / plans / subscription_payments) ─
+// ─── Subscription booking limit (v2 subscriptions / plans) ─
 async function effectiveBookingLimit(db, storeId) {
     const [subRows] = await db.execute(
-        `SELECT p.max_bookings, p.price, sub.expires_at, LOWER(sub.status) AS status,
+        `SELECT p.max_bookings, sub.expires_at, LOWER(sub.status) AS status,
                 CASE WHEN sub.expires_at IS NULL OR DATE(sub.expires_at) >= CURDATE() THEN 1 ELSE 0 END AS not_expired
          FROM subscriptions sub JOIN plans p ON p.id=sub.plan_id WHERE sub.store_id=? LIMIT 1`, [storeId]);
     const paid = subRows[0];
-    let eligible = !!paid && ["active", "expiring"].includes(paid.status) && Number(paid.not_expired) === 1;
-    if (paid && !eligible && ["active", "expiring"].includes(paid.status) && Number(paid.price) > 0) {
-        const [grace] = await db.execute(
-            `SELECT id FROM subscription_payments WHERE store_id=? AND LOWER(status)='pending'
-                                                    AND DATE(submitted_at) <= DATE(?) AND CURDATE() <= DATE_ADD(DATE(?), INTERVAL 2 DAY) LIMIT 1`,
-            [storeId, paid.expires_at, paid.expires_at]);
-        eligible = grace.length > 0;
-    }
+    // An expired paid term immediately uses Starter entitlements, even while a renewal
+    // payment is being reviewed. Existing bookings are unaffected by this limit.
+    const eligible = !!paid && ["active", "expiring"].includes(paid.status) && Number(paid.not_expired) === 1;
     let plan = eligible ? paid : null;
     if (!plan) {
         const [starter] = await db.execute(
@@ -1401,6 +1396,21 @@ async function effectiveBookingLimit(db, storeId) {
     const limit = Number(plan.max_bookings || 0);
     return limit > 0 ? limit : null;
 }
+
+// Count new requests by submission month, not by event date or booking status.
+// Existing bookings remain manageable regardless of the current plan's quota.
+async function newBookingAvailability(db, storeId) {
+    const bookingLimit = await effectiveBookingLimit(db, storeId);
+    if (bookingLimit === null) return { acceptingBookings: true };
+    const [monthly] = await db.execute(
+        `SELECT COUNT(*) AS total FROM bookings WHERE store_id=?
+                                                  AND created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
+                                                  AND created_at < DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01')`,
+        [storeId]);
+    return { acceptingBookings: Number(monthly[0]?.total || 0) < bookingLimit };
+}
+
+const BOOKING_CAPACITY_MESSAGE = "This store is currently unable to accept new online booking requests. Please contact the store directly for assistance.";
 
 async function findActiveBranch(db, storeId, branchId) {
     const [rows] = await db.execute(
@@ -1429,6 +1439,12 @@ async function findOrCreateCustomer(db, { storeId, name, phone, email, facebookN
 //  PUBLIC ACTIONS (no login)
 // ═════════════════════════════════════════════════════════════════════════════
 const PUBLIC_ACTIONS = {
+    async get_public_booking_availability(db, body) {
+        const storeId = Number(body.storeId ?? body.store_id);
+        if (!isId(storeId)) return response(400, { error: "Valid store ID required." });
+        const { acceptingBookings } = await newBookingAvailability(db, storeId);
+        return response(200, { acceptingBookings });
+    },
     async get_public_branches(db, body) {
         const sid = Number(body.storeId ?? body.store_id);
         if (!isId(sid)) return response(400, { error: "Valid store ID required." });
@@ -1529,15 +1545,8 @@ const PUBLIC_ACTIONS = {
         if (isPackage && rentalSelections.length)
             return response(400, { error: "Packages are fixed sets. Extra rental equipment can't be added to a package; message the store to change your order." });
 
-        const bookingLimit = await effectiveBookingLimit(db, storeId);
-        if (bookingLimit !== null) {
-            const [monthly] = await db.execute(
-                `SELECT COUNT(*) AS total FROM bookings WHERE store_id=?
-                                                          AND created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
-                                                          AND created_at < DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01')`, [storeId]);
-            if (Number(monthly[0]?.total || 0) >= bookingLimit)
-                return response(409, { error: `This store has reached its ${bookingLimit} new bookings for this month. Existing reservations remain available.`, code: "SUBSCRIPTION_BOOKING_LIMIT" });
-        }
+        if (!(await newBookingAvailability(db, storeId)).acceptingBookings)
+            return response(409, { error: BOOKING_CAPACITY_MESSAGE, code: "SUBSCRIPTION_BOOKING_LIMIT" });
 
         // Package comes from the database only (packages + package_items).
         let pkg = null, packageLines = [];
@@ -1588,6 +1597,12 @@ const PUBLIC_ACTIONS = {
 
         try {
             return await withTransaction(db, async () => {
+                // Serialize new submissions for the same store. A second request cannot
+                // exceed the monthly quota between the initial check and INSERT.
+                const [lockedStore] = await db.execute(`SELECT id FROM stores WHERE id=? FOR UPDATE`, [storeId]);
+                if (!lockedStore.length) return response(404, { error: "Store not found." });
+                if (!(await newBookingAvailability(db, storeId)).acceptingBookings)
+                    return response(409, { error: BOOKING_CAPACITY_MESSAGE, code: "SUBSCRIPTION_BOOKING_LIMIT" });
                 const customerId = await findOrCreateCustomer(db, { storeId, name, phone, email, facebookName });
                 const packagePrice = isPackage ? Number(pkg.package_price) : 0;
                 const requiredDownPayment = isPackage ? Number(pkg.down_payment_amount || 0) : 0;

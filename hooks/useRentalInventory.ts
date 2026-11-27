@@ -324,6 +324,7 @@ export type RentalMutation =
     rentalRatePerDay: number; initialPurchase?: RentalPurchaseDetails } & RentalPricingSelection
     | { action: "update_equipment"; equipmentId: number; name: string; category: string; alertLevel: number;
     rentalRatePerDay?: number;
+    averageUnitCost?: number; expectedAverageUnitCost?: number;
     // Optional verified stock count correction, saved atomically by the same Update Product request.
     totalUnits?: number; expectedTotalUnits?: number; reason?: string; physicalCountVerified?: true } & RentalPricingSelection
     | { action: "correct_equipment_stock"; equipmentId:number; totalUnits:number;

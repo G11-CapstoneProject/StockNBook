@@ -2786,6 +2786,49 @@ async function loadOwnerInventoryPerformance(connection, {storeId, branchId, dat
 }
 
 
+// Subscription inventory quota is shared by consumable products and rental equipment.
+// Only NEW catalog items consume quota; existing records, edits, and stock receipts remain allowed.
+// The caller locks the store row before checking, so concurrent imports and
+// individual additions across different branches cannot exceed one store limit.
+async function checkNewProductPlanLimit(connection, storeId, numberToAdd) {
+    const [paidRows] = await connection.execute(
+        `SELECT p.max_inventory
+         FROM subscriptions s
+         JOIN plans p ON p.id = s.plan_id
+         WHERE s.store_id = ?
+           AND LOWER(s.status) IN ('active', 'expiring')
+           AND (s.expires_at IS NULL OR DATE(s.expires_at) >= CURDATE())
+         ORDER BY s.id DESC LIMIT 1`,
+        [storeId]
+    );
+    let plan = paidRows[0];
+    if (!plan) {
+        const [starterRows] = await connection.execute(
+            `SELECT max_inventory FROM plans
+             WHERE is_archived = 0
+               AND (LOWER(plan_code) = 'starter' OR LOWER(plan_name) = 'starter' OR price = 0)
+             ORDER BY price ASC, id ASC LIMIT 1`
+        );
+        plan = starterRows[0];
+    }
+    if (!plan) throw new Error('No active or Starter subscription plan is available.');
+    // Existing plan convention: 0 or NULL means an unlimited quota.
+    const rawLimit = plan.max_inventory;
+    const limit = rawLimit == null || Number(rawLimit) === 0 ? null : Number(rawLimit);
+    if (limit === null) return null;
+    if (!Number.isSafeInteger(limit) || limit < 0) {
+        throw new Error('Invalid inventory limit in subscription plan.');
+    }
+    const [usageRows] = await connection.execute(
+        `SELECT
+             (SELECT COUNT(*) FROM products WHERE store_id = ? AND deleted_at IS NULL) +
+             (SELECT COUNT(*) FROM equipment WHERE store_id = ? AND deleted_at IS NULL) AS total`,
+        [storeId, storeId]
+    );
+    const current = Number(usageRows[0]?.total || 0);
+    return current + numberToAdd > limit ? {current, limit} : null;
+}
+
 exports.handler = async (event) => {
     const headers = {
         "Access-Control-Allow-Origin": "*",
@@ -3942,7 +3985,18 @@ exports.handler = async (event) => {
                         expirationDate: hasVariants ? null : normalizeOptionalDate(raw.expirationDate ?? raw.expiration_date) });
                 }
                 await connection.beginTransaction();
+                // Serialize additions across all branches of this store.
+                await connection.execute("SELECT id FROM stores WHERE id = ? FOR UPDATE", [storeId]);
                 await connection.execute("SELECT id FROM branches WHERE id = ? AND store_id = ? FOR UPDATE", [activeBranchId, storeId]);
+                const quota = await checkNewProductPlanLimit(connection, storeId, clean.length);
+                if (quota) {
+                    await safeRollback(connection);
+                    return jsonResponse(409, headers, {
+                        code: "PLAN_INVENTORY_LIMIT_REACHED",
+                        error: `Your plan allows ${quota.limit} inventory items (consumables and rentals combined). You already have ${quota.current}. Upgrade your subscription to add more items.`,
+                        current: quota.current, limit: quota.limit,
+                    });
+                }
                 const {storeCode, branchCode} = await getProductCodeContext(connection, storeId, activeBranchId);
                 const actingEmployee = await getActingEmployee(connection, decoded, tokenRole, storeId);
                 const created = [];
@@ -4073,9 +4127,9 @@ exports.handler = async (event) => {
 
             await connection.beginTransaction();
 
-            // Lock the branch row while allocating the next branch-local product
-            // sequence so two simultaneous product creations cannot receive the
-            // same STORE-BRANCH-NUMBEROFPRODUCT value.
+            // Lock store before branch so all concurrent product additions count
+            // against the same current quota, even across separate branches.
+            await connection.execute("SELECT id FROM stores WHERE id = ? FOR UPDATE", [storeId]);
             await connection.execute(
                 `SELECT id
                  FROM branches
@@ -4084,6 +4138,15 @@ exports.handler = async (event) => {
                      FOR UPDATE`,
                 [activeBranchId, storeId]
             );
+            const quota = await checkNewProductPlanLimit(connection, storeId, 1);
+            if (quota) {
+                await safeRollback(connection);
+                return jsonResponse(409, headers, {
+                    code: "PLAN_INVENTORY_LIMIT_REACHED",
+                    error: `Your plan allows ${quota.limit} inventory items (consumables and rentals combined). You already have ${quota.current}. Upgrade your subscription to add more items.`,
+                    current: quota.current, limit: quota.limit,
+                });
+            }
 
             // Re-check under the branch lock: concurrent saves cannot create duplicate products.
             if (await findExistingProductByName(connection,storeId,activeBranchId,name)) {

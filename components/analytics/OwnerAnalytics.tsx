@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import {
     AnalyticsLoadingScreen,
@@ -54,54 +54,46 @@ function normalizeBranch(rawBranch: RawBranch): AnalyticsBranch | null {
     };
 }
 
+async function fetchBranches(): Promise<AnalyticsBranch[]> {
+    const token = getToken();
+    const response = await fetch("/api/branches", {
+        method: "GET",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        cache: "no-store",
+    });
+    if (!response.ok) {
+        throw new Error("Unable to load branches.");
+    }
+    const result = (await response.json()) as BranchesResponse;
+    return Array.isArray(result.branches)
+        ? result.branches
+            .map(normalizeBranch)
+            .filter((branch): branch is AnalyticsBranch => branch !== null)
+        : [];
+}
+
 export default function OwnerAnalytics() {
     const { user, loading } = useCurrentUser();
-    const [branches, setBranches] = useState<AnalyticsBranch[]>([]);
-    const [branchesLoading, setBranchesLoading] = useState(true);
-
-    const loadBranches = useCallback(async () => {
-        try {
-            setBranchesLoading(true);
-
-            const token = getToken();
-            const response = await fetch("/api/branches", {
-                method: "GET",
-                headers: token
-                    ? { Authorization: `Bearer ${token}` }
-                    : {},
-                cache: "no-store",
-            });
-
-            if (!response.ok) {
-                throw new Error("Unable to load branches.");
-            }
-
-            const result = (await response.json()) as BranchesResponse;
-            const loadedBranches = Array.isArray(result.branches)
-                ? result.branches
-                    .map(normalizeBranch)
-                    .filter(
-                        (branch): branch is AnalyticsBranch =>
-                            branch !== null
-                    )
-                : [];
-
-            setBranches(loadedBranches);
-        } catch (error) {
-            console.warn("Owner Analytics branch loading failed:", error);
-            setBranches([]);
-        } finally {
-            setBranchesLoading(false);
-        }
-    }, []);
+    // Set only when the branch list arrives (or fails), so the effect never sets state right away.
+    const [branchList, setBranchList] = useState<{ loaded: boolean; branches: AnalyticsBranch[] }>({ loaded: false, branches: [] });
 
     useEffect(() => {
         if (!user) {
             return;
         }
-
-        void loadBranches();
-    }, [loadBranches, user]);
+        let cancelled = false;
+        fetchBranches()
+            .then((branches) => {
+                if (!cancelled) setBranchList({ loaded: true, branches });
+            })
+            .catch((error) => {
+                console.warn("Owner Analytics branch loading failed:", error);
+                if (!cancelled) setBranchList({ loaded: true, branches: [] });
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [user]);
 
     if (loading) {
         return <AnalyticsLoadingScreen />;
@@ -114,8 +106,8 @@ export default function OwnerAnalytics() {
     return (
         <AnalyticsWorkspace
             role="owner"
-            ownerBranches={branches}
-            ownerBranchesLoading={branchesLoading}
+            ownerBranches={branchList.branches}
+            ownerBranchesLoading={!branchList.loaded}
         />
     );
 }

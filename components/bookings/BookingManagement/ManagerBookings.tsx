@@ -1488,14 +1488,7 @@ export default function ManagerBookings() {
 
             <section className="px-4 py-4 sm:px-6">
                 {/* Booking overview: operational counts from the current branch, not demo numbers. */}
-                <div
-                    className="mb-4"
-                    style={{
-                        display: "grid",
-                        gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))",
-                        gap: 12,
-                    }}
-                >
+                <div className="mb-4 grid grid-cols-2 gap-3 xl:grid-cols-4">
                     {([
                         { key: "all", title: "Total Bookings", count: bookings.length, sub: "All recorded bookings", icon: <CalendarDays size={23}/>, tone: "bg-[#F3EBFF] text-[#6C3AD6]" },
                         { key: "confirmed", title: "Confirmed Bookings", count: counts["Confirmed"], sub: "Reserved and ready", icon: <BadgeCheck size={23}/>, tone: "bg-[#EAF7F0] text-[#25865B]" },
@@ -1508,8 +1501,8 @@ export default function ManagerBookings() {
                         <button key={metric.key} type="button"
                                 onClick={() => {setFilter(metric.key === "confirmed" ? "Confirmed" : "All");setApprovalOnly(false);}}
                                 title={metric.key === "actions" || metric.key === "month" ? "Show all bookings; use Filters to narrow results" : `Filter: ${metric.title}`}
-                                className="flex w-full items-center gap-3 rounded-[14px] border border-[#E6DDF0] bg-white px-3.5 py-3 text-left shadow-sm transition hover:border-[#B6A1D4] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#7651BA]">
-                            <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${metric.tone}`}>{metric.icon}</span>
+                                className="flex min-h-[108px] w-full items-center gap-3 rounded-[16px] border border-[#E6DDF0] bg-white px-3.5 py-3 text-left shadow-sm transition hover:border-[#B6A1D4] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#7651BA]">
+                            <span className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl ${metric.tone}`}>{metric.icon}</span>
                             <span className="min-w-0">
                                 <span className="block text-[12px] font-semibold leading-4 text-[#25153D]">{metric.title}</span>
                                 <span className="mt-1 block text-[24px] font-bold leading-none text-[#25153D]">{metric.count}</span>
@@ -2058,7 +2051,10 @@ function CancelInventoryModal({
         sum + Number(item.reserved_quantity || 0) * Number(item.unit_price || 0) * Number(item.refund_price_ratio ?? 1), 0) * 100) / 100;
     const allUsed = reservedItems.length > 0 && reservedItems.every((item) => usedOf(item) >= Number(item.reserved_quantity || 0));
     const usedValue = allUsed ? dealTotal : Math.min(shownUsed, dealTotal);
-    const storeKeepsSuggested = Math.min(refundable, Math.max(downPayment, usedValue));
+    // The store keeps the bigger amount, but never more than what the customer actually paid.
+    const keepBasis = Math.max(downPayment, usedValue);
+    const keepCapped = keepBasis > refundable + 0.005;
+    const storeKeepsSuggested = Math.min(refundable, keepBasis);
     const suggestedRefund = Math.max(0, Math.round((refundable - storeKeepsSuggested) * 100) / 100);
     useEffect(() => {
         if (impact && !refundTouched) setRefundText(String(suggestedRefund));
@@ -2185,9 +2181,14 @@ function CancelInventoryModal({
                                 <span>Booking payments received</span><strong className="text-right">{peso(refundable)}</strong>
                                 <span>Down payment (non-refundable)</span><strong className="text-right">{peso(downPayment)}</strong>
                                 {hasReservedItems && <><span>Products already used (step 1)</span><strong className="text-right">{peso(usedValue)}</strong></>}
-                                <span>{hasReservedItems ? (usedValue > downPayment ? "Store keeps (products used is bigger)" : "Store keeps (down payment is bigger)") : "Store keeps (the down payment)"}</span><strong className="text-right">{peso(storeKeepsSuggested)}</strong>
+                                <span>{keepCapped ? "Store keeps (all payments received)"
+                                    : hasReservedItems ? (usedValue > downPayment ? "Store keeps (products used is bigger)" : "Store keeps (down payment is bigger)") : "Store keeps (the down payment)"}</span><strong className="text-right">{peso(storeKeepsSuggested)}</strong>
                                 <span className="font-semibold">Suggested refund</span><strong className="text-right">{peso(suggestedRefund)}</strong>
                             </div>
+                            {keepCapped && refundable > 0.005 && <p className="mt-2 rounded-lg bg-[#FFF8E8] px-3 py-2 leading-5 text-[#8A5A06]">
+                                {hasReservedItems && usedValue > downPayment ? "The products already used" : "The down payment"} ({peso(keepBasis)}) {hasReservedItems && usedValue > downPayment ? "are" : "is"} more
+                                than the {peso(refundable)} paid, so the store keeps everything paid and nothing is refunded.
+                                The other {peso(keepBasis - refundable)} is not covered by the customer&apos;s payments.</p>}
                             {refundable > 0.005 && <label className="mt-3 block font-semibold text-[#4E2C66]">
                                 Booking payment to refund
                                 <input type="number" min={0} max={refundable} step="0.01" inputMode="decimal" value={refundText}

@@ -556,11 +556,10 @@ async function getActivePlan(connection, storeId) {
 
 async function getStoreUsage(connection, storeId) {
     const [inventoryRows] = await connection.execute(
-        `SELECT COUNT(*) AS total
-         FROM products
-         WHERE store_id = ?
-           AND deleted_at IS NULL`,
-        [Number(storeId)]
+        `SELECT
+             (SELECT COUNT(*) FROM products WHERE store_id = ? AND deleted_at IS NULL) +
+             (SELECT COUNT(*) FROM equipment WHERE store_id = ? AND deleted_at IS NULL) AS total`,
+        [Number(storeId), Number(storeId)]
     );
 
     const [bookingRows] = await connection.execute(
@@ -5313,6 +5312,26 @@ module.exports.handler = async (event) => {
                     10
                 );
 
+                // Preserve existing pending Manager records on downgrade;
+                // activation is a new entitlement use and is refused while
+                // the store exceeds its effective branch capacity. Active
+                // Managers are unaffected and remain able to sign in.
+                try {
+                    await assertPlanLimit(connection, Number(manager.store_id), "branches", 0, "manager");
+                } catch (limitError) {
+                    return {
+                        statusCode: limitError?.statusCode || 409,
+                        headers,
+                        body: JSON.stringify({
+                            error: limitError?.message || "Plan limit reached.",
+                            code: limitError?.code || "BRANCHES_LIMIT_REACHED",
+                            plan_name: limitError?.plan_name,
+                            current: limitError?.current,
+                            limit: limitError?.limit,
+                        }),
+                    };
+                }
+
                 // Activation stores the canonical Manager role grant. Authorization
                 // itself is role-based and does not depend on this stored value.
                 const [result] = await connection.execute(
@@ -7253,6 +7272,26 @@ module.exports.handler = async (event) => {
             }
 
             const branch = branchRows[0];
+
+            // A downgraded store keeps its existing branches and managers,
+            // but cannot add a new manager to an over-limit branch roster.
+            // Managers have no separate numeric plan quota: one manager per
+            // branch, so the existing branch entitlement is the relevant gate.
+            try {
+                await assertPlanLimit(connection, storeId, "branches", 0, decoded.role);
+            } catch (limitError) {
+                return {
+                    statusCode: limitError?.statusCode || 409,
+                    headers,
+                    body: JSON.stringify({
+                        error: limitError?.message || "Plan limit reached.",
+                        code: limitError?.code || "BRANCHES_LIMIT_REACHED",
+                        plan_name: limitError?.plan_name,
+                        current: limitError?.current,
+                        limit: limitError?.limit,
+                    }),
+                };
+            }
 
             const [branchManagerRows] =
                 await connection.execute(

@@ -36,7 +36,7 @@ type RentalLine = StaffRentalAllocation & {
 type RentalTask = "prepare" | "release" | "return" | "inspect";
 type QueueFilter = "all" | "prepare" | "handover" | "return" | "inspect";
 type QueueRow = {
-    reference: string; clientName: string; typeLabel: "Package" | "Custom"; contentsLabel: string; packageName: string;
+    bookingId: number; reference: string; clientName: string; typeLabel: "Package" | "Custom"; contentsLabel: string; packageName: string;
     status: string; eventDate: string;
     // When the customer gets the items (Pickup / Delivery) and when rentals come back.
     handoverLabel: "Pickup" | "Delivery"; handoverDate: string; handoverTime: string; returnDate: string; returnTime: string;
@@ -215,7 +215,7 @@ export default function StaffBookingQueue({ search = "", date = "" }: { search?:
             if (!row) {
                 const c = contentByRef.get(reference);
                 row = {
-                    reference, clientName: c?.clientName || seed.clientName || "Customer",
+                    bookingId: c?.bookingId || seed.bookingId || 0, reference, clientName: c?.clientName || seed.clientName || "Customer",
                     typeLabel: typeLabel(c?.bookingType || seed.typeLabel || ""), packageName: c?.packageName || seed.packageName || "",
                     contentsLabel: c ? contentsLabel(c.consumableLines, c.rentalLines) : "", status: c?.bookingStatus || seed.status || "",
                     eventDate: c?.eventDate || seed.eventDate || "",
@@ -232,7 +232,7 @@ export default function StaffBookingQueue({ search = "", date = "" }: { search?:
             return row;
         };
         for (const b of consumableBookings) {
-            const row = ensure(b.reference, { eventDate: b.eventDate, handoverDate: b.handoverDate });
+            const row = ensure(b.reference, { bookingId: b.bookingId, eventDate: b.eventDate, handoverDate: b.handoverDate });
             row.consumables = b; row.hasConsumables = true;
             if (Number(b.rentalLines) > 0) row.hasRentals = true;
         }
@@ -247,7 +247,9 @@ export default function StaffBookingQueue({ search = "", date = "" }: { search?:
             if (!row.returnDate) row.returnDate = a.endDate;
         }
         for (const row of byRef.values()) if (!row.contentsLabel) row.contentsLabel = contentsLabel(row.hasConsumables ? 1 : 0, row.hasRentals ? 1 : 0);
-        return [...byRef.values()].sort((x, y) => compareQueueDates(x.handoverDate, y.handoverDate, today) || x.reference.localeCompare(y.reference));
+        // Newest bookings first (a higher booking number was made later), like the Manager and Owner lists.
+        return [...byRef.values()].sort((x, y) => y.bookingId - x.bookingId ||
+            compareQueueDates(x.handoverDate, y.handoverDate, today) || x.reference.localeCompare(y.reference));
     }, [consumableBookings, contents, rental.allocations, today]);
 
     const query = search.trim().toLowerCase();

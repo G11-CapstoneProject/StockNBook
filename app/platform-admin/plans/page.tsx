@@ -325,11 +325,11 @@ export default function PlansPage() {
 
                                         <ul className="mb-5 flex-1 space-y-2 text-[11px] text-[#4B3E55]">
                                             <LimitRow
-                                                label="Inventory items"
+                                                label="Inventory items (consumables + rentals combined)"
                                                 value={plan.max_inventory}
                                             />
                                             <LimitRow
-                                                label="Bookings"
+                                                label="New bookings per month"
                                                 value={plan.max_bookings}
                                             />
                                             <LimitRow
@@ -451,7 +451,7 @@ export default function PlansPage() {
                         </Field>
 
                         <LimitField
-                            label="Maximum inventory"
+                            label="Maximum inventory items (consumables + rentals combined)"
                             value={form.max_inventory}
                             onChange={(v) =>
                                 setForm({
@@ -462,7 +462,7 @@ export default function PlansPage() {
                         />
 
                         <LimitField
-                            label="Maximum bookings"
+                            label="Maximum new bookings per month"
                             value={form.max_bookings}
                             onChange={(v) =>
                                 setForm({

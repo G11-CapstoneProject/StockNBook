@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 
 import {
-    CalendarDays,
     CheckCircle2,
     Download,
     ChevronDown,
@@ -16,14 +15,25 @@ import {
     ShoppingBag,
     Trash2,
     X,
-    WalletCards,
 } from "lucide-react";
 import type { UsePOSReturn } from "@/hooks/usePOS";
-import { BookingBillingPreview, createVatReportPdf, createOrderInvoicePdf, fetchOrderInvoiceDetail, type OwnerOrderInvoice } from "./OwnerPOS";
+import {
+    BookingBillingPreview,
+    TransactionItemsPreview,
+    createVatReportPdf,
+    createOrderInvoicePdf,
+    fetchOrderInvoiceDetail,
+    POSKpiCard,
+    POSKpiDetailModal,
+    POSPeriodFilter,
+    usePOSDatePeriod,
+    type POSKpiDetail,
+    type POSKpiKey,
+    type OwnerOrderInvoice,
+} from "./OwnerPOS";
 import {
     OrdersTable,
     formatPOSOrderTime,
-    formatPOSCustomerType,
     POSLayout,
     StatCard,
     peso,
@@ -83,6 +93,55 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
     const [downloadingInvoice, setDownloadingInvoice] = useState<string | null>(null);
     const [downloadingReport, setDownloadingReport] = useState(false);
     const [reportError, setReportError] = useState<string | null>(null);
+    const [selectedKpi, setSelectedKpi] = useState<POSKpiKey | null>(null);
+    // The Owner/Manager period selector uses Philippine calendar dates and also
+    // applies the initial "Today" filter on first render.
+    const dateFilter = usePOSDatePeriod(
+        pos.managerOrderStartDate,
+        pos.managerOrderEndDate,
+        pos.setManagerOrderDateRange,
+    );
+    const period = pos.managerOrderStartDate && pos.managerOrderEndDate
+        ? `${pos.managerOrderStartDate} to ${pos.managerOrderEndDate}`
+        : pos.managerOrderStartDate ? `From ${pos.managerOrderStartDate}`
+            : pos.managerOrderEndDate ? `Through ${pos.managerOrderEndDate}` : "All time";
+    const scope = pos.activeBranchName || "Assigned Branch";
+    const filters = [
+        pos.managerSalesSource === "BOOKING" ? "Booking only" : pos.managerSalesSource === "WALK_IN" ? "Walk-in only" : "All Sales",
+        pos.managerPaymentFilter === "ALL" ? "All Payments" : pos.managerPaymentFilter === "BANK_TRANSFER" ? "Bank Transfer" :
+            pos.managerPaymentFilter === "GCASH" ? "GCash" : "Cash",
+        ...(pos.managerOrderSearch.trim() ? [`Search: ${pos.managerOrderSearch.trim()}`] : []),
+    ].join(" · ");
+    const kpiDetails: Record<POSKpiKey, POSKpiDetail> = {
+        sales: {
+            title: "Branch Sales", amount: pos.managerOrderError ? null : bookingSales === null ? null : sales,
+            period, scope, scopeNote: filters,
+            formula: "Branch Sales = Booking Sales + Walk-in Sales",
+            items: [["Booking Sales", bookingSales], ["Walk-in Sales", pos.managerOrderError ? null : walkInSales]],
+            description: "Total completed booking and walk-in sales in your assigned branch, matching the selected date, source, payment and search filters. Values come from the backend across all matching records, not only this table page. Security deposits and separate booking settlements are excluded.",
+        },
+        booking: {
+            title: "Booking Sales", amount: pos.managerOrderError ? null : bookingSales,
+            period, scope, scopeNote: filters,
+            formula: "Booking Sales = Sum of completed booking prices",
+            items: [["Completed booking sales", pos.managerOrderError ? null : bookingSales]],
+            description: "Completed booking amounts for your assigned branch and current filters. Uses the saved agreed price (or package price fallback), excluding refundable deposits and separate settlement adjustments. A dash means the booking total could not be verified.",
+        },
+        walk: {
+            title: "Walk-in Sales", amount: pos.managerOrderError ? null : walkInSales,
+            period, scope, scopeNote: filters,
+            formula: "Walk-in Sales = Sum of completed POS order totals",
+            items: [["Completed walk-in sales", pos.managerOrderError ? null : walkInSales]],
+            description: "Sums recorded completed walk-in POS order totals, including any recorded VAT, for your assigned branch and current filters. Values are based on all matching orders, not just the visible table page.",
+        },
+        transactions: {
+            title: "Transactions", amount: pos.managerOrderError ? null : transactions,
+            period, scope, scopeNote: filters,
+            formula: "Transactions = Count of matching completed bookings and walk-in orders",
+            items: [["Completed branch transactions", pos.managerOrderError ? null : transactions]],
+            description: "Counts completed booking and walk-in transactions matching your selected filters across all pages of branch sales history. It counts transactions, not products or rental units.",
+        },
+    };
 
     const orderKey = (order: Order) => `${order.salesSource === "BOOKING" ? "BOOKING" : "WALK_IN"}:${order.id}`;
     const salesSourceLabel = (order: Order) => order.salesSource === "BOOKING" ? "Booking" : "Walk-in";
@@ -192,12 +251,15 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
                 sessionStorage.getItem("store_name") ||
                 sessionStorage.getItem("stocknbook_store_name") || "StockNBook Store";
             const sourceName = source === "ALL" ? "All Sales" : source === "BOOKING" ? "Booking" : "Walk-in";
-            const paymentName = payment === "ALL" ? "" : ` / ${paymentLabel(payment)}`;
             const pdf = createVatReportPdf({
                     rows: data.rows, transactionSummary: data.transactionSummary,
                     vatSummary: data.vatSummary, bookingIntegration: data.bookingIntegration,
                 }, storeName, pos.activeBranchName || "Assigned Branch", dateFrom, dateTo,
-                `${sourceName}${paymentName}`, data.taxRegistration || "UNKNOWN");
+                sourceName, data.taxRegistration || "UNKNOWN",
+                [
+                    `Payment: ${payment === "ALL" ? "All Payments" : paymentLabel(payment)}`,
+                    ...(search ? [`Search: ${search}`] : []),
+                ]);
             downloadFile(pdf,
                 `stocknbook-branch-transactions-${source.toLowerCase()}-${payment.toLowerCase()}-${dateFrom || "all"}-to-${dateTo || "all"}.pdf`);
         } catch (error) {
@@ -209,29 +271,23 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
 
     const filterClass = "h-[42px] w-full min-w-0 rounded-xl border border-[#E3D8EA] bg-white px-3 text-sm text-[#1A1220] outline-none shadow-sm transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10";
     const tableGrid = "grid w-full min-w-0 grid-cols-[minmax(0,2fr)_minmax(0,1.1fr)_minmax(0,.9fr)_minmax(0,.7fr)_minmax(0,1.45fr)_minmax(0,1fr)] gap-3";
-    const dateField = (id: string, label: string, value: string, min: string | undefined, max: string | undefined, onChange: (next: string) => void) => (
-        <div className="relative min-w-0">
-            <CalendarDays size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#9B8AAA]" />
-            <span className="pointer-events-none absolute left-9 top-1/2 -translate-y-1/2 text-[10px] font-semibold uppercase text-[#806A8C]">{label}</span>
-            <input id={id} type="date" value={value} min={min} max={max} onChange={e => onChange(e.target.value)}
-                   aria-label={`${label} date`} className={`${filterClass} pl-[75px] pr-2 text-xs font-medium`} />
-        </div>
-    );
 
     return (
         <POSLayout role="manager" isOwner={false} activeBranchName={pos.activeBranchName} onRefresh={() => pos.refreshAll()}>
             <div className="space-y-4">
                 <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                    <StatCard label="Branch Sales" value={peso(sales)} helper="Verified branch sales matching the selected filters"
-                              icon={<CircleDollarSign size={18} />} />
-                    <StatCard label="Booking Sales" value={bookingSales == null ? "—" : peso(bookingSales)}
-                              helper={bookingSales == null ? "Booking sales could not be verified" : "Completed booking sales matching the selected filters"}
-                              icon={<CalendarDays size={18} />} iconClassName="bg-[#FFF2E5] text-[#C8791D]" />
-                    <StatCard label="Walk-in Sales" value={peso(walkInSales)}
-                              helper="Completed walk-in sales matching the selected filters"
-                              icon={<ShoppingBag size={18} />} iconClassName="bg-[#E8F0FF] text-[#2865D9]" />
-                    <StatCard label="Transactions" value={transactions} helper="Matching completed branch transactions"
-                              icon={<ReceiptText size={18} />} iconClassName="bg-[#E9F8EF] text-[#168A48]" />
+                    <POSKpiCard manager kpiKey="sales" detail={kpiDetails.sales}
+                                helper="Completed branch sales matching the filters"
+                                onClick={() => setSelectedKpi("sales")} />
+                    <POSKpiCard manager kpiKey="booking" detail={kpiDetails.booking}
+                                helper="Completed booking sales matching the filters"
+                                onClick={() => setSelectedKpi("booking")} />
+                    <POSKpiCard manager kpiKey="walk" detail={kpiDetails.walk}
+                                helper="Completed walk-in sales matching the filters"
+                                onClick={() => setSelectedKpi("walk")} />
+                    <POSKpiCard manager kpiKey="transactions" detail={kpiDetails.transactions}
+                                helper="Completed branch transactions matching the filters"
+                                onClick={() => setSelectedKpi("transactions")} />
                 </div>
                 <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
                     <div className="mb-3 flex items-center justify-between gap-3">
@@ -250,21 +306,19 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
                     {pos.managerBookingAvailable === false && pos.managerSalesSource !== "WALK_IN" && (
                         <p className="mb-3 text-xs text-[#806A8C]">Booking sales could not be verified from the available records. Only verified transactions are listed.</p>
                     )}
-                    <div className="mb-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(152px,180px)_minmax(152px,180px)_minmax(135px,155px)_minmax(140px,165px)]">
+                    <div className="mb-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(220px,1fr)_minmax(160px,200px)_minmax(145px,175px)_minmax(150px,190px)]">
                         <div className="relative min-w-0">
                             <label className="sr-only" htmlFor="manager-pos-search">Search transactions by Order ID or customer</label>
                             <Search size={15} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#9B8AAA]" />
                             <input id="manager-pos-search" value={pos.managerOrderSearch} onChange={e => pos.setManagerOrderSearch(e.target.value)}
                                    placeholder="Search Order ID or customer..." className={`${filterClass} pl-10 placeholder:text-[#9B8AAA]`} />
                         </div>
-                        {dateField("manager-pos-from", "From", pos.managerOrderStartDate, undefined,
-                            pos.managerOrderEndDate || undefined, value => pos.setManagerOrderDateRange(value, pos.managerOrderEndDate))}
-                        {dateField("manager-pos-to", "To", pos.managerOrderEndDate,
-                            pos.managerOrderStartDate || undefined, undefined, value => pos.setManagerOrderDateRange(pos.managerOrderStartDate, value))}
+                        <POSPeriodFilter filter={dateFilter} />
                         <div className="relative min-w-0">
+                            <ShoppingBag size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#9B8AAA]" />
                             <select aria-label="Sales Source" value={pos.managerSalesSource}
                                     onChange={event => pos.setManagerSalesSource(event.target.value as "ALL" | "BOOKING" | "WALK_IN")}
-                                    className={`${filterClass} appearance-none pr-8 font-semibold`}>
+                                    className={`${filterClass} appearance-none pl-9 pr-8 font-medium`}>
                                 <option value="ALL">All Sales</option>
                                 <option value="BOOKING">Booking</option>
                                 <option value="WALK_IN">Walk-in</option>
@@ -272,9 +326,10 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
                             <ChevronDown size={15} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[#2B174C]" />
                         </div>
                         <div className="relative min-w-0">
+                            <ReceiptText size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#9B8AAA]" />
                             <select aria-label="Payment Method" value={pos.managerPaymentFilter}
                                     onChange={event => pos.setManagerPaymentFilter(event.target.value as "ALL" | "CASH" | "GCASH" | "BANK_TRANSFER")}
-                                    className={`${filterClass} appearance-none pr-8 font-semibold`}>
+                                    className={`${filterClass} appearance-none pl-9 pr-8 font-medium`}>
                                 <option value="ALL">All Payments</option>
                                 <option value="CASH">Cash</option>
                                 <option value="GCASH">GCash</option>
@@ -286,7 +341,8 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
                     {(pos.managerOrderSearch || pos.managerOrderStartDate || pos.managerOrderEndDate || pos.managerSalesSource !== "ALL" || pos.managerPaymentFilter !== "ALL") && (
                         <div className="mb-3 text-right">
                             <button type="button" onClick={() => {
-                                pos.setManagerOrderSearch(""); pos.setManagerOrderDateRange("", ""); pos.setManagerSalesSource("ALL"); pos.setManagerPaymentFilter("ALL");
+                                pos.setManagerOrderSearch(""); dateFilter.selectPeriod("today");
+                                pos.setManagerSalesSource("ALL"); pos.setManagerPaymentFilter("ALL");
                             }} className="text-xs font-semibold text-[#2B174C] hover:text-[#5B2FC6]">Clear filters</button>
                         </div>
                     )}
@@ -330,10 +386,10 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
                                                                     onClick={() => void loadDetail(order, key)}>Try again</button>}
                                             </div>}
                                             {detail && (
-                                                <section aria-label={`Receipt for order ${order.id}`} className="overflow-hidden rounded-xl border border-[#E3D8EA] bg-white shadow-sm">
+                                                <section aria-label={`Details for order ${order.id}`} className="overflow-hidden rounded-xl border border-[#E3D8EA] bg-white shadow-sm">
                                                     <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#E8DFF0] px-4 py-3">
                                                         <div className="space-y-1">
-                                                            <h3 className="text-sm font-bold text-[#2B174C]">Transaction invoice preview</h3>
+                                                            <h3 className="text-sm font-bold text-[#2B174C]">Transaction details</h3>
                                                             <p className="text-[11px] text-[#806A8C]">{detail.storeName} · {detail.branchName} · {detail.salesSource === "BOOKING" && !/[T ]\d{2}:\d{2}/.test(detail.createdAt || "") ? `${detail.date} (event date; completion time unavailable)` : detail.createdAt || detail.date}</p>
                                                             <p className="text-[11px] text-[#806A8C]">Customer: {detail.customerName || "Walk-in"} · Payment: {paymentLabel(detail.paymentMode)} · Tax: {detail.taxType || "Unverified"}</p>
                                                         </div>
@@ -345,33 +401,15 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
                                                             <Download size={17} />
                                                         </button>
                                                     </div>
-                                                    {detail.itemsAvailable ? (
-                                                        <div className="overflow-x-auto px-4 py-3">
-                                                            <table className="w-full min-w-[530px] text-left text-xs">
-                                                                <thead className="border-b border-[#E8DFF0] bg-[#FAF7FF] text-[10px] font-semibold uppercase text-[#806A8C]">
-                                                                <tr><th className="px-3 py-2">Item / Service</th><th className="px-3 py-2 text-center">Qty</th><th className="px-3 py-2 text-right">Unit Price</th><th className="px-3 py-2 text-right">Amount</th></tr>
-                                                                </thead>
-                                                                <tbody>
-                                                                {detail.items.map((item, index) => (
-                                                                    <tr key={`${index}-${item.name}`} className="border-b border-[#F0EAF5] last:border-0">
-                                                                        <td className="px-3 py-2 font-medium text-[#2B174C]">{item.name}</td>
-                                                                        <td className="px-3 py-2 text-center">{item.quantity}</td>
-                                                                        <td className="px-3 py-2 text-right">{item.included ? "Included" : item.unitPrice == null ? "—" : peso(item.unitPrice)}</td>
-                                                                        <td className="px-3 py-2 text-right font-semibold">{item.included ? "Included" : item.lineTotal == null ? "—" : peso(item.lineTotal)}</td>
-                                                                    </tr>
-                                                                ))}
-                                                                </tbody>
-                                                            </table>
-                                                        </div>
-                                                    ) : <p className="px-4 py-4 text-xs text-[#806A8C]">{detail.detailNotice || "Itemized details are not available in the saved transaction."} The invoice cannot be downloaded without verified item prices.</p>}
+                                                    <TransactionItemsPreview detail={detail} />
                                                     <div className="space-y-1 border-t border-[#E8DFF0] bg-[#FAF7FF] px-4 py-3 text-xs">
                                                         {recordedVat && detail.vatAmount != null && detail.total != null && <>
                                                             <p className="flex justify-between gap-4"><span className="text-[#806A8C]">VATable Sales (recorded)</span><strong>{peso(detail.total - detail.vatAmount)}</strong></p>
                                                             <p className="flex justify-between gap-4"><span className="text-[#806A8C]">Output VAT (recorded)</span><strong>{peso(detail.vatAmount)}</strong></p>
                                                         </>}
-                                                        <p className="flex justify-between gap-4 font-bold text-[#2B174C]"><span>Recorded Total</span><span>{detail.total == null ? "—" : peso(detail.total)}</span></p>
+                                                        <p className="flex justify-between gap-4 font-bold text-[#2B174C]"><span>Total Sales</span><span>{detail.total == null ? "—" : peso(detail.total)}</span></p>
                                                         {detail.bookingBilling && <BookingBillingPreview billing={detail.bookingBilling} />}
-                                                        <p className="pt-2 text-[10px] text-[#806A8C]">Internal transaction copy only. An Order ID is not a BIR-issued invoice number.</p>
+                                                        <p className="pt-2 text-[10px] text-[#806A8C]">Internal transaction record only. Order ID is not a BIR-issued invoice number.</p>
                                                     </div>
                                                 </section>
                                             )}
@@ -393,6 +431,10 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
                     </div>
                 </section>
             </div>
+            {selectedKpi && (
+                <POSKpiDetailModal manager kpiKey={selectedKpi} detail={kpiDetails[selectedKpi]}
+                                   onClose={() => setSelectedKpi(null)} />
+            )}
         </POSLayout>
     );
 }
@@ -406,15 +448,16 @@ function isWalkInPosOrder(order: Order) {
 }
 
 export function BranchPOSView({ pos }: { pos: UsePOSReturn }) {
+    // Hooks must execute in the same order for Manager and Staff renders.
+    const [staffPaymentFilter, setStaffPaymentFilter] = useState<"ALL" | "CASH" | "GCASH" | "BANK_TRANSFER">("ALL");
     const isManager = pos.role === "manager";
     // Only Staff render checkout; Manager has a separate read-only sales view.
     if (isManager) return <ManagerSalesView pos={pos} />;
     const staffTodayOrders = pos.todayOrders.filter(isWalkInPosOrder);
+    const displayedTodayOrders = staffPaymentFilter === "ALL" ? staffTodayOrders : staffTodayOrders.filter(order =>
+        String(order.paymentMode || "").toUpperCase().split(",").map(value => value.trim()).includes(staffPaymentFilter));
     const completedTodayOrders = staffTodayOrders;
     const staffTodaySales = completedTodayOrders.reduce((total, order) => total + Number(order.total || 0), 0);
-    const staffCashSales = completedTodayOrders
-        .filter(order => String(order.paymentMode || "").toUpperCase() === "CASH")
-        .reduce((total, order) => total + Number(order.total || 0), 0);
     // Count product units sold, not the number of orders or distinct products.
     // Avoid reporting an incomplete total as zero when item quantities are unavailable.
     const itemsSoldComplete = completedTodayOrders.every(order =>
@@ -448,16 +491,13 @@ export function BranchPOSView({ pos }: { pos: UsePOSReturn }) {
             activeBranchName={pos.activeBranchName}
             onRefresh={() => pos.refreshAll()}
         >
-            <div className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 <StatCard label="Today's Walk-in Sales" value={peso(staffTodaySales)}
                           helper="Completed walk-in sales at your branch today"
                           icon={<CircleDollarSign size={18} />} />
                 <StatCard label="Walk-in Transactions" value={completedTodayOrders.length}
                           helper="Completed walk-in POS transactions today"
                           icon={<ReceiptText size={18} />} iconClassName="bg-[#E8F0FF] text-[#2865D9]" />
-                <StatCard label="Cash Walk-in Sales" value={peso(staffCashSales)}
-                          helper="Today's walk-in payments made in cash"
-                          icon={<WalletCards size={18} />} iconClassName="bg-[#E9F8EF] text-[#168A48]" />
                 <StatCard label="Items Sold Today" value={itemsSoldComplete ? itemsSoldToday : "—"}
                           helper={itemsSoldComplete ? "Product units sold in today's completed walk-in sales" : "Some completed sales lack item quantities"}
                           icon={<ShoppingBag size={18} />} iconClassName="bg-[#FFF2E5] text-[#C8791D]" />
@@ -503,9 +543,27 @@ export function BranchPOSView({ pos }: { pos: UsePOSReturn }) {
                 <div className="grid grid-cols-1 gap-3">
                     <OrdersTable
                         title="Today's Orders"
-                        subtitle={`${staffTodayOrders.length} walk-in POS transaction${staffTodayOrders.length !== 1 ? "s" : ""} recorded today`}
-                        orders={staffTodayOrders}
-                        emptyText="No walk-in POS orders recorded today."
+                        subtitle={staffPaymentFilter === "ALL"
+                            ? `${staffTodayOrders.length} walk-in POS transaction${staffTodayOrders.length !== 1 ? "s" : ""} recorded today`
+                            : `${displayedTodayOrders.length} of ${staffTodayOrders.length} walk-in POS transactions matching payment filter`}
+                        orders={displayedTodayOrders}
+                        emptyText={staffPaymentFilter === "ALL"
+                            ? "No walk-in POS orders recorded today."
+                            : "No walk-in POS orders match this payment method."}
+                        headerActions={
+                            <div className="relative w-full sm:w-[190px]">
+                                <ReceiptText size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#9B8AAA]" />
+                                <select aria-label="Filter today's orders by payment method" value={staffPaymentFilter}
+                                        onChange={event => setStaffPaymentFilter(event.target.value as "ALL" | "CASH" | "GCASH" | "BANK_TRANSFER")}
+                                        className="h-[42px] w-full appearance-none rounded-xl border border-[#E3D8EA] bg-white pl-9 pr-8 text-sm font-medium text-[#2B174C] shadow-sm outline-none focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10">
+                                    <option value="ALL">All Payments</option>
+                                    <option value="CASH">Cash</option>
+                                    <option value="GCASH">GCash</option>
+                                    <option value="BANK_TRANSFER">Bank Transfer</option>
+                                </select>
+                                <ChevronDown size={15} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[#2B174C]" />
+                            </div>
+                        }
                         containerClassName="min-h-[320px] flex flex-col"
                         scrollAreaClassName="max-h-[380px] flex-1 overflow-y-auto"
                         allowHorizontalScroll={false}

@@ -350,7 +350,7 @@ async function getAnalyticsBookingItems(
          WHERE ${scope.where}
         AND ${ACCEPTED_BOOKING_STATUSES_SQL}
         AND bi.item_type IN ('consumable', 'rental')
-        AND COALESCE(LOWER(TRIM(bi.item_status)), '') <> 'cancelled'
+        AND bi.item_status <> 'cancelled'
         AND bi.item_status NOT LIKE 'claim%'
         GROUP BY
         DATE_FORMAT(b.event_date, '%Y-%m-%d'),
@@ -370,13 +370,6 @@ async function getAnalyticsBookingItems(
  * RENTAL LIFECYCLE EVENTS (read-only)
  * ------------------------------------------------------- */
 
-/**
- * Retrieve rental item facts for Analytics without changing booking workflows.
- * Bookings are scoped by event_date; releases and returns are independently
- * scoped by their own timestamps so activity in later periods is not lost.
- * The engine must apply the appropriate date to each metric and must not
- * count damaged units as additional returned units.
- */
 async function getAnalyticsRentalItems(
     connection,
     { storeId, branchId = null, startDate, endDate }
@@ -395,8 +388,6 @@ async function getAnalyticsRentalItems(
         params.push(branch);
     }
 
-    // Include events occurring within the requested window, even when the
-    // original booking event date falls outside that window.
     const eventRange = (column) =>
         `${column} >= ? AND ${column} < DATE_ADD(?, INTERVAL 1 DAY)`;
     params.push(
@@ -445,6 +436,190 @@ async function getAnalyticsRentalItems(
 }
 
 /* -------------------------------------------------------
+ * THIS MONTH VS THE SAME MONTH LAST YEAR
+ * ------------------------------------------------------- */
+
+const inDay = (column) => `${column} >= ? AND ${column} < DATE_ADD(?, INTERVAL 1 DAY)`;
+
+/** Units and sales per product in the selected days and the same days last year. */
+async function getMonthComparisonProducts(connection, { storeId, branchId = null, ranges }) {
+    const params = [ranges.startDate, ranges.endDate, ranges.lastYearStartDate, ranges.lastYearEndDate,
+        ranges.startDate, ranges.endDate, ranges.lastYearStartDate, ranges.lastYearEndDate,
+        Number(storeId)];
+    let branchClause = "";
+    if (branchId) { branchClause = " AND o.branch_id = ?"; params.push(Number(branchId)); }
+    params.push(ranges.startDate, ranges.endDate, ranges.lastYearStartDate, ranges.lastYearEndDate);
+    const [rows] = await connection.execute(
+        `SELECT p.id AS productId, p.product_name AS name,
+                COALESCE(NULLIF(TRIM(c.category_name), ''), 'Uncategorized') AS category,
+                SUM(CASE WHEN ${inDay("o.order_date")} THEN oi.quantity ELSE 0 END) AS units,
+                SUM(CASE WHEN ${inDay("o.order_date")} THEN oi.quantity ELSE 0 END) AS lastYearUnits,
+                SUM(CASE WHEN ${inDay("o.order_date")} THEN oi.line_total ELSE 0 END) AS revenue,
+                SUM(CASE WHEN ${inDay("o.order_date")} THEN oi.line_total ELSE 0 END) AS lastYearRevenue
+         FROM orders o
+             INNER JOIN order_items oi ON oi.order_id = o.order_id AND oi.store_id = o.store_id
+             INNER JOIN product_variants pv ON pv.id = oi.variant_id AND pv.store_id = oi.store_id
+             INNER JOIN products p ON p.id = pv.product_id AND p.store_id = pv.store_id
+             LEFT JOIN categories c ON c.id = p.category_id AND c.store_id = p.store_id
+         WHERE o.store_id = ?${branchClause}
+           AND ${VALID_SALES_SQL}
+           AND ((${inDay("o.order_date")}) OR (${inDay("o.order_date")}))
+         GROUP BY p.id, p.product_name, category`,
+        params
+    );
+    return rows;
+}
+
+/** Rental units booked per item (by event date) in the selected days and the same days last year. */
+async function getMonthComparisonRentals(connection, { storeId, branchId = null, ranges }) {
+    const params = [ranges.startDate, ranges.endDate, ranges.lastYearStartDate, ranges.lastYearEndDate, Number(storeId)];
+    let branchClause = "";
+    if (branchId) { branchClause = " AND b.branch_id = ?"; params.push(Number(branchId)); }
+    params.push(ranges.startDate, ranges.endDate, ranges.lastYearStartDate, ranges.lastYearEndDate);
+    const [rows] = await connection.execute(
+        `SELECT bi.equipment_id AS equipmentId, COALESCE(e.equipment_name, MAX(bi.item_name_snapshot)) AS name,
+                SUM(CASE WHEN b.event_date BETWEEN ? AND ? THEN bi.quantity ELSE 0 END) AS units,
+                SUM(CASE WHEN b.event_date BETWEEN ? AND ? THEN bi.quantity ELSE 0 END) AS lastYearUnits
+         FROM bookings b
+             INNER JOIN booking_items bi ON bi.booking_id = b.id AND bi.store_id = b.store_id
+             LEFT JOIN equipment e ON e.id = bi.equipment_id AND e.store_id = bi.store_id
+         WHERE b.store_id = ?${branchClause}
+           AND ${ACCEPTED_BOOKING_STATUSES_SQL}
+           AND bi.item_type = 'rental'
+           AND COALESCE(LOWER(TRIM(bi.item_status)), '') <> 'cancelled'
+           AND bi.item_status NOT LIKE 'claim%'
+           AND (b.event_date BETWEEN ? AND ? OR b.event_date BETWEEN ? AND ?)
+         GROUP BY bi.equipment_id, e.equipment_name`,
+        params
+    );
+    return rows;
+}
+
+/* -------------------------------------------------------
+ * PRODUCT / RENTAL ITEM INSIGHT
+ * ------------------------------------------------------- */
+
+/** Products and rental items to choose from (with sales or bookings, or still active). */
+async function getItemOptions(connection, { storeId }) {
+    const [products] = await connection.execute(
+        `SELECT p.id, p.product_name AS name, COALESCE(NULLIF(TRIM(c.category_name), ''), 'Uncategorized') AS category
+         FROM products p LEFT JOIN categories c ON c.id = p.category_id AND c.store_id = p.store_id
+         WHERE p.store_id = ? AND p.deleted_at IS NULL
+         ORDER BY p.product_name`,
+        [Number(storeId)]
+    );
+    const [equipment] = await connection.execute(
+        `SELECT e.id, e.equipment_name AS name, COALESCE(NULLIF(TRIM(c.category_name), ''), 'Rental equipment') AS category
+         FROM equipment e LEFT JOIN categories c ON c.id = e.category_id AND c.store_id = e.store_id
+         WHERE e.store_id = ? AND e.deleted_at IS NULL
+         ORDER BY e.equipment_name`,
+        [Number(storeId)]
+    );
+    return { products, equipment };
+}
+
+async function getProductItem(connection, { storeId, productId }) {
+    const [rows] = await connection.execute(
+        `SELECT p.id, p.product_name AS name, COALESCE(NULLIF(TRIM(c.category_name), ''), 'Uncategorized') AS category
+         FROM products p LEFT JOIN categories c ON c.id = p.category_id AND c.store_id = p.store_id
+         WHERE p.id = ? AND p.store_id = ? LIMIT 1`,
+        [Number(productId), Number(storeId)]
+    );
+    return rows[0] || null;
+}
+
+async function getEquipmentItem(connection, { storeId, equipmentId }) {
+    const [rows] = await connection.execute(
+        `SELECT e.id, e.equipment_name AS name, COALESCE(NULLIF(TRIM(c.category_name), ''), 'Rental equipment') AS category
+         FROM equipment e LEFT JOIN categories c ON c.id = e.category_id AND c.store_id = e.store_id
+         WHERE e.id = ? AND e.store_id = ? LIMIT 1`,
+        [Number(equipmentId), Number(storeId)]
+    );
+    return rows[0] || null;
+}
+
+/**
+ * Everything the product insight needs: monthly units (3 years), hour × weekday, this month
+ * vs the same days last year, daily sales and stock changes for the last 90 days, current stock.
+ */
+async function getProductInsightRows(connection, { storeId, branchId = null, productId, historyStart, today, mtd, timelineStart }) {
+    const base = [Number(storeId), Number(productId)];
+    const branch = branchId ? " AND o.branch_id = ?" : "";
+    const withBranch = (params) => (branchId ? [...params, Number(branchId)] : params);
+    const salesFrom = `FROM orders o
+             INNER JOIN order_items oi ON oi.order_id = o.order_id AND oi.store_id = o.store_id
+             INNER JOIN product_variants pv ON pv.id = oi.variant_id AND pv.store_id = oi.store_id
+         WHERE o.store_id = ? AND pv.product_id = ?${branch} AND ${VALID_SALES_SQL}`;
+    const [[monthly], [hourWeekday], [mtdRows], [daily], [stockRows], [moves]] = await Promise.all([
+        connection.execute(`SELECT DATE_FORMAT(o.order_date, '%Y-%m') AS monthKey, SUM(oi.quantity) AS units, SUM(oi.line_total) AS revenue,
+                COUNT(DISTINCT o.order_id) AS orders ${salesFrom} AND o.order_date >= ? GROUP BY monthKey ORDER BY monthKey`,
+            [...withBranch(base), historyStart]),
+        connection.execute(`SELECT HOUR(o.order_date) AS hour, DAYOFWEEK(o.order_date) - 1 AS weekday, SUM(oi.quantity) AS units
+                ${salesFrom} AND o.order_date >= ? GROUP BY hour, weekday`,
+            [...withBranch(base), historyStart]),
+        connection.execute(`SELECT SUM(CASE WHEN ${inDay("o.order_date")} THEN oi.quantity ELSE 0 END) AS units,
+                SUM(CASE WHEN ${inDay("o.order_date")} THEN oi.quantity ELSE 0 END) AS lastYearUnits
+                ${salesFrom} AND ((${inDay("o.order_date")}) OR (${inDay("o.order_date")}))`,
+            [mtd.startDate, mtd.endDate, mtd.lastYearStartDate, mtd.lastYearEndDate, ...withBranch(base),
+                mtd.startDate, mtd.endDate, mtd.lastYearStartDate, mtd.lastYearEndDate]),
+        connection.execute(`SELECT DATE_FORMAT(o.order_date, '%Y-%m-%d') AS day, SUM(oi.quantity) AS units
+                ${salesFrom} AND ${inDay("o.order_date")} GROUP BY day`,
+            [...withBranch(base), timelineStart, today]),
+        connection.execute(`SELECT COALESCE(SUM(bi.on_hand_quantity), 0) AS onHand, COALESCE(SUM(bi.reserved_quantity), 0) AS reserved,
+                COALESCE(SUM(bi.unavailable_quantity), 0) AS unavailable, COALESCE(SUM(bi.reorder_level), 0) AS reorderLevel
+             FROM branch_inventory bi INNER JOIN product_variants pv ON pv.id = bi.variant_id AND pv.store_id = bi.store_id
+             WHERE bi.store_id = ? AND pv.product_id = ?${branchId ? " AND bi.branch_id = ?" : ""}`,
+            withBranch(base)),
+        connection.execute(`SELECT DATE_FORMAT(m.created_at, '%Y-%m-%d') AS day, SUM(m.quantity_change) AS net,
+                SUM(CASE WHEN m.quantity_change > 0 THEN m.quantity_change ELSE 0 END) AS received
+             FROM inventory_movements m
+                 INNER JOIN branch_inventory bi ON bi.id = m.branch_inventory_id AND bi.store_id = m.store_id
+                 INNER JOIN product_variants pv ON pv.id = bi.variant_id AND pv.store_id = bi.store_id
+             WHERE m.store_id = ? AND pv.product_id = ?${branchId ? " AND m.branch_id = ?" : ""}
+               AND m.quantity_bucket = 'on_hand' AND m.created_at >= ?
+             GROUP BY day`,
+            [...withBranch(base), timelineStart]),
+    ]);
+    return { monthly, hourWeekday, monthToDate: mtdRows[0] || {}, daily, stock: stockRows[0] || null, movements: moves };
+}
+
+/** Rental item: monthly units booked (by event date), weekday of events, units owned, rental periods around today. */
+async function getRentalInsightRows(connection, { storeId, branchId = null, equipmentId, historyStart, mtd, timelineStart, timelineEnd }) {
+    const base = [Number(storeId), Number(equipmentId)];
+    const withBranch = (params) => (branchId ? [...params, Number(branchId)] : params);
+    const bookedFrom = `FROM bookings b INNER JOIN booking_items bi ON bi.booking_id = b.id AND bi.store_id = b.store_id
+         WHERE b.store_id = ? AND bi.equipment_id = ?${branchId ? " AND b.branch_id = ?" : ""}
+           AND bi.item_type = 'rental' AND ${ACCEPTED_BOOKING_STATUSES_SQL}
+           AND COALESCE(LOWER(TRIM(bi.item_status)), '') <> 'cancelled' AND bi.item_status NOT LIKE 'claim%'`;
+    const [[monthly], [weekday], [mtdRows], [ownedRows], [periods]] = await Promise.all([
+        connection.execute(`SELECT DATE_FORMAT(b.event_date, '%Y-%m') AS monthKey, SUM(bi.quantity) AS units,
+                SUM(COALESCE(bi.line_total, 0)) AS revenue, COUNT(DISTINCT b.id) AS orders
+                ${bookedFrom} AND b.event_date >= ? GROUP BY monthKey ORDER BY monthKey`,
+            [...withBranch(base), historyStart]),
+        connection.execute(`SELECT NULL AS hour, DAYOFWEEK(b.event_date) - 1 AS weekday, SUM(bi.quantity) AS units
+                ${bookedFrom} AND b.event_date >= ? GROUP BY weekday`,
+            [...withBranch(base), historyStart]),
+        connection.execute(`SELECT SUM(CASE WHEN b.event_date BETWEEN ? AND ? THEN bi.quantity ELSE 0 END) AS units,
+                SUM(CASE WHEN b.event_date BETWEEN ? AND ? THEN bi.quantity ELSE 0 END) AS lastYearUnits
+                ${bookedFrom} AND (b.event_date BETWEEN ? AND ? OR b.event_date BETWEEN ? AND ?)`,
+            [mtd.startDate, mtd.endDate, mtd.lastYearStartDate, mtd.lastYearEndDate, ...withBranch(base),
+                mtd.startDate, mtd.endDate, mtd.lastYearStartDate, mtd.lastYearEndDate]),
+        connection.execute(`SELECT COALESCE(SUM(GREATEST(bi.on_hand_quantity - bi.unavailable_quantity, 0)), 0) AS owned
+             FROM branch_inventory bi WHERE bi.store_id = ? AND bi.equipment_id = ?${branchId ? " AND bi.branch_id = ?" : ""}`,
+            withBranch(base)),
+        connection.execute(`SELECT DATE_FORMAT(COALESCE(b.handover_date, b.rental_start_date, b.event_date), '%Y-%m-%d') AS startDate,
+                DATE_FORMAT(COALESCE(b.rental_end_date, b.event_end_date, b.event_date), '%Y-%m-%d') AS endDate,
+                SUM(bi.quantity) AS quantity
+                ${bookedFrom}
+                AND COALESCE(b.rental_end_date, b.event_end_date, b.event_date) >= ?
+                AND COALESCE(b.handover_date, b.rental_start_date, b.event_date) <= ?
+                GROUP BY b.id, startDate, endDate`,
+            [...withBranch(base), timelineStart, timelineEnd]),
+    ]);
+    return { monthly, hourWeekday: weekday, monthToDate: mtdRows[0] || {}, owned: Number(ownedRows[0]?.owned || 0), rentalPeriods: periods };
+}
+
+/* -------------------------------------------------------
  * OLDER HELPERS (kept so any other file that imports them still works; v2 columns)
  * ------------------------------------------------------- */
 
@@ -467,10 +642,10 @@ async function getProductRevenueRows(connection, { storeId, branchId = null, sta
         `SELECT COALESCE(NULLIF(TRIM(c.category_name), ''), 'Uncategorized') AS category,
                 SUM(COALESCE(oi.line_total, 0)) AS value
          FROM orders o
-             INNER JOIN order_items oi ON oi.order_id = o.order_id AND oi.store_id = o.store_id
-             LEFT JOIN product_variants pv ON pv.id = oi.variant_id AND pv.store_id = oi.store_id
-             LEFT JOIN products p ON p.id = pv.product_id AND p.store_id = pv.store_id
-             LEFT JOIN categories c ON c.id = p.category_id AND c.store_id = p.store_id
+         INNER JOIN order_items oi ON oi.order_id = o.order_id AND oi.store_id = o.store_id
+         LEFT JOIN product_variants pv ON pv.id = oi.variant_id AND pv.store_id = oi.store_id
+         LEFT JOIN products p ON p.id = pv.product_id AND p.store_id = pv.store_id
+         LEFT JOIN categories c ON c.id = p.category_id AND c.store_id = p.store_id
          WHERE ${scope.where} AND ${VALID_SALES_SQL}
          GROUP BY category
          HAVING value > 0
@@ -520,4 +695,11 @@ module.exports = {
     getAnalyticsBookings,
     getAnalyticsBookingItems,
     getAnalyticsRentalItems,
+    getMonthComparisonProducts,
+    getMonthComparisonRentals,
+    getItemOptions,
+    getProductItem,
+    getEquipmentItem,
+    getProductInsightRows,
+    getRentalInsightRows,
 };

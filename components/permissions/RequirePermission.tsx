@@ -165,9 +165,16 @@ export default function RequirePermission({
         setAllowed(true);
     }, [router, permission, ownerOnly]);
 
-    if (!mounted) return null;
-
-    if (!allowed) return null;
+    // Show the workspace's light background while browser permissions are
+    // being checked or a redirect is in progress. Returning null used to
+    // expose the global dark-mode body as an empty black screen.
+    if (!mounted || !allowed) {
+        return (
+            <div className="flex min-h-screen items-center justify-center bg-[#FDFAF4] text-[#7A6A84]">
+                <p className="text-sm">Checking account access...</p>
+            </div>
+        );
+    }
 
     return <>{children}</>;
 }

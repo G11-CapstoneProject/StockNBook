@@ -920,6 +920,7 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories,eq
     const [quantity,setQuantity]=React.useState(mode==="add"?"0":(mode==="correct"||mode==="edit")?String(item?.totalUnits??0):"");
     const [physicalCountVerified,setPhysicalCountVerified]=React.useState(false);
     const [unitCost,setUnitCost]=React.useState("");
+    const [averageUnitCost,setAverageUnitCost]=React.useState(item?.averageUnitCost==null?"":String(item.averageUnitCost));
     const [rentalRate,setRentalRate]=React.useState(item?.rentalRatePerDay==null?"":String(item.rentalRatePerDay));
     const [reason,setReason]=React.useState("");
     const [maintenanceMode,setMaintenanceMode]=React.useState<"start"|"complete">("start");
@@ -975,14 +976,16 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories,eq
                 if(quantity.trim()===""||!Number.isSafeInteger(qty)||qty<0||qty>2147483647){
                     setError("Stock must be a nonnegative whole number.");return;
                 }
-                const stockChanged=qty!==item!.totalUnits;
-                if(stockChanged&&(reason.trim().length<10||!physicalCountVerified)){
-                    setError("Explain the stock count correction (10+ characters) and confirm the physical count.");return;
+                if(!validRentalMoney(averageUnitCost)){
+                    setError("Average Unit Cost must be a nonnegative amount with up to two decimals.");return;
                 }
+                const costChanged=item!.averageUnitCost===null||Number(averageUnitCost)!==item!.averageUnitCost;
+                const stockChanged=qty!==item!.totalUnits;
                 mutation={action:"update_equipment",equipmentId:item!.id,name:name.trim(),category:category.trim(),
                     alertLevel:item!.alertLevel,rentalRatePerDay:Number(rentalRate), pricingMethod:"manual",
-                    ...(stockChanged?{totalUnits:qty,expectedTotalUnits:item!.totalUnits,
-                        reason:reason.trim(),physicalCountVerified:true as const}:{})};
+                    ...(costChanged?{averageUnitCost:Number(averageUnitCost),
+                        ...(item!.averageUnitCost!==null?{expectedAverageUnitCost:item!.averageUnitCost}:{})}:{}),
+                    ...(stockChanged?{totalUnits:qty,expectedTotalUnits:item!.totalUnits}:{})};
             }
         }else if(mode==="correct"&&item){
             if(!Number.isSafeInteger(qty)||qty<0||qty>2147483647||qty===item.totalUnits){
@@ -1010,18 +1013,32 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories,eq
     };
     const confirm=async()=>{
         if(!pending||submittingRef.current||saving)return;
+        let mutation=pending;
+        // Clicking Update Product confirms the physical count described in the dialog.
+        // Use a system-generated audit description rather than a user-entered reason.
+        if(pending.action==="update_equipment"&&pending.totalUnits!==undefined){
+            mutation={...pending,
+                reason:`Manual stock adjustment confirmed in Edit Product (${pending.expectedTotalUnits} to ${pending.totalUnits} units).`,
+                physicalCountVerified:true};
+        }
         submittingRef.current=true;setSubmitting(true);setError("");
-        try{await onSave(pending);setPending(null);}
-        catch(cause){setPending(null);setError(cause instanceof Error?cause.message:"Unable to save equipment.");}
+        try{await onSave(mutation);setPending(null);}
+        catch(cause){
+            setPending(null);
+            const message=cause instanceof Error?cause.message:"Unable to save equipment.";
+            if(pending.action==="create_equipment" && /^Your plan allows \d+ inventory items \(consumables and rentals combined\)\./.test(message)){
+                window.alert(`❌ ${message}`);
+            }else{
+                setError(message);
+            }
+        }
         finally{submittingRef.current=false;setSubmitting(false);}
     };
     const btn="rounded-xl bg-[#2B174C] px-5 py-3 text-sm font-semibold text-white hover:bg-[#1B0D31] disabled:opacity-40";
     // Edit Rental Product uses the Consumable Edit Product layout, buttons and
     // confirmation. It shares this dialog's state, validation and save logic.
-    // Rental products have no variants; stock stays read-only (Restock / Correct Stock Count).
+    // Stock is editable; a changed count is verified in the update confirmation.
     if(mode==="edit"&&item){
-        const editStockValid=quantity.trim()!==""&&Number.isSafeInteger(qty)&&qty>=0&&qty<=2147483647;
-        const editStockChanged=!(editStockValid&&qty===item.totalUnits);
         return <>
             <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm" role="presentation">
                 <div role="dialog" aria-modal="true" aria-label="Edit Rental Product"
@@ -1047,22 +1064,10 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories,eq
                                 <input type="number" min="0" max="2147483647" step="1" required value={quantity}
                                        onChange={e=>setQuantity(e.target.value)} className={rentalFieldClass}/></div>
                             <div className="space-y-1"><label className={rentalLabelClass}>Average Unit Cost</label>
-                                <input readOnly className={`${rentalFieldClass} bg-[#F7F1FF]`} value={peso(item.averageUnitCost)}/></div>
+                                <input type="number" min="0" max="100000000" step="0.01" required value={averageUnitCost}
+                                       onChange={e=>setAverageUnitCost(e.target.value)} className={rentalFieldClass} placeholder="0.00"/></div>
                         </div>
                         <p className="text-[11px] text-[#9B8AAA]">Change Stock only to correct a verified physical count. Record newly received equipment through Restock. Changes are saved only when you click Update Product.</p>
-                        {editStockChanged&&<section className="space-y-3 rounded-xl border border-[#E6DDF0] bg-[#FFFCF8] p-4" aria-label="Stock count correction">
-                            <h4 className="text-sm font-bold text-[#21132E]">Stock Count Correction</h4>
-                            <p className="text-[11px] text-[#806A8C]">Current total: <strong>{item.totalUnits}</strong> · New total: <strong>{editStockValid?qty:"—"}</strong>
-                                {editStockValid&&<> · Difference: <strong>{qty-item.totalUnits>0?"+":""}{qty-item.totalUnits}</strong></>}.
-                                {" "}Confirmed reservations, rented-out, held and missing units stay protected. This is recorded as an audited correction, not a restock.</p>
-                            <div className="space-y-1"><label className={rentalLabelClass}>Reason / Physical Count Evidence</label>
-                                <textarea required minLength={10} maxLength={500} rows={3} className={rentalFieldClass} value={reason} onChange={e=>setReason(e.target.value)}
-                                          placeholder="Explain the verified recount and why the previous quantity was incorrect"/></div>
-                            <label className="flex items-center gap-2 text-xs font-medium text-[#5A476A]">
-                                <input type="checkbox" checked={physicalCountVerified} onChange={e=>setPhysicalCountVerified(e.target.checked)}/>
-                                I physically verified these units; this is not a new delivery.
-                            </label>
-                        </section>}
                         <div className="space-y-1"><label className={rentalLabelClass}>Rental Rate (₱ / item)</label>
                             <input type="number" min="0" max="100000000" step="0.01" required value={rentalRate}
                                    onChange={e=>setRentalRate(e.target.value)}
@@ -1087,13 +1092,13 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories,eq
                         <div>
                             <h3 className="text-[19px] font-bold text-[#1A1220]">Update Product</h3>
                             <p className="mt-1 text-sm text-[#6A5D6F]">Are you sure you want to save this product?</p>
-                            {pending.action==="update_equipment"&&pending.totalUnits!==undefined&&<p className="mt-2 text-xs font-semibold text-[#69402A]">
-                                Stock will be corrected from {item.totalUnits} to {pending.totalUnits} units as an audited stock correction, not a restock.</p>}
+                            {pending.action==="update_equipment"&&pending.totalUnits!==undefined&&<p className="mt-2 text-xs text-[#69402A]">
+                                By clicking Update Product, you confirm that the stock change from {item.totalUnits} to {pending.totalUnits} units is based on a physical count, not a new delivery.</p>}
                         </div>
-                        <button type="button" disabled={submitting} onClick={()=>setPending(null)} aria-label="Close confirmation" className="text-[#9B8AAA] hover:text-[#1A1220]">✕</button>
+                        <button type="button" disabled={submitting} onClick={()=>{setPending(null);setError("");}} aria-label="Close confirmation" className="text-[#9B8AAA] hover:text-[#1A1220]">✕</button>
                     </div>
                     <div className="mt-4 flex justify-end gap-2">
-                        <button type="button" disabled={submitting} onClick={()=>setPending(null)}
+                        <button type="button" disabled={submitting} onClick={()=>{setPending(null);setError("");}}
                                 className="rounded-xl border border-[#E6DDF0] bg-white px-4 py-2 text-sm font-medium text-[#6A5D6F] hover:bg-[#F7F1FF]">Cancel</button>
                         <button type="button" disabled={saving||submitting} onClick={()=>void confirm()}
                                 className="rounded-xl bg-[#2B174C] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1B0D31] disabled:opacity-40">{submitting?"Saving...":"Update Product"}</button>
@@ -1152,7 +1157,8 @@ function EquipmentDialog({mode,item,close,onNavigate,onSave,saving,categories,eq
                         {mode==="add"&&<div className="space-y-1"><label className={rentalLabelClass}>Cost Price (₱ / unit)</label>
                             <input type="number" min="0" step="0.01" required={qty>0} disabled={qty===0} value={unitCost} onChange={e=>setUnitCost(e.target.value)} className={rentalFieldClass} placeholder="0.00"/></div>}
                         {mode==="edit"&&<div className="space-y-1"><label className={rentalLabelClass}>Average Unit Cost</label>
-                            <input readOnly className={`${rentalFieldClass} bg-[#F7F1FF]`} value={peso(item?.averageUnitCost)}/></div>}
+                            <input type="number" min="0" max="100000000" step="0.01" required value={averageUnitCost}
+                                   onChange={e=>setAverageUnitCost(e.target.value)} className={rentalFieldClass} placeholder="0.00"/></div>}
                         <div className="space-y-1 sm:col-span-2"><label className={rentalLabelClass}>Rental Rate (₱ / item)</label>
                             <input type="number" min="0" max="100000000" step="0.01" required value={rentalRate}
                                    onChange={e=>setRentalRate(e.target.value)}

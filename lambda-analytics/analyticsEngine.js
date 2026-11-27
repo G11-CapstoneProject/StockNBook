@@ -22,6 +22,9 @@ const ACCEPTED_BOOKING_STATUSES = new Set([
     "completed",
 ]);
 
+const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
 const MONTH_FORMATTER = new Intl.DateTimeFormat("en-PH", {
     month: "short",
     year: "numeric",
@@ -597,11 +600,42 @@ function buildProductAnalytics(rows, range) {
         })
     );
 
+    // When each category is bought (units per hour), and which weekday + hour is busiest.
+    const categoryHours = new Map();
+    const weekdayHours = Array.from({ length: 7 }, () => Array(24).fill(0));
+    for (const row of current) {
+        const hour = Number(row.purchaseHour);
+        if (row.purchaseHour === null || !Number.isInteger(hour) || hour < 0 || hour > 23) continue;
+        const units = toNumber(row.units);
+        const name = categoryName(row);
+        if (!categoryHours.has(name)) categoryHours.set(name, Array(24).fill(0));
+        categoryHours.get(name)[hour] += units;
+        const day = parseDate(row.day);
+        if (day) weekdayHours[day.getUTCDay()][hour] += units;
+    }
+    const peakIndex = (values) => values.reduce((best, v, i) => (v > values[best] ? i : best), 0);
+    const categoryHourly = Array.from(categoryHours.entries())
+        .map(([name, hours]) => ({
+            name,
+            units: round(hours.reduce((a, b) => a + b, 0)),
+            peakHour: peakIndex(hours),
+            hours: hours.map((v) => round(v)),
+        }))
+        .sort((a, b) => b.units - a.units);
+    const weekdayHourly = weekdayHours.map((hours, weekday) => ({
+        weekday,
+        label: WEEKDAY_LABELS[weekday],
+        units: round(hours.reduce((a, b) => a + b, 0)),
+        hours: hours.map((v) => round(v)),
+    }));
+
     return {
         totalUnits: round(sum(current, "units")),
         categories,
         products,
         hourlyDemand,
+        categoryHourly,
+        weekdayHourly,
         monthlyDemand: createMonthlySeries(
             current,
             range.startDate,
@@ -702,9 +736,6 @@ function buildBookingAnalytics(
     };
 }
 
-/* Rental lifecycle: booked quantities use scheduled event dates; release and
- * return quantities use actual event timestamps. Damage/missing are condition
- * subsets, not additional returns. All metrics are period-scoped. */
 function buildRentalAnalytics(rows, range) {
     const all = Array.isArray(rows) ? rows : [];
     const eligible = all.filter(row =>
@@ -732,7 +763,30 @@ function buildRentalAnalytics(rows, range) {
         missingUnits: sumSafe(returned, "missingUnits"),
         returnRecords: returned.length,
         topEquipment: [...byEquipment.values()].sort((a,b) => b.units-a.units).slice(0,8),
+        equipmentByMonth: buildEquipmentByMonth(booked, range),
         monthlyBookedUnits: createMonthlySeries(booked.map(row => ({day: row.bookingDay, units: Math.max(0,toNumber(row.bookedUnits))})),range.startDate,range.endDate,"day","units"),
+    };
+}
+
+/* Booked units of each rental item per month (the 12 most booked items). */
+function buildEquipmentByMonth(bookedRows, range) {
+    const keys = monthKeys(range.startDate, range.endDate);
+    const byItem = new Map();
+    for (const row of bookedRows) {
+        const key = monthKey(row.bookingDay);
+        const index = keys.indexOf(key);
+        if (index < 0) continue;
+        const id = String(row.equipmentId ?? row.equipmentName);
+        if (!byItem.has(id)) byItem.set(id, { name: normalizeText(row.equipmentName) || "Unnamed equipment", units: Array(keys.length).fill(0), total: 0 });
+        const item = byItem.get(id);
+        const units = Math.max(0, toNumber(row.bookedUnits));
+        item.units[index] += units;
+        item.total += units;
+    }
+    return {
+        months: keys.map((key) => ({ key, label: monthLabel(key) })),
+        items: [...byItem.values()].sort((a, b) => b.total - a.total).slice(0, 12)
+            .map((item) => ({ ...item, total: round(item.total), units: item.units.map((v) => round(v)) })),
     };
 }
 
@@ -998,6 +1052,267 @@ function buildAnalyticsPayloadV2({
     };
 }
 
+/* -------------------------------------------------------
+ * THIS MONTH VS THE SAME MONTH LAST YEAR
+ * ------------------------------------------------------- */
+
+/**
+ * The selected month against the same month a year earlier. When the month is still
+ * running, both sides cover the same days (for example Nov 1–25 vs Nov 1–25 last year).
+ */
+function monthComparisonRanges(month, today) {
+    const [year, monthNo] = month.split("-").map(Number);
+    const lastDay = new Date(Date.UTC(year, monthNo, 0)).getUTCDate();
+    const current = today.slice(0, 7) === month;
+    const endDay = current ? Number(today.slice(8, 10)) : lastDay;
+    const lastYearDays = new Date(Date.UTC(year - 1, monthNo, 0)).getUTCDate();
+    const pad = (n) => String(n).padStart(2, "0");
+    return {
+        partial: current && endDay < lastDay,
+        startDate: `${month}-01`,
+        endDate: `${month}-${pad(endDay)}`,
+        lastYearStartDate: `${year - 1}-${pad(monthNo)}-01`,
+        lastYearEndDate: `${year - 1}-${pad(monthNo)}-${pad(Math.min(endDay, lastYearDays))}`,
+        label: `${MONTH_NAMES[monthNo - 1]} ${year}`,
+        lastYearLabel: `${MONTH_NAMES[monthNo - 1]} ${year - 1}`,
+        days: endDay,
+    };
+}
+
+function buildMonthComparison({ month, ranges, productRows = [], rentalRows = [] }) {
+    const products = productRows
+        .map((row) => {
+            const units = round(toNumber(row.units)), lastYearUnits = round(toNumber(row.lastYearUnits));
+            return {
+                productId: Number(row.productId),
+                name: normalizeText(row.name) || "Product",
+                category: normalizeText(row.category) || "Uncategorized",
+                units,
+                lastYearUnits,
+                difference: round(units - lastYearUnits),
+                revenue: round(toNumber(row.revenue)),
+                lastYearRevenue: round(toNumber(row.lastYearRevenue)),
+                change: changeDetails(units, lastYearUnits),
+            };
+        })
+        .sort((a, b) => b.units - a.units || a.name.localeCompare(b.name));
+    const categoryMap = new Map();
+    for (const p of products) {
+        const c = categoryMap.get(p.category) || { name: p.category, units: 0, lastYearUnits: 0 };
+        c.units += p.units;
+        c.lastYearUnits += p.lastYearUnits;
+        categoryMap.set(p.category, c);
+    }
+    const categories = [...categoryMap.values()]
+        .map((c) => ({ ...c, units: round(c.units), lastYearUnits: round(c.lastYearUnits), change: changeDetails(c.units, c.lastYearUnits) }))
+        .sort((a, b) => b.units - a.units);
+    const sold = products.filter((p) => p.units > 0);
+    const rentals = rentalRows
+        .map((row) => {
+            const units = round(toNumber(row.units)), lastYearUnits = round(toNumber(row.lastYearUnits));
+            return { equipmentId: Number(row.equipmentId), name: normalizeText(row.name) || "Equipment",
+                units, lastYearUnits, difference: round(units - lastYearUnits), change: changeDetails(units, lastYearUnits) };
+        })
+        .sort((a, b) => b.units - a.units || a.name.localeCompare(b.name));
+    const totalUnits = sum(products, "units"), totalLastYear = sum(products, "lastYearUnits");
+    const totalRevenue = sum(products, "revenue"), totalLastYearRevenue = sum(products, "lastYearRevenue");
+    return {
+        success: true,
+        version: 2,
+        action: "get_month_comparison",
+        month,
+        ...ranges,
+        totals: {
+            units: round(totalUnits),
+            lastYearUnits: round(totalLastYear),
+            unitsChange: changeDetails(totalUnits, totalLastYear),
+            revenue: round(totalRevenue),
+            lastYearRevenue: round(totalLastYearRevenue),
+            revenueChange: changeDetails(totalRevenue, totalLastYearRevenue),
+        },
+        categories,
+        products,
+        mostSold: sold.slice(0, 5),
+        leastSold: [...sold].sort((a, b) => a.units - b.units || a.name.localeCompare(b.name)).slice(0, 5),
+        biggestIncrease: products.filter((p) => p.difference > 0).sort((a, b) => b.difference - a.difference).slice(0, 5),
+        biggestDecrease: products.filter((p) => p.difference < 0).sort((a, b) => a.difference - b.difference).slice(0, 5),
+        rentals,
+    };
+}
+
+/* -------------------------------------------------------
+ * PRODUCT / RENTAL ITEM INSIGHT
+ * ------------------------------------------------------- */
+
+const hourLabel = (hour) => `${hour % 12 || 12} ${hour < 12 ? "AM" : "PM"}`;
+const pesoText = (value) => `₱${Math.round(toNumber(value)).toLocaleString("en-PH")}`;
+const unitsText = (value) => `${Math.round(toNumber(value)).toLocaleString("en-PH")} unit${Math.round(toNumber(value)) === 1 ? "" : "s"}`;
+
+/**
+ * One product or rental item over up to three years: each year's months side by side,
+ * its usual best and slow months, when it is bought (products) or booked (rentals),
+ * its 12-month trend, this month vs the same days last year, and a day-by-day timeline.
+ */
+function buildItemInsight({ kind, item, today, historyStart, monthly = [], hourWeekday = [], monthToDate = {},
+                              daily = [], stock = null, movements = [], rentalPeriods = [], owned = 0 }) {
+    const currentMonth = today.slice(0, 7);
+    const byMonth = new Map(monthly.map((row) => [String(row.monthKey), row]));
+    const firstMonth = historyStart.slice(0, 7);
+
+    // Each year's 12 months (null = before the history starts or in the future).
+    const years = [];
+    for (let year = Number(firstMonth.slice(0, 4)); year <= Number(currentMonth.slice(0, 4)); year += 1) {
+        const months = [];
+        for (let m = 1; m <= 12; m += 1) {
+            const key = `${year}-${String(m).padStart(2, "0")}`;
+            months.push(key < firstMonth || key > currentMonth ? null : round(toNumber(byMonth.get(key)?.units)));
+        }
+        years.push({ year, months, total: round(months.reduce((a, b) => a + (b || 0), 0)) });
+    }
+
+    // Usual level of each calendar month (complete months only).
+    const calendar = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, label: MONTH_NAMES[i], total: 0, years: 0 }));
+    for (const y of years) {
+        y.months.forEach((value, i) => {
+            const key = `${y.year}-${String(i + 1).padStart(2, "0")}`;
+            if (value === null || key === currentMonth) return;
+            calendar[i].total += value;
+            calendar[i].years += 1;
+        });
+    }
+    const withData = calendar.filter((c) => c.years > 0);
+    const overall = withData.length ? withData.reduce((s, c) => s + c.total / c.years, 0) / withData.length : 0;
+    const calendarMonths = calendar.map((c) => {
+        const average = c.years ? c.total / c.years : null;
+        return { month: c.month, label: c.label, average: average === null ? null : round(average, 1), years: c.years,
+            index: average === null || overall <= 0 ? null : round(average / overall, 2) };
+    });
+    const ranked = calendarMonths.filter((c) => c.average !== null && c.average > 0).sort((a, b) => b.average - a.average);
+    const bestMonths = ranked.slice(0, 3);
+    const slowMonths = [...calendarMonths.filter((c) => c.average !== null)].sort((a, b) => a.average - b.average).slice(0, 3);
+
+    // 12-month trend (complete months).
+    const completeKeys = [];
+    for (let d = addMonths(parseDate(`${currentMonth}-01`), -24); completeKeys.length < 24; d = addMonths(d, 1)) completeKeys.push(isoDate(d).slice(0, 7));
+    const unitsOf = (keys) => keys.reduce((s, k) => s + toNumber(byMonth.get(k)?.units), 0);
+    const last12 = unitsOf(completeKeys.slice(12)), previous12 = unitsOf(completeKeys.slice(0, 12));
+    const trendChange = changeDetails(last12, previous12);
+    const trendLabel = trendChange.percentage === null ? (last12 > 0 ? "New" : "No sales")
+        : trendChange.percentage >= 5 ? "Rising" : trendChange.percentage <= -5 ? "Falling" : "Steady";
+
+    // When: hours (products) and weekdays.
+    const hours = Array(24).fill(0), weekdays = Array(7).fill(0);
+    for (const row of hourWeekday) {
+        const h = Number(row.hour), d = Number(row.weekday), u = toNumber(row.units);
+        if (Number.isInteger(h) && h >= 0 && h < 24) hours[h] += u;
+        if (Number.isInteger(d) && d >= 0 && d < 7) weekdays[d] += u;
+    }
+    const peakHours = hours.map((units, hour) => ({ hour, label: hourLabel(hour), units: round(units) }))
+        .filter((h) => h.units > 0).sort((a, b) => b.units - a.units || a.hour - b.hour).slice(0, 3);
+    const peakWeekday = weekdays.some((v) => v > 0) ? weekdays.indexOf(Math.max(...weekdays)) : null;
+
+    // This month so far vs the same days last year.
+    const thisMonth = {
+        label: monthToDate.label || "",
+        units: round(toNumber(monthToDate.units)),
+        lastYearUnits: round(toNumber(monthToDate.lastYearUnits)),
+        change: changeDetails(toNumber(monthToDate.units), toNumber(monthToDate.lastYearUnits)),
+    };
+
+    // Day-by-day timeline.
+    let timeline = [];
+    let stockSummary = null;
+    if (kind === "product") {
+        const dailyMap = new Map(daily.map((row) => [String(row.day), toNumber(row.units)]));
+        const moveMap = new Map(movements.map((row) => [String(row.day), row]));
+        const days = [];
+        for (let d = addDays(parseDate(today), -89); isoDate(d) <= today; d = addDays(d, 1)) days.push(isoDate(d));
+        // Walk back from today's stock using each day's net change.
+        let level = toNumber(stock?.onHand);
+        const levels = new Map();
+        for (let i = days.length - 1; i >= 0; i -= 1) {
+            levels.set(days[i], level);
+            level -= toNumber(moveMap.get(days[i])?.net);
+        }
+        timeline = days.map((day) => ({ date: day, sold: round(dailyMap.get(day) || 0),
+            received: round(toNumber(moveMap.get(day)?.received)), stock: Math.max(0, round(levels.get(day))) }));
+        stockSummary = stock ? {
+            onHand: round(toNumber(stock.onHand)), reserved: round(toNumber(stock.reserved)),
+            unavailable: round(toNumber(stock.unavailable)),
+            available: Math.max(0, round(toNumber(stock.onHand) - toNumber(stock.reserved) - toNumber(stock.unavailable))),
+            reorderLevel: round(toNumber(stock.reorderLevel)),
+        } : null;
+    } else {
+        const start = addDays(parseDate(today), -89), end = addDays(parseDate(today), 60);
+        const out = new Map();
+        for (const p of rentalPeriods) {
+            const from = parseDate(p.startDate), to = parseDate(p.endDate || p.startDate);
+            if (!from || !to) continue;
+            for (let d = from > start ? from : start; d <= to && d <= end; d = addDays(d, 1)) {
+                const k = isoDate(d);
+                out.set(k, (out.get(k) || 0) + Math.max(0, toNumber(p.quantity)));
+            }
+        }
+        for (let d = start; d <= end; d = addDays(d, 1)) {
+            const k = isoDate(d);
+            timeline.push({ date: k, unitsOut: round(out.get(k) || 0), upcoming: k > today });
+        }
+        stockSummary = { owned: round(toNumber(owned)) };
+    }
+
+    // Plain-language findings.
+    const insights = [];
+    const unitWord = kind === "rental" ? "booked" : "sold";
+    if (bestMonths.length) insights.push(`Best months: ${bestMonths.map((m) => `${m.label} (about ${unitsText(m.average)} ${unitWord})`).join(", ")}.`);
+    if (slowMonths.length && bestMonths.length) insights.push(`Slowest months: ${slowMonths.map((m) => m.label).join(", ")}.`);
+    const peakMonth = bestMonths[0];
+    if (peakMonth && peakMonth.index >= 1.3)
+        insights.push(kind === "rental"
+            ? `${peakMonth.label} is about ${round(peakMonth.index, 1)}× a normal month, so make sure enough units are free (or arrange extra) before ${peakMonth.label}.`
+            : `${peakMonth.label} is about ${round(peakMonth.index, 1)}× a normal month, so stock up before ${peakMonth.label}.`);
+    if (kind === "product" && peakHours.length)
+        insights.push(`Usually bought around ${peakHours.map((h) => h.label).join(", ")}${peakWeekday !== null ? `, most often on ${["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][peakWeekday]}s` : ""}.`);
+    if (kind === "rental" && peakWeekday !== null)
+        insights.push(`Most bookings are for ${["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][peakWeekday]} events.`);
+    if (trendChange.percentage !== null)
+        insights.push(`Last 12 months: ${unitsText(last12)} ${unitWord}, ${trendChange.label} vs the 12 months before (${trendLabel.toLowerCase()}).`);
+    if (thisMonth.label && (thisMonth.units > 0 || thisMonth.lastYearUnits > 0))
+        insights.push(`${thisMonth.label}: ${unitsText(thisMonth.units)} vs ${unitsText(thisMonth.lastYearUnits)} in the same days last year${thisMonth.change.percentage === null ? "" : ` (${thisMonth.change.label})`}.`);
+    if (kind === "rental" && stockSummary.owned >= 0) {
+        const upcomingPeak = timeline.filter((d) => d.upcoming).reduce((m, d) => Math.max(m, d.unitsOut), 0);
+        if (upcomingPeak > stockSummary.owned)
+            insights.push(`Already booked ${unitsText(upcomingPeak)} on the busiest upcoming day, more than the ${unitsText(stockSummary.owned)} owned.`);
+    }
+
+    return {
+        success: true,
+        version: 2,
+        action: "get_item_insight",
+        kind,
+        item,
+        historyStart,
+        today,
+        years,
+        calendarMonths,
+        bestMonths,
+        slowMonths,
+        trend: { last12: round(last12), previous12: round(previous12), change: trendChange, label: trendLabel },
+        thisMonth,
+        hours: hours.map((v) => round(v)),
+        peakHours,
+        weekdays: weekdays.map((v) => round(v)),
+        peakWeekday,
+        totals: {
+            units: round(monthly.reduce((s, r) => s + toNumber(r.units), 0)),
+            revenue: round(monthly.reduce((s, r) => s + toNumber(r.revenue), 0)),
+            revenueText: pesoText(monthly.reduce((s, r) => s + toNumber(r.revenue), 0)),
+        },
+        timeline,
+        stock: stockSummary,
+        insights,
+    };
+}
+
 /*
  * Legacy compatibility note:
  * The old buildAnalyticsPayload API remains usable
@@ -1018,4 +1333,7 @@ module.exports = {
     buildRange,
     buildAnalyticsPayload,
     buildAnalyticsPayloadV2,
+    monthComparisonRanges,
+    buildMonthComparison,
+    buildItemInsight,
 };

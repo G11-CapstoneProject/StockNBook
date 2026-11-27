@@ -3,16 +3,33 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ModuleSkeleton } from "@/components/loading/ModuleSkeletons";
 import {
-    CalendarDays,
-    ChevronDown,
-    ChevronRight,
-    LoaderCircle,
-    PackageSearch,
-    TrendingUp,
-    TriangleAlert,
-} from "lucide-react";
+    AccuracyPanel,
+    Badge,
+    C,
+    Card,
+    Empty,
+    ErrorBox,
+    EventsPanel,
+    ItemName,
+    Kpi,
+    LineChart,
+    LinkButton,
+    Loading,
+    Row,
+    SERIES,
+    ShowMore,
+    StockPlanPanel,
+    Table,
+    Tabs,
+    Trend,
+    buttonStyle,
+    grid,
+    inputStyle,
+    monthText,
+    stack,
+} from "./_planning";
 
-export type ForecastTab = "inventory" | "seasonal" | "booking";
+export type ForecastTab = "inventory" | "seasonal" | "plan" | "booking" | "events" | "accuracy";
 
 export type SeasonalDateRange = {
     startMonth: string;
@@ -307,21 +324,10 @@ export type BranchForecastSummary = {
     topItem: string;
 };
 
+
 function numberValue(value: unknown) {
     const number = Number(value);
     return Number.isFinite(number) ? number : 0;
-}
-
-function safeText(value: unknown, fallback = "—") {
-    const text = String(value ?? "").trim();
-    return text || fallback;
-}
-
-function titleCase(value: string) {
-    return String(value || "")
-        .replaceAll("_", " ")
-        .toLowerCase()
-        .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function isStockActionItem(item: ForecastItem) {
@@ -333,160 +339,6 @@ function isStockActionItem(item: ForecastItem) {
         numberValue(item.suggestedRestock) > 0 ||
         Boolean(item.reorderNow)
     );
-}
-
-function stockRiskLabel(item: ForecastItem) {
-    const timeAlert = String(item.timeAlert || "").toUpperCase();
-    const status = String(item.status || "STABLE").toUpperCase();
-
-    if (timeAlert === "OUT_OF_STOCK") return "Out of stock";
-    if (timeAlert === "MAY_RUN_OUT_WITHIN_3_DAYS") return "May run out within 3 days";
-    if (timeAlert === "MAY_RUN_OUT_WITHIN_7_DAYS") return "May run out within 7 days";
-    if (status === "LOW") return "Low stock";
-    if (status === "RISK") return "Stock attention";
-    return "Stock adequate";
-}
-
-function stockRiskClass(item: ForecastItem) {
-    const timeAlert = String(item.timeAlert || "").toUpperCase();
-    const status = String(item.status || "STABLE").toUpperCase();
-
-    if (
-        timeAlert === "OUT_OF_STOCK" ||
-        timeAlert === "MAY_RUN_OUT_WITHIN_3_DAYS" ||
-        status === "LOW"
-    ) {
-        return "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]";
-    }
-
-    if (
-        timeAlert === "MAY_RUN_OUT_WITHIN_7_DAYS" ||
-        status === "RISK"
-    ) {
-        return "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]";
-    }
-
-    return "border-[#B7E9C8] bg-[#EDFBF1] text-[#138342]";
-}
-
-function demandLevelLabel(level: string | undefined) {
-    const normalized = String(level || "").toUpperCase();
-
-    if (normalized === "HIGH") return "High demand";
-    if (normalized === "MODERATE") return "Moderate demand";
-    if (normalized === "LOW") return "Lower demand";
-    return "No recent demand";
-}
-
-function demandLevelClass(level: string | undefined) {
-    const normalized = String(level || "").toUpperCase();
-
-    if (normalized === "HIGH") {
-        return "border-[#D9C7F0] bg-[#F4EEFC] text-[#4E2C66]";
-    }
-
-    if (normalized === "MODERATE") {
-        return "border-[#CFE8DA] bg-[#F1FBF5] text-[#138342]";
-    }
-
-    if (normalized === "LOW") {
-        return "border-[#E6DDF0] bg-[#FBF9FD] text-[#6B5B78]";
-    }
-
-    return "border-[#E6DDF0] bg-[#FBF9FD] text-[#806A8C]";
-}
-
-function growthTrendLabel(item: ForecastItem) {
-    const normalized = String(item.growthTrend || "").toUpperCase();
-    const growthPercent = item.growthPercent;
-
-    let label = "Stable demand";
-
-    if (normalized === "GROWING") label = "Demand rising";
-    if (normalized === "DECLINING") label = "Demand declining";
-    if (normalized === "NEW_DEMAND") label = "New demand";
-    if (normalized === "NO_ACTIVITY") label = "No recent activity";
-
-    if (
-        growthPercent !== undefined &&
-        growthPercent !== null &&
-        Number.isFinite(Number(growthPercent))
-    ) {
-        const formatted = `${Number(growthPercent) >= 0 ? "+" : ""}${Number(
-            growthPercent
-        ).toFixed(0)}%`;
-
-        return `${label} · ${formatted}`;
-    }
-
-    return label;
-}
-
-function growthTrendClass(item: ForecastItem) {
-    const normalized = String(item.growthTrend || "").toUpperCase();
-
-    if (normalized === "GROWING" || normalized === "NEW_DEMAND") {
-        return "border-[#B7E9C8] bg-[#EDFBF1] text-[#138342]";
-    }
-
-    if (normalized === "DECLINING") {
-        return "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]";
-    }
-
-    return "border-[#E6DDF0] bg-[#FBF9FD] text-[#6B5B78]";
-}
-
-function seasonalityClass(seasonality: ItemSeasonality | undefined) {
-    const status = String(seasonality?.status || "").toUpperCase();
-
-    if (status === "PEAK_SEASON") {
-        return "border-[#D9C7F0] bg-[#F4EEFC] text-[#4E2C66]";
-    }
-
-    if (status === "OFF_PEAK") {
-        return "border-[#E6DDF0] bg-[#FBF9FD] text-[#6B5B78]";
-    }
-
-    if (status === "LIMITED_HISTORY" || status === "NO_HISTORY") {
-        return "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]";
-    }
-
-    return seasonality ? "border-[#CFE8DA] bg-[#F1FBF5] text-[#138342]" : "border-[#E6DDF0] bg-[#FBF9FD] text-[#6B5B78]";
-}
-
-function seasonalityLabel(seasonality: ItemSeasonality | undefined) {
-    if (!seasonality) return "Product seasonality unavailable";
-
-    return safeText(seasonality.label, "No seasonal signal yet");
-}
-
-function movementLabel(value: string | undefined) {
-    const normalized = String(value || "").toUpperCase();
-
-    if (normalized === "FAST_MOVING") return "Fast-moving";
-    if (normalized === "REGULAR_MOVING") return "Regular-moving";
-    if (normalized === "SLOW_MOVING") return "Slow-moving";
-    return "No movement";
-}
-
-function stockoutLabel(item: ForecastItem) {
-    if (
-        item.daysUntilStockout === null ||
-        item.daysUntilStockout === undefined ||
-        !Number.isFinite(Number(item.daysUntilStockout))
-    ) {
-        return "No estimate";
-    }
-
-    if (Number(item.daysUntilStockout) <= 0) return "Out of stock";
-
-    return `${Number(item.daysUntilStockout).toFixed(1)} days`;
-}
-
-function bookingAllocationLabel(item: ForecastItem) {
-    const quantity = numberValue(item.allocatedQuantity);
-
-    return quantity > 0 ? `${formatNumber(quantity)} items reserved` : "No booking allocation";
 }
 
 export function formatCurrentDateTime(value: Date) {
@@ -524,10 +376,11 @@ function monthInputValueFromDate(value: Date) {
     )}`;
 }
 
-function getLastMonthsRange(monthCount = 12): SeasonalDateRange {
+// The last N complete months. The current month is left out because it is not over yet.
+function getLastMonthsRange(monthCount = 36): SeasonalDateRange {
     const current = new Date();
     const end = new Date(
-        Date.UTC(current.getUTCFullYear(), current.getUTCMonth(), 1)
+        Date.UTC(current.getUTCFullYear(), current.getUTCMonth() - 1, 1)
     );
     const start = new Date(
         Date.UTC(end.getUTCFullYear(), end.getUTCMonth() - (monthCount - 1), 1)
@@ -542,7 +395,7 @@ function getLastMonthsRange(monthCount = 12): SeasonalDateRange {
 function normalizeSeasonalRange(
     range: SeasonalDateRange
 ): SeasonalDateRange {
-    const fallback = getLastMonthsRange(12);
+    const fallback = getLastMonthsRange(36);
     const startMonth = isMonthInputValue(range.startMonth)
         ? range.startMonth
         : fallback.startMonth;
@@ -584,7 +437,7 @@ async function requestForecastApi<T>(
         };
 
         const message =
-            errorPayload.error || "Unable to load forecast data.";
+            errorPayload.error || "The forecast could not be loaded.";
         const details = errorPayload.details
             ? ` ${errorPayload.details}`
             : "";
@@ -606,7 +459,7 @@ export function useLiveForecasting() {
     const [seasonalLoading, setSeasonalLoading] = useState(true);
     const [seasonalError, setSeasonalError] = useState<string | null>(null);
     const [seasonalRange, setSeasonalRange] = useState<SeasonalDateRange>(() =>
-        getLastMonthsRange(12)
+        getLastMonthsRange(36)
     );
 
     const [bookingData, setBookingData] =
@@ -631,7 +484,7 @@ export function useLiveForecasting() {
 
             if (!token) {
                 const sessionMessage =
-                    "Your login session is missing. Please log in again.";
+                    "You are signed out. Please sign in again.";
 
                 setSeasonalData(null);
                 setSeasonalError(sessionMessage);
@@ -653,14 +506,14 @@ export function useLiveForecasting() {
                     setSeasonalData(seasonal);
                 } else {
                     setSeasonalError(
-                        "The Seasonal Demand Patterns service returned an invalid response."
+                        "Busy months could not be loaded."
                     );
                 }
             } catch (requestError) {
                 setSeasonalError(
                     requestError instanceof Error
                         ? requestError.message
-                        : "Unable to load the Seasonal Demand Patterns."
+                        : "Busy months could not be loaded."
                 );
             } finally {
                 setSeasonalLoading(false);
@@ -677,7 +530,7 @@ export function useLiveForecasting() {
 
         if (!token) {
             const sessionMessage =
-                "Your login session is missing. Please log in again.";
+                "You are signed out. Please sign in again.";
 
             setData(null);
             setError(sessionMessage);
@@ -723,7 +576,7 @@ export function useLiveForecasting() {
             } else {
                 setData(null);
                 setError(
-                    "The Product Demand Forecast service returned an invalid response."
+                    "The forecast could not be loaded."
                 );
             }
         } catch (requestError) {
@@ -731,7 +584,7 @@ export function useLiveForecasting() {
             setError(
                 requestError instanceof Error
                     ? requestError.message
-                    : "Unable to load the Product Demand Forecast."
+                    : "The forecast could not be loaded."
             );
         } finally {
             setLoading(false);
@@ -762,7 +615,7 @@ export function useLiveForecasting() {
             } else {
                 setSeasonalData(null);
                 setSeasonalError(
-                    "The Seasonal Demand Patterns service returned an invalid response."
+                    "Busy months could not be loaded."
                 );
             }
         } else {
@@ -770,7 +623,7 @@ export function useLiveForecasting() {
             setSeasonalError(
                 seasonalResult.reason instanceof Error
                     ? seasonalResult.reason.message
-                    : "Unable to load the Seasonal Demand Patterns."
+                    : "Busy months could not be loaded."
             );
         }
 
@@ -782,7 +635,7 @@ export function useLiveForecasting() {
             } else {
                 setBookingData(null);
                 setBookingError(
-                    "The Upcoming Booking Demand service returned an invalid response."
+                    "Bookings could not be loaded."
                 );
             }
         } else {
@@ -790,7 +643,7 @@ export function useLiveForecasting() {
             setBookingError(
                 bookingResult.reason instanceof Error
                     ? bookingResult.reason.message
-                    : "Unable to load the Upcoming Booking Demand."
+                    : "Bookings could not be loaded."
             );
         }
 
@@ -888,7 +741,7 @@ export function buildBranchForecasts(items: ForecastItem[]) {
 
             return {
                 id: branchId,
-                name: branchItems[0]?.branchName || "Unnamed Branch",
+                name: branchItems[0]?.branchName || "Branch",
                 demand,
                 alerts,
                 highDemandItems,
@@ -897,7 +750,7 @@ export function buildBranchForecasts(items: ForecastItem[]) {
                     topDemandItem &&
                     numberValue(topDemandItem.forecastedDemand) > 0
                         ? topDemandItem.itemName
-                        : "No recent POS demand",
+                        : "No recent sales",
             };
         })
         .sort(
@@ -1070,1751 +923,442 @@ export function buildScopedBookingForecast(
     };
 }
 
+/* -------------------------------------------------------
+ * LABELS
+ * ------------------------------------------------------- */
+
+type Tone = "red" | "amber" | "green" | "purple" | "gray" | "blue";
+
+function stockStatus(item: ForecastItem): { label: string; tone: Tone } {
+    const timeAlert = String(item.timeAlert || "").toUpperCase();
+    const status = String(item.status || "STABLE").toUpperCase();
+    if (timeAlert === "OUT_OF_STOCK") return { label: "Out of stock", tone: "red" };
+    if (timeAlert === "MAY_RUN_OUT_WITHIN_3_DAYS") return { label: "Runs out in 3 days", tone: "red" };
+    if (timeAlert === "MAY_RUN_OUT_WITHIN_7_DAYS") return { label: "Runs out this week", tone: "amber" };
+    if (status === "LOW") return { label: "Low stock", tone: "red" };
+    if (status === "RISK") return { label: "Running low", tone: "amber" };
+    return { label: "OK", tone: "green" };
+}
+
+function demandLevel(level: string | undefined): { label: string; tone: Tone } {
+    const normalized = String(level || "").toUpperCase();
+    if (normalized === "HIGH") return { label: "High", tone: "purple" };
+    if (normalized === "MODERATE") return { label: "Medium", tone: "blue" };
+    if (normalized === "LOW") return { label: "Low", tone: "gray" };
+    return { label: "None", tone: "gray" };
+}
+
+function DemandTrend({ item }: { item: ForecastItem }) {
+    const trend = String(item.growthTrend || "").toUpperCase();
+    if (trend === "NEW_DEMAND") return <Badge tone="green">New</Badge>;
+    if (trend === "NO_ACTIVITY") return <span style={{ color: C.muted }}>–</span>;
+    return <Trend value={item.growthPercent ?? null} />;
+}
+
+function runsOutText(item: ForecastItem) {
+    const days = item.daysUntilStockout;
+    if (days === null || days === undefined || !Number.isFinite(Number(days))) return "–";
+    if (Number(days) <= 0) return "Now";
+    const rounded = Math.max(1, Math.round(Number(days)));
+    return `${rounded} day${rounded === 1 ? "" : "s"}`;
+}
+
+// "13:30" -> "1:30 PM"
+function timeText(value: string) {
+    const match = /^(\d{1,2}):(\d{2})/.exec(String(value || ""));
+    if (!match) return value || "";
+    const hour = Number(match[1]);
+    return `${hour % 12 || 12}:${match[2]} ${hour < 12 ? "AM" : "PM"}`;
+}
+
+function packageText(name: string | null | undefined) {
+    return !name || /custom|unspecified/i.test(name) ? "Custom" : name;
+}
+
+function getMonthSpan(startMonth: string, endMonth: string) {
+    if (!isMonthInputValue(startMonth) || !isMonthInputValue(endMonth)) return 0;
+    const [startYear, startIndex] = startMonth.split("-").map(Number);
+    const [endYear, endIndex] = endMonth.split("-").map(Number);
+    return (endYear - startYear) * 12 + (endIndex - startIndex) + 1;
+}
+
+/* -------------------------------------------------------
+ * PAGE STATES AND SMALL PIECES
+ * ------------------------------------------------------- */
+
 export function ForecastLoadingState() {
     return <ModuleSkeleton variant="forecasting" />;
 }
 
-export function ForecastErrorState({ message }: { message: string }) {
-    return (
-        <div className="rounded-[14px] border border-[#F2C4C4] bg-[#FFF6F6] p-5 text-sm text-[#8E2D2D] shadow-sm">
-            <p className="font-semibold">Unable to load the live demand forecast.</p>
-            <p className="mt-1 leading-6">{message}</p>
-            <p className="mt-2 text-xs text-[#A65A5A]">
-                Use the Refresh button after checking the Forecasting API connection.
-            </p>
-        </div>
-    );
+export function ForecastErrorState({ message, onRetry }: { message: string; onRetry?: () => void }) {
+    return <ErrorBox message={`The forecast could not be loaded. ${message}`} onRetry={onRetry} />;
 }
 
 export function ForecastEmptyState() {
-    return (
-        <div className="rounded-[14px] border border-dashed border-[#D8CBE7] bg-white p-8 text-center shadow-sm">
-            <PackageSearch size={28} className="mx-auto text-[#806A8C]" />
-            <p className="mt-3 text-sm font-semibold text-[#2B174C]">
-                No demand forecast data is available yet.
-            </p>
-            <p className="mt-1 text-sm text-[#7A6A84]">
-                Record completed POS sales and keep product stock records updated to
-                generate a demand forecast.
-            </p>
-        </div>
-    );
+    return <Empty>No forecast yet. It appears once the branch has POS sales and stock records.</Empty>;
 }
 
-export function SummaryCard({
-                                icon,
-                                title,
-                                value,
-                                detail,
-                                tone,
-                            }: {
-    icon: ReactNode;
-    title: string;
-    value: ReactNode;
-    detail: string;
-    tone: "purple" | "gold" | "red" | "green";
+/** Kept for pages that import it: one number with a short label. */
+export function SummaryCard({ title, value, detail }: {
+    icon?: ReactNode; title: string; value: ReactNode; detail: string; tone?: "purple" | "gold" | "red" | "green";
 }) {
-    const toneStyles = {
-        purple: "bg-[#EFE8F8] text-[#4E2C66]",
-        gold: "bg-[#FFF4D8] text-[#A56607]",
-        red: "bg-[#FFF0F0] text-[#C32F2F]",
-        green: "bg-[#EDFBF1] text-[#138342]",
-    };
-
-    return (
-        <div className="min-h-[112px] rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
-            <div
-                className={`flex h-10 w-10 items-center justify-center rounded-xl ${toneStyles[tone]}`}
-            >
-                {icon}
-            </div>
-            <p className="mt-3 text-sm font-semibold text-[#2B174C]">{title}</p>
-            <p className="mt-1 text-[24px] font-bold leading-tight text-[#1A1220]">
-                {value}
-            </p>
-            <p className="mt-1 text-xs text-[#7A6A84]">{detail}</p>
-        </div>
-    );
+    return <Kpi label={title} value={value} sub={detail} />;
 }
 
-export function ForecastTabButton({
-                                      active,
-                                      onClick,
-                                      label,
-                                  }: {
-    active: boolean;
-    onClick: () => void;
-    label: string;
-}) {
+/** Kept for pages that import it. */
+export function ForecastTabButton({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) {
     return (
-        <button
-            type="button"
-            onClick={onClick}
-            className={`h-[42px] rounded-xl px-4 text-sm font-semibold transition ${
-                active
-                    ? "bg-[#2B174C] text-white shadow-sm"
-                    : "border border-[#E6DDF0] bg-white text-[#5F4E75] hover:bg-[#F7F1FF]"
-            }`}
-        >
+        <button type="button" onClick={onClick} aria-pressed={active}
+                style={{ ...buttonStyle(active), height: 38 }}>
             {label}
         </button>
     );
 }
 
-function SignalBadge({
-                         label,
-                         className,
-                     }: {
-    label: string;
-    className: string;
-}) {
+/** Branch name, last update and (for the Owner) the branch picker. */
+function ScopeBar({ title, updated, right }: { title: string; updated: Date | null; right?: ReactNode }) {
     return (
-        <span
-            className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold ${className}`}
-        >
-            {label}
-        </span>
-    );
-}
-
-function ForecastMetric({
-                            label,
-                            value,
-                            accent,
-                        }: {
-    label: string;
-    value: string;
-    accent?: "purple" | "green" | "gold" | "red";
-}) {
-    const accentClass =
-        accent === "green"
-            ? "text-[#138342]"
-            : accent === "gold"
-                ? "text-[#A56607]"
-                : accent === "red"
-                    ? "text-[#C32F2F]"
-                    : accent === "purple"
-                        ? "text-[#4E2C66]"
-                        : "text-[#1A1220]";
-
-    return (
-        <div className="rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] p-3">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.07em] text-[#806A8C]">
-                {label}
-            </p>
-            <p className={`mt-1 text-sm font-bold ${accentClass}`}>{value}</p>
-        </div>
-    );
-}
-
-function ProductDemandCard({
-                               item,
-                               canViewInventory,
-                           }: {
-    item: ForecastItem;
-    canViewInventory: boolean;
-}) {
-    const [isExpanded, setIsExpanded] = useState(false);
-
-    const demandReason =
-        item.demandLevelReason ||
-        "Projected from completed POS sales in the current history window.";
-
-    const seasonalDetail =
-        item.seasonality?.detail ||
-        "Seasonal comparison is not available for this item yet.";
-
-    return (
-        <article className="rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
-            <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                    <h3 className="truncate text-[16px] font-bold text-[#1A1220]">
-                        {item.itemName}
-                    </h3>
-                    <p className="mt-1 truncate text-xs text-[#7A6A84]">
-                        {item.category} · {item.branchName}
-                    </p>
-                </div>
-
-                <SignalBadge
-                    label={demandLevelLabel(item.demandLevel)}
-                    className={demandLevelClass(item.demandLevel)}
-                />
+        <section style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12, border: `1px solid ${C.line}`, borderRadius: 14, background: "#fff", padding: "12px 16px" }}>
+            <div style={{ minWidth: 0 }}>
+                <p style={{ margin: 0, fontSize: 15, fontWeight: 700, color: C.ink }}>{title}</p>
+                <p style={{ margin: "2px 0 0", fontSize: 13, color: C.muted }}>
+                    {updated ? `Updated ${updated.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}` : "Loading…"}
+                </p>
             </div>
-
-            <div className="mt-3 flex flex-wrap gap-2">
-                <SignalBadge
-                    label={growthTrendLabel(item)}
-                    className={growthTrendClass(item)}
-                />
-                <SignalBadge
-                    label={seasonalityLabel(item.seasonality)}
-                    className={seasonalityClass(item.seasonality)}
-                />
-            </div>
-
-            <div className="mt-4 grid grid-cols-2 gap-3">
-                <ForecastMetric
-                    label="30-day demand"
-                    value={`${formatNumber(item.forecastedDemand)} items expected`}
-                    accent="purple"
-                />
-                <ForecastMetric
-                    label="Movement"
-                    value={movementLabel(item.movementClass)}
-                    accent="green"
-                />
-            </div>
-
-            <button
-                type="button"
-                onClick={() => setIsExpanded((expanded) => !expanded)}
-                aria-expanded={isExpanded}
-                className="mt-4 flex h-9 w-full items-center justify-center gap-1.5 rounded-xl border border-[#E6DDF0] bg-[#FCFAFF] text-xs font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF]"
-            >
-                {isExpanded ? "Hide details" : "View calculation details"}
-                <ChevronDown
-                    size={15}
-                    className={`transition-transform ${isExpanded ? "rotate-180" : ""}`}
-                />
-            </button>
-
-            {isExpanded && (
-                <div className="mt-4 space-y-4">
-                    <div className="grid grid-cols-2 gap-3">
-                        <ForecastMetric
-                            label="Recent POS items sold"
-                            value={`${formatNumber(
-                                numberValue(item.recentFourWeekDemand)
-                            )} vs ${formatNumber(
-                                numberValue(item.previousFourWeekDemand)
-                            )} items`}
-                        />
-                        <ForecastMetric
-                            label="Peak selling months"
-                            value={
-                                item.seasonality?.peakMonths?.length
-                                    ? item.seasonality.peakMonths.slice(0, 2).join(", ")
-                                    : "Not enough history"
-                            }
-                        />
-                    </div>
-
-                    <div className="rounded-xl border border-[#E6DDF0] bg-[#FAF7FE] p-3">
-                        <p className="text-[11px] font-semibold uppercase tracking-[0.07em] text-[#806A8C]">
-                            Why this product is in demand
-                        </p>
-                        <p className="mt-1 text-xs leading-5 text-[#5F4E75]">
-                            {demandReason}
-                        </p>
-                        <p className="mt-1 text-xs leading-5 text-[#5F4E75]">
-                            Seasonal signal: {seasonalDetail}
-                        </p>
-                    </div>
-
-                    <div className="rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] p-3">
-                        <div className="flex items-center justify-between gap-3">
-                            <p className="text-xs font-semibold text-[#2B174C]">
-                                Stock planning response
-                            </p>
-                            <SignalBadge
-                                label={stockRiskLabel(item)}
-                                className={stockRiskClass(item)}
-                            />
-                        </div>
-
-                        <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-                            <div>
-                                <p className="text-[#806A8C]">Available now</p>
-                                <p className="mt-1 font-bold text-[#1A1220]">
-                                    {formatNumber(item.availableQuantity)} items
-                                </p>
-                            </div>
-                            <div>
-                                <p className="text-[#806A8C]">Items reserved for bookings</p>
-                                <p className="mt-1 font-bold text-[#1A1220]">
-                                    {bookingAllocationLabel(item)}
-                                </p>
-                            </div>
-                            <div>
-                                <p className="text-[#806A8C]">Stockout estimate</p>
-                                <p className="mt-1 font-bold text-[#1A1220]">
-                                    {stockoutLabel(item)}
-                                </p>
-                            </div>
-                        </div>
-
-                        {numberValue(item.suggestedRestock) > 0 && (
-                            <p className="mt-3 border-t border-[#E6DDF0] pt-3 text-xs text-[#A56607]">
-                                Suggested stock action: add{" "}
-                                <span className="font-bold">
-                                    {formatNumber(item.suggestedRestock)} items
-                                </span>{" "}
-                                to cover the expected demand and safety stock.
-                            </p>
-                        )}
-                    </div>
-
-                    {canViewInventory && (
-                        <a
-                            href="/inventory"
-                            className="inline-flex h-[38px] w-full items-center justify-center gap-1.5 rounded-xl border border-[#E6DDF0] bg-white text-xs font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF]"
-                        >
-                            View inventory
-                            <ChevronRight size={15} />
-                        </a>
-                    )}
-                </div>
-            )}
-        </article>
-    );
-}
-
-function ForecastTableHeader({ children }: { children: ReactNode }) {
-    return (
-        <th className="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
-            {children}
-        </th>
-    );
-}
-
-function ForecastTableCell({
-                               children,
-                               strong = false,
-                           }: {
-    children: ReactNode;
-    strong?: boolean;
-}) {
-    return (
-        <td
-            className={`px-4 py-3 align-top text-sm ${
-                strong ? "font-semibold text-[#1A1220]" : "text-[#5F4E75]"
-            }`}
-        >
-            {children}
-        </td>
-    );
-}
-
-function PanelLoading({ label }: { label: string }) {
-    return (
-        <div className="flex min-h-[200px] items-center justify-center rounded-[14px] border border-[#E6DDF0] bg-white p-6">
-            <div className="flex items-center gap-3 text-sm font-semibold text-[#5F4E75]">
-                <LoaderCircle size={18} className="animate-spin text-[#4E2C66]" />
-                Loading live {label}...
-            </div>
-        </div>
-    );
-}
-
-function PanelError({
-                        title,
-                        message,
-                    }: {
-    title: string;
-    message: string;
-}) {
-    return (
-        <section className="rounded-[14px] border border-[#F2C4C4] bg-[#FFF6F6] p-5">
-            <h2 className="text-[16px] font-bold text-[#8E2D2D]">{title}</h2>
-            <p className="mt-1 text-sm leading-6 text-[#A65A5A]">{message}</p>
+            {right}
         </section>
     );
 }
 
-function InsightValue({
-                          label,
-                          value,
-                          detail,
-                          accent,
-                      }: {
-    label: string;
-    value: string;
-    detail?: string;
-    accent?: "purple" | "green" | "gold" | "red" | "blue";
-}) {
-    const valueClass =
-        accent === "green"
-            ? "text-[#138342]"
-            : accent === "gold"
-                ? "text-[#A56607]"
-                : accent === "red"
-                    ? "text-[#C32F2F]"
-                    : accent === "blue"
-                        ? "text-[#3376B1]"
-                        : accent === "purple"
-                            ? "text-[#4E2C66]"
-                            : "text-[#1A1220]";
-
-    return (
-        <div className="rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] p-3">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.07em] text-[#806A8C]">
-                {label}
-            </p>
-            <p className={`mt-1 text-sm font-bold ${valueClass}`}>{value}</p>
-            {detail && <p className="mt-1 text-xs leading-5 text-[#7A6A84]">{detail}</p>}
-        </div>
-    );
-}
-
-export function ProductDemandSummaryCards({
-                                              data,
-                                              seasonalData,
-                                              seasonalLoading = false,
-                                              canViewInventory = true,
-                                          }: {
+export function ProductDemandSummaryCards({ data, canViewInventory = true }: {
     data: ForecastApiResponse;
     canViewInventory?: boolean;
     seasonalData?: SeasonalApiResponse | null;
     seasonalLoading?: boolean;
 }) {
     const demandItems = getDemandItems(data.items);
-    const highDemandItems = demandItems.filter(
-        (item) => String(item.demandLevel || "").toUpperCase() === "HIGH"
-    ).length;
-    const stockActionCount = getStockActionItems(data.items).length;
-
-    /*
-      Product-level seasonality was intentionally removed from the main
-      inventory forecast to prevent the AWS 503 timeout. Use the already-loaded
-      branch seasonal forecast instead of displaying the hard-coded
-      peakSeasonItems: 0 value from the lightweight inventory response.
-    */
-    const peakDemandMonths =
-        seasonalData?.seasonal?.peakMonths?.length ?? 0;
-
-    const periodDays = data.scope.periodDays || 30;
-    const scopeLabel = data.scope.branchId
-        ? data.items[0]?.branchName || "selected branch"
-        : "all branches";
-
+    const high = demandItems.filter((item) => String(item.demandLevel || "").toUpperCase() === "HIGH").length;
+    const actions = getStockActionItems(data.items).length;
+    const days = data.scope.periodDays || 30;
     return (
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            <SummaryCard
-                icon={<PackageSearch size={18} />}
-                title={`${periodDays}-Day Product Demand`}
-                value={`${formatNumber(data.summary.projectedDemand)} units`}
-                detail={`Total projected product demand for ${scopeLabel} in the next ${periodDays} days.`}
-                tone="purple"
-            />
-            <SummaryCard
-                icon={<TrendingUp size={18} />}
-                title="High-Demand Products"
-                value={`${formatNumber(highDemandItems)} product${
-                    highDemandItems === 1 ? "" : "s"
-                }`}
-                detail={
-                    highDemandItems > 0
-                        ? `See the product forecast table below for details.`
-                        : "No products are currently classified as high demand."
-                }
-                tone="green"
-            />
-            {canViewInventory && <SummaryCard
-                icon={<TriangleAlert size={18} />}
-                title="Stock Planning Actions"
-                value={`${formatNumber(stockActionCount)} action item${
-                    stockActionCount === 1 ? "" : "s"
-                }`}
-                detail="Products needing restock or stock attention after bookings and projected demand."
-                tone="gold"
-            />}
-
+        <div style={grid(150)}>
+            <Kpi label={`Expected sales, next ${days} days`} value={`${formatNumber(Math.round(data.summary.projectedDemand))} units`} sub={`${formatNumber(demandItems.length)} products`} />
+            <Kpi label="High demand" value={`${formatNumber(high)} product${high === 1 ? "" : "s"}`} sub="Selling faster than most" />
+            {canViewInventory && <Kpi label="Need restocking" value={`${formatNumber(actions)} product${actions === 1 ? "" : "s"}`} sub={actions ? "See the list below" : "Stock looks fine"} tone={actions ? "warn" : undefined} />}
         </div>
     );
 }
 
-function InventoryForecastPanel({
-                                    data,
-                                    seasonalData,
-                                    seasonalLoading = false,
-                                    canViewInventory,
-                                    showSummaryCards = true,
-                                }: {
+/* -------------------------------------------------------
+ * PRODUCT DEMAND (NEXT 30 DAYS)
+ * ------------------------------------------------------- */
+
+function InventoryForecastPanel({ data, canViewInventory, branches, onPickBranch }: {
     data: ForecastApiResponse;
-    seasonalData?: SeasonalApiResponse | null;
-    seasonalLoading?: boolean;
     canViewInventory: boolean;
-    showSummaryCards?: boolean;
+    branches?: BranchForecastSummary[];
+    onPickBranch?: (branchId: number) => void;
 }) {
     const demandItems = getDemandItems(data.items);
-    const stockActionItems = getStockActionItems(data.items);
-
-    const periodDays = data.scope.periodDays || 30;
-    const [showAllProducts, setShowAllProducts] = useState(false);
+    const actionItems = getStockActionItems(data.items);
+    const days = data.scope.periodDays || 30;
+    const [query, setQuery] = useState("");
+    const [showAll, setShowAll] = useState(false);
+    const [showAllActions, setShowAllActions] = useState(false);
+    const filtered = useMemo(() => {
+        const q = query.trim().toLowerCase();
+        return q ? demandItems.filter((item) => `${item.itemName} ${item.category}`.toLowerCase().includes(q)) : demandItems;
+    }, [demandItems, query]);
+    const multiBranch = new Set(data.items.map((item) => item.branchId)).size > 1;
+    const maxBranch = Math.max(1, ...(branches || []).map((b) => b.demand));
 
     return (
-        <div className="space-y-4">
-            <div className="rounded-xl border border-[#E6DDF0] bg-[#FBF8FF] px-4 py-3 text-xs leading-5 text-[#5F4E75]">
-                <span className="font-semibold text-[#2B174C]">Forecast horizon: next {periodDays} days.</span>{" "}
-                Quantities are projections based on recorded POS demand, not confirmed future sales.
-                {data.scope.historyWeeks > 0
-                    ? ` Based on up to ${data.scope.historyWeeks} weeks of sales history.`
-                    : " Historical coverage is not specified by the forecast service."}
-                {data.items.length === 0 && " No products were returned for this scope."}
-                {!canViewInventory && " Inventory quantities and replenishment actions are restricted for this role."}
-            </div>
-            {showSummaryCards && (
-                <ProductDemandSummaryCards
-                    data={data}
-                    seasonalData={seasonalData}
-                    seasonalLoading={seasonalLoading}
-                    canViewInventory={canViewInventory}
-                />
+        <div style={stack()}>
+            <ProductDemandSummaryCards data={data} canViewInventory={canViewInventory} />
+
+            {branches && branches.length > 1 && (
+                <Card title="By branch" sub={`Expected units in the next ${days} days. Click a branch to open it.`}>
+                    <ol style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 10 }}>
+                        {branches.map((branch) => (
+                            <li key={branch.id}>
+                                <button type="button" onClick={() => onPickBranch?.(branch.id)} title={`Open ${branch.name}`}
+                                        style={{ all: "unset", display: "block", width: "100%", cursor: "pointer", boxSizing: "border-box" }}>
+                                    <span style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13 }}>
+                                        <span style={{ color: C.ink, fontWeight: 600 }}>{branch.name}
+                                            <span style={{ fontWeight: 400, color: C.muted }}> · {formatNumber(branch.alerts)} to restock · top: {branch.topItem}</span>
+                                        </span>
+                                        <strong style={{ color: C.ink, flexShrink: 0 }}>{formatNumber(Math.round(branch.demand))} units</strong>
+                                    </span>
+                                    <span aria-hidden style={{ display: "block", height: 8, borderRadius: 4, background: C.track, marginTop: 5, overflow: "hidden" }}>
+                                        <span style={{ display: "block", height: "100%", width: `${(branch.demand / maxBranch) * 100}%`, background: C.accent, borderRadius: 4 }} />
+                                    </span>
+                                </button>
+                            </li>
+                        ))}
+                    </ol>
+                </Card>
             )}
 
-            <section className="overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
-                <div className="flex flex-col gap-2 border-b border-[#E6DDF0] px-4 py-3.5 md:flex-row md:items-center md:justify-between">
-                    <div>
-                        <h3 className="text-[16px] font-bold text-[#1A1220]">
-                            Product Demand Forecast
-                        </h3>
-                        <p className="mt-1 text-xs leading-5 text-[#7A6A84]">
-                            Predicted demand by product. Review stock actions in the section below.
-                        </p>
-                    </div>
-                    <span className="w-fit rounded-full border border-[#D8CBE7] bg-[#F7F1FF] px-2.5 py-1 text-xs font-semibold text-[#4E2C66]">
-                        Next {periodDays} days
-                    </span>
-                </div>
+            {canViewInventory && (
+                <Card title="Restock soon" sub="Products that may run out after expected sales and booked items.">
+                    {actionItems.length ? (
+                        <>
+                            <Table minWidth={760} textCols={[1]} head={["Product", "Status", "Available", "Runs out in", `Next ${days} days`, "Suggested order"]}>
+                                {(showAllActions ? actionItems : actionItems.slice(0, 10)).map((item) => {
+                                    const status = stockStatus(item);
+                                    return (
+                                        <Row key={item.id} textCols={[1]} cells={[
+                                            <ItemName key="n" name={item.itemName} detail={`${item.category}${multiBranch ? ` · ${item.branchName}` : ""}`} />,
+                                            <Badge key="s" tone={status.tone}>{status.label}</Badge>,
+                                            <span key="a">{formatNumber(item.availableQuantity)}{numberValue(item.allocatedQuantity) > 0 && <span style={{ display: "block", fontSize: 12, color: C.muted }}>{formatNumber(item.allocatedQuantity)} booked</span>}</span>,
+                                            runsOutText(item),
+                                            formatNumber(Math.round(item.forecastedDemand)),
+                                            numberValue(item.suggestedRestock) > 0 ? <strong key="o" style={{ color: C.down }}>+{formatNumber(Math.ceil(item.suggestedRestock))}</strong> : <span key="o" style={{ color: C.muted }}>–</span>,
+                                        ]} />
+                                    );
+                                })}
+                            </Table>
+                            <ShowMore total={actionItems.length} shown={showAllActions ? actionItems.length : Math.min(10, actionItems.length)} onToggle={() => setShowAllActions((v) => !v)} label="products" />
+                        </>
+                    ) : <Empty>Nothing needs restocking right now.</Empty>}
+                </Card>
+            )}
 
-                {demandItems.length > 0 ? (
-                    <div className="max-h-[420px] overflow-auto">
-                        <table className="w-full min-w-[720px] border-collapse">
-                            <thead className="sticky top-0 z-10 bg-[#FFFCF7]">
-                            <tr className="border-b border-[#E6DDF0]">
-                                <ForecastTableHeader>Product</ForecastTableHeader>
-                                <ForecastTableHeader>Demand Level</ForecastTableHeader>
-                                <ForecastTableHeader>Demand Trend</ForecastTableHeader>
-                                <ForecastTableHeader>{periodDays}-Day Demand</ForecastTableHeader>
-                            </tr>
-                            </thead>
-                            <tbody>
-                            {(showAllProducts ? demandItems : demandItems.slice(0, 30)).map((item) => (
-                                <tr
-                                    key={item.id}
-                                    className="border-b border-[#EEE7F2] last:border-b-0"
-                                >
-                                    <ForecastTableCell strong>
-                                        <p>{item.itemName}</p>
-                                        <p className="mt-1 text-xs font-normal text-[#806A8C]">
-                                            {item.category} · {item.branchName}
-                                        </p>
-                                    </ForecastTableCell>
-                                    <ForecastTableCell>
-                                        <SignalBadge
-                                            label={demandLevelLabel(item.demandLevel)}
-                                            className={demandLevelClass(item.demandLevel)}
-                                        />
-                                    </ForecastTableCell>
-                                    <ForecastTableCell>
-                                        <SignalBadge
-                                            label={growthTrendLabel(item)}
-                                            className={growthTrendClass(item)}
-                                        />
-                                    </ForecastTableCell>
-                                    <ForecastTableCell strong>
-                                        {formatNumber(item.forecastedDemand)} items expected
-                                    </ForecastTableCell>
-                                </tr>
-                            ))}
-                            </tbody>
-                        </table>
-                    </div>
-                ) : (
-                    <div className="p-6 text-center text-sm text-[#7A6A84]">
-                        No completed POS demand is available in the current forecast
-                        window.
-                    </div>
-                )}
-                {demandItems.length > 30 && (
-                    <button type="button" onClick={() => setShowAllProducts((value) => !value)} className="m-3 rounded-lg border border-[#D8CBE7] bg-[#FBF8FF] px-3 py-2 text-xs font-semibold text-[#4E2C66]">
-                        {showAllProducts ? "Show first 30 products" : `View all ${formatNumber(demandItems.length)} products`}
-                    </button>
-                )}
-            </section>
-
-            {canViewInventory && <section className="overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
-                <div className="flex flex-col gap-2 border-b border-[#E6DDF0] px-4 py-3.5 md:flex-row md:items-center md:justify-between">
-                    <div>
-                        <h3 className="text-[16px] font-bold text-[#1A1220]">
-                            Stock planning actions
-                        </h3>
-                        <p className="mt-1 text-xs text-[#7A6A84]">
-                            These are inventory actions after comparing demand with
-                            available stock and confirmed booking allocations. A stock
-                            alert does not mean that an item is automatically high
-                            demand.
-                        </p>
-                    </div>
-                    <span className="w-fit rounded-full border border-[#F4D79A] bg-[#FFF8E8] px-2.5 py-1 text-xs font-semibold text-[#A56607]">
-                        {formatNumber(stockActionItems.length)} action item
-                        {stockActionItems.length === 1 ? "" : "s"}
-                    </span>
-                </div>
-
-                {stockActionItems.length > 0 ? (
-                    <div className="overflow-x-auto">
-                        <table className="w-full min-w-[1040px] border-collapse">
-                            <thead className="bg-[#FFFCF7]">
-                            <tr className="border-b border-[#E6DDF0]">
-                                <ForecastTableHeader>Product</ForecastTableHeader>
-                                <ForecastTableHeader>Stock Risk</ForecastTableHeader>
-                                <ForecastTableHeader>Available After Bookings</ForecastTableHeader>
-                                <ForecastTableHeader>Stockout Estimate</ForecastTableHeader>
-                                <ForecastTableHeader>{periodDays}-Day Demand</ForecastTableHeader>
-                                <ForecastTableHeader>Suggested Stock Action</ForecastTableHeader>
-                            </tr>
-                            </thead>
-                            <tbody>
-                            {stockActionItems.slice(0, 25).map((item) => (
-                                <tr
-                                    key={item.id}
-                                    className="border-b border-[#EEE7F2] last:border-b-0"
-                                >
-                                    <ForecastTableCell strong>
-                                        {item.itemName}
-                                    </ForecastTableCell>
-                                    <ForecastTableCell>
-                                        <SignalBadge
-                                            label={stockRiskLabel(item)}
-                                            className={stockRiskClass(item)}
-                                        />
-                                    </ForecastTableCell>
-                                    <ForecastTableCell>
-                                        {formatNumber(item.availableQuantity)} items
-                                        {numberValue(item.allocatedQuantity) > 0 && (
-                                            <p className="mt-1 text-xs text-[#806A8C]">
-                                                {formatNumber(item.allocatedQuantity)} booked
-                                            </p>
-                                        )}
-                                    </ForecastTableCell>
-                                    <ForecastTableCell>
-                                        {stockoutLabel(item)}
-                                    </ForecastTableCell>
-                                    <ForecastTableCell>
-                                        {formatNumber(item.forecastedDemand)} items expected
-                                    </ForecastTableCell>
-                                    <ForecastTableCell strong>
-                                        {numberValue(item.suggestedRestock) > 0
-                                            ? `Add ${formatNumber(
-                                                item.suggestedRestock
-                                            )} items`
-                                            : "No immediate action"}
-                                    </ForecastTableCell>
-                                </tr>
-                            ))}
-                            </tbody>
-                        </table>
-                    </div>
-                ) : (
-                    <div className="p-6 text-center text-sm text-[#7A6A84]">
-                        No products are currently flagged for a stock planning action.
-                    </div>
-                )}
-            </section>}
-        </div>
-    );
-}
-
-function trendLabel(value: string) {
-    const normalized = String(value || "").replaceAll("_", " ").toLowerCase();
-
-    return normalized
-        ? normalized.replace(/\b\w/g, (letter) => letter.toUpperCase())
-        : "No trend available";
-}
-
-function formatSeasonalMonthYear(value?: string) {
-    const dateKey = String(value || "").slice(0, 10);
-
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
-        return "—";
-    }
-
-    const date = new Date(`${dateKey}T00:00:00.000Z`);
-
-    if (Number.isNaN(date.getTime())) {
-        return dateKey;
-    }
-
-    return new Intl.DateTimeFormat("en-US", {
-        month: "short",
-        year: "numeric",
-    }).format(date);
-}
-
-function getSeasonalSourceYears(
-    monthNumber: number,
-    monthlyHistory: SeasonalMonthHistory[]
-) {
-    const years = Array.from(
-        new Set(
-            monthlyHistory
-                .filter(
-                    (entry) =>
-                        Number(String(entry.monthKey || "").slice(5, 7)) ===
-                        monthNumber
-                )
-                .map((entry) => String(entry.monthKey || "").slice(0, 4))
-                .filter((year) => /^\d{4}$/.test(year))
-        )
-    ).sort();
-
-    return years.length > 0 ? years.join(", ") : "—";
-}
-
-function getSeasonalMonthWithSourceYears(
-    month: SeasonalMonth,
-    monthlyHistory: SeasonalMonthHistory[]
-) {
-    const sourceYears = getSeasonalSourceYears(month.monthNumber, monthlyHistory);
-
-    return sourceYears === "—"
-        ? month.month
-        : `${month.month} (${sourceYears})`;
-}
-
-type SeasonalDisplayRow = SeasonalMonth & {
-    sourceYears: string;
-    changeFromAverage: number | null;
-    changeFromPrevious: number | null;
-};
-
-function formatSeasonalPercentage(value: number | null | undefined) {
-    if (value === null || value === undefined || !Number.isFinite(value)) {
-        return "—";
-    }
-
-    const rounded = Math.round(value);
-    return `${rounded >= 0 ? "+" : ""}${rounded}%`;
-}
-
-function seasonalPercentageDifference(value: number, baseline: number) {
-    if (!Number.isFinite(value) || !Number.isFinite(baseline) || baseline <= 0) {
-        return null;
-    }
-
-    return ((value - baseline) / baseline) * 100;
-}
-
-function getSeasonalDemandLevel(value: number, average: number) {
-    const ratio = average > 0 ? value / average : 0;
-
-    if (ratio >= 2) {
-        return {
-            label: "Very High",
-            className: "border-[#F2C4C4] bg-[#FFF0F0] text-[#C32F2F]",
-        };
-    }
-
-    if (ratio >= 1.5) {
-        return {
-            label: "High",
-            className: "border-[#F7D7A1] bg-[#FFF5E8] text-[#B45A06]",
-        };
-    }
-
-    if (ratio >= 1.15) {
-        return {
-            label: "Moderate",
-            className: "border-[#F4D79A] bg-[#FFF8E8] text-[#A56607]",
-        };
-    }
-
-    if (ratio >= 0.75) {
-        return {
-            label: "Low",
-            className: "border-[#D8E7F7] bg-[#F1F8FF] text-[#3376B1]",
-        };
-    }
-
-    return {
-        label: "Very Low",
-        className: "border-[#D8E7F7] bg-[#F1F8FF] text-[#3376B1]",
-    };
-}
-
-function getSeasonalityStrength(rows: SeasonalDisplayRow[]) {
-    if (rows.length < 3) {
-        return {
-            label: "Not enough data",
-            detail: "More monthly POS history is needed.",
-        };
-    }
-
-    const mean =
-        rows.reduce((total, row) => total + numberValue(row.totalUnits), 0) /
-        rows.length;
-
-    if (mean <= 0) {
-        return {
-            label: "No demand pattern",
-            detail: "No completed POS item sales were found.",
-        };
-    }
-
-    const variance =
-        rows.reduce(
-            (total, row) =>
-                total + Math.pow(numberValue(row.totalUnits) - mean, 2),
-            0
-        ) / rows.length;
-
-    const coefficientOfVariation = Math.sqrt(variance) / mean;
-
-    if (coefficientOfVariation >= 0.65) {
-        return {
-            label: "Strong",
-            detail: "High variation across calendar months.",
-        };
-    }
-
-    if (coefficientOfVariation >= 0.35) {
-        return {
-            label: "Moderate",
-            detail: "Noticeable variation across calendar months.",
-        };
-    }
-
-    return {
-        label: "Steady",
-        detail: "Demand is relatively consistent across months.",
-    };
-}
-
-function SeasonalDemandChart({
-                                 rows,
-                                 average,
-                             }: {
-    rows: SeasonalDisplayRow[];
-    average: number;
-}) {
-    if (rows.length === 0) {
-        return null;
-    }
-
-    /*
-      A taller chart uses the full height of the dashboard card instead of
-      leaving unused space under the plotted monthly demand line.
-    */
-    const width = 900;
-    const height = 360;
-    const left = 50;
-    const right = 24;
-    const top = 18;
-    const bottom = 42;
-    const chartWidth = width - left - right;
-    const chartHeight = height - top - bottom;
-    const maximum = Math.max(
-        average,
-        ...rows.map((row) => numberValue(row.totalUnits)),
-        1
-    );
-    const roundedMaximum = Math.max(25, Math.ceil(maximum / 25) * 25);
-    const safeAverage = Math.max(0, average);
-
-    const points = rows.map((row, index) => {
-        const x =
-            left +
-            (rows.length === 1 ? chartWidth / 2 : (chartWidth / (rows.length - 1)) * index);
-        const y = top + chartHeight - (numberValue(row.totalUnits) / roundedMaximum) * chartHeight;
-
-        return { x, y, row };
-    });
-
-    const linePath = points
-        .map((point, index) => `${index === 0 ? "M" : "L"}${point.x.toFixed(1)} ${point.y.toFixed(1)}`)
-        .join(" ");
-
-    const areaPath = `${linePath} L${points[points.length - 1].x.toFixed(1)} ${(top + chartHeight).toFixed(1)} L${points[0].x.toFixed(1)} ${(top + chartHeight).toFixed(1)} Z`;
-    const averageY = top + chartHeight - (safeAverage / roundedMaximum) * chartHeight;
-    const gridValues = [0, 0.25, 0.5, 0.75, 1];
-
-    return (
-        <div className="overflow-x-auto">
-            <svg
-                viewBox={`0 0 ${width} ${height}`}
-                className="block min-w-[720px] w-full"
-                role="img"
-                aria-label="Monthly completed POS items sold compared with the twelve-month average"
-            >
-                <defs>
-                    <linearGradient id="seasonalDemandArea" x1="0" x2="0" y1="0" y2="1">
-                        <stop offset="0%" stopColor="#6D3DF5" stopOpacity="0.18" />
-                        <stop offset="100%" stopColor="#6D3DF5" stopOpacity="0.01" />
-                    </linearGradient>
-                </defs>
-
-                {gridValues.map((fraction) => {
-                    const y = top + chartHeight - chartHeight * fraction;
-                    const value = Math.round(roundedMaximum * fraction);
-
-                    return (
-                        <g key={fraction}>
-                            <line
-                                x1={left}
-                                x2={width - right}
-                                y1={y}
-                                y2={y}
-                                stroke="#EEE7F2"
-                                strokeWidth="1"
-                            />
-                            <text
-                                x={left - 10}
-                                y={y + 4}
-                                textAnchor="end"
-                                fontSize="11"
-                                fill="#806A8C"
-                            >
-                                {value}
-                            </text>
-                        </g>
-                    );
-                })}
-
-                <line
-                    x1={left}
-                    x2={width - right}
-                    y1={averageY}
-                    y2={averageY}
-                    stroke="#B9A7D8"
-                    strokeDasharray="7 6"
-                    strokeWidth="2"
-                />
-
-                <path d={areaPath} fill="url(#seasonalDemandArea)" />
-                <path
-                    d={linePath}
-                    fill="none"
-                    stroke="#6D3DF5"
-                    strokeWidth="3"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                />
-
-                {points.map((point) => (
-                    <g key={point.row.monthNumber}>
-                        <circle
-                            cx={point.x}
-                            cy={point.y}
-                            r="4.5"
-                            fill="#6D3DF5"
-                            stroke="#FFFFFF"
-                            strokeWidth="2"
-                        />
-                        <text
-                            x={point.x}
-                            y={height - 16}
-                            textAnchor="middle"
-                            fontSize="11"
-                            fill="#5F4E75"
-                            fontWeight="600"
-                        >
-                            {point.row.month.slice(0, 3)}
-                        </text>
-                    </g>
-                ))}
-            </svg>
-        </div>
-    );
-}
-
-function SeasonalBreakdownTable({
-                                    rows,
-                                    average,
-                                }: {
-    rows: SeasonalDisplayRow[];
-    average: number;
-}) {
-    if (rows.length === 0) {
-        return null;
-    }
-
-    const midpoint = Math.ceil(rows.length / 2);
-    const groups = [rows.slice(0, midpoint), rows.slice(midpoint)].filter(
-        (group) => group.length > 0
-    );
-
-    return (
-        <section className="overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm">
-            <div className="border-b border-[#E6DDF0] px-4 py-3.5">
-                <h3 className="text-[16px] font-bold text-[#1A1220]">
-                    Monthly Demand Breakdown
-                </h3>
-                <p className="mt-1 text-xs text-[#7A6A84]">
-                    Historical POS item quantities. "Vs average" compares each month with the selected period's overall monthly mean; the demand-level badges use relative thresholds. The source year is shown below each month.
-                </p>
-            </div>
-
-            <div className="grid divide-y divide-[#E6DDF0] 2xl:grid-cols-2 2xl:divide-x 2xl:divide-y-0">
-                {groups.map((group, groupIndex) => (
-                    <div key={groupIndex} className="min-w-0">
-                        <table className="w-full table-fixed border-collapse">
-                            <colgroup>
-                                <col className="w-[28%]" />
-                                <col className="w-[17%]" />
-                                <col className="w-[16%]" />
-                                <col className="w-[17%]" />
-                                <col className="w-[22%]" />
-                            </colgroup>
-                            <thead className="bg-[#FFFCF7]">
-                            <tr className="border-b border-[#E6DDF0]">
-                                <th className="px-2.5 py-2.5 text-left text-[10px] font-semibold uppercase leading-4 tracking-[0.06em] text-[#806A8C] sm:px-3">
-                                    Month
-                                </th>
-                                <th className="px-2.5 py-2.5 text-left text-[10px] font-semibold uppercase leading-4 tracking-[0.06em] text-[#806A8C] sm:px-3">
-                                    Items sold
-                                </th>
-                                <th className="px-2.5 py-2.5 text-left text-[10px] font-semibold uppercase leading-4 tracking-[0.06em] text-[#806A8C] sm:px-3">
-                                    Vs average
-                                </th>
-                                <th className="px-2.5 py-2.5 text-left text-[10px] font-semibold uppercase leading-4 tracking-[0.06em] text-[#806A8C] sm:px-3">
-                                    Vs prior month
-                                </th>
-                                <th className="px-2.5 py-2.5 text-left text-[10px] font-semibold uppercase leading-4 tracking-[0.06em] text-[#806A8C] sm:px-3">
-                                    Demand level
-                                </th>
-                            </tr>
-                            </thead>
-                            <tbody>
-                            {group.map((row) => {
-                                const demandLevel = getSeasonalDemandLevel(
-                                    numberValue(row.totalUnits),
-                                    average
-                                );
-
+            <Card title={`Expected demand, next ${days} days`} sub={`Based on the last ${formatNumber(data.scope.historyWeeks || 12)} weeks of POS sales. Trend compares the last 4 weeks with the 4 before.`}>
+                <input aria-label="Search products" placeholder="Search products" value={query} onChange={(e) => { setQuery(e.target.value); setShowAll(false); }}
+                       style={{ ...inputStyle, width: "100%", marginBottom: 10 }} />
+                {filtered.length ? (
+                    <>
+                        <Table minWidth={560} textCols={[1]} head={["Product", "Demand", "Trend", "Units"]}>
+                            {(showAll ? filtered : filtered.slice(0, 15)).map((item) => {
+                                const level = demandLevel(item.demandLevel);
                                 return (
-                                    <tr
-                                        key={row.monthNumber}
-                                        className="border-b border-[#EEE7F2] last:border-b-0"
-                                    >
-                                        <td className="px-2.5 py-2.5 align-top text-xs font-semibold text-[#1A1220] sm:px-3 sm:text-sm">
-                                            <p>{row.month}</p>
-                                            <p className="mt-0.5 text-[10px] font-normal text-[#806A8C] sm:text-xs">
-                                                Year: {row.sourceYears}
-                                            </p>
-                                        </td>
-                                        <td className="px-2.5 py-2.5 align-top text-xs font-semibold text-[#1A1220] sm:px-3 sm:text-sm">
-                                            {formatNumber(row.totalUnits)} items
-                                        </td>
-                                        <td className="px-2.5 py-2.5 align-top text-xs sm:px-3 sm:text-sm">
-                                                <span
-                                                    className={
-                                                        (row.changeFromAverage || 0) >= 0
-                                                            ? "font-semibold text-[#138342]"
-                                                            : "font-semibold text-[#806A8C]"
-                                                    }
-                                                >
-                                                    {formatSeasonalPercentage(
-                                                        row.changeFromAverage
-                                                    )}
-                                                </span>
-                                        </td>
-                                        <td className="px-2.5 py-2.5 align-top text-xs sm:px-3 sm:text-sm">
-                                            {row.changeFromPrevious === null ? (
-                                                "—"
-                                            ) : (
-                                                <span
-                                                    className={
-                                                        row.changeFromPrevious >= 0
-                                                            ? "font-semibold text-[#138342]"
-                                                            : "font-semibold text-[#806A8C]"
-                                                    }
-                                                >
-                                                        {formatSeasonalPercentage(
-                                                            row.changeFromPrevious
-                                                        )}
-                                                    </span>
-                                            )}
-                                        </td>
-                                        <td className="px-2.5 py-2.5 align-top sm:px-3">
-                                            <SignalBadge
-                                                label={demandLevel.label}
-                                                className={`${demandLevel.className} whitespace-normal text-center leading-4`}
-                                            />
-                                        </td>
-                                    </tr>
+                                    <Row key={item.id} textCols={[1]} cells={[
+                                        <ItemName key="n" name={item.itemName} detail={`${item.category}${multiBranch ? ` · ${item.branchName}` : ""}`} />,
+                                        <Badge key="d" tone={level.tone}>{level.label}</Badge>,
+                                        <DemandTrend key="t" item={item} />,
+                                        <strong key="u" style={{ color: C.ink }}>{formatNumber(Math.round(item.forecastedDemand))}</strong>,
+                                    ]} />
                                 );
                             })}
-                            </tbody>
-                        </table>
-                    </div>
-                ))}
-            </div>
-        </section>
-    );
-}
-
-function formatMonthInputLabel(value: string) {
-    if (!isMonthInputValue(value)) {
-        return "—";
-    }
-
-    return new Intl.DateTimeFormat("en-US", {
-        month: "short",
-        year: "numeric",
-    }).format(new Date(`${value}-01T00:00:00.000Z`));
-}
-
-function getMonthSpan(startMonth: string, endMonth: string) {
-    if (!isMonthInputValue(startMonth) || !isMonthInputValue(endMonth)) {
-        return 0;
-    }
-
-    const [startYear, startIndex] = startMonth.split("-").map(Number);
-    const [endYear, endIndex] = endMonth.split("-").map(Number);
-
-    return (endYear - startYear) * 12 + (endIndex - startIndex) + 1;
-}
-
-function SeasonalPeriodPicker({
-                                  range,
-                                  onApply,
-                                  loading,
-                              }: {
-    range: SeasonalDateRange;
-    onApply: (range: SeasonalDateRange) => Promise<void>;
-    loading: boolean;
-}) {
-    const [isOpen, setIsOpen] = useState(false);
-    const [draftRange, setDraftRange] = useState<SeasonalDateRange>(range);
-    const [validationError, setValidationError] = useState<string | null>(null);
-    const [applying, setApplying] = useState(false);
-
-    const latestMonth = monthInputValueFromDate(new Date());
-
-    useEffect(() => {
-        setDraftRange(range);
-        setValidationError(null);
-    }, [range.startMonth, range.endMonth]);
-
-    const handlePresetRange = (months: number) => {
-        setDraftRange(getLastMonthsRange(months));
-        setValidationError(null);
-    };
-
-    const handleApply = async () => {
-        const startMonth = String(draftRange.startMonth || "");
-        const endMonth = String(draftRange.endMonth || "");
-
-        if (!isMonthInputValue(startMonth) || !isMonthInputValue(endMonth)) {
-            setValidationError("Choose both a start month and an end month.");
-            return;
-        }
-
-        if (startMonth > endMonth) {
-            setValidationError("The start month must be before the end month.");
-            return;
-        }
-
-        if (endMonth > latestMonth) {
-            setValidationError("The end month cannot be later than the current month.");
-            return;
-        }
-
-        if (getMonthSpan(startMonth, endMonth) > 60) {
-            setValidationError("Choose a range of 60 months or fewer.");
-            return;
-        }
-
-        setApplying(true);
-        setValidationError(null);
-
-        try {
-            await onApply({ startMonth, endMonth });
-            setIsOpen(false);
-        } finally {
-            setApplying(false);
-        }
-    };
-
-    return (
-        <div className="relative shrink-0">
-            <button
-                type="button"
-                onClick={() => setIsOpen((open) => !open)}
-                disabled={loading}
-                aria-haspopup="dialog"
-                aria-expanded={isOpen}
-                className="flex min-w-[230px] items-center justify-between gap-3 rounded-xl border border-[#E6DDF0] bg-white px-3.5 py-2.5 text-left shadow-sm transition hover:border-[#CDB8F5] hover:bg-[#FCFAFF] disabled:cursor-wait disabled:opacity-70"
-            >
-                <span>
-                    <span className="block text-[10px] font-semibold uppercase tracking-[0.08em] text-[#806A8C]">
-                        Sales period
-                    </span>
-                    <span className="mt-0.5 block text-sm font-semibold text-[#2B174C]">
-                        {formatMonthInputLabel(range.startMonth)} –{" "}
-                        {formatMonthInputLabel(range.endMonth)}
-                    </span>
-                </span>
-                <span className="flex items-center gap-1.5 text-[#6D3DF5]">
-                    <CalendarDays size={17} />
-                    <ChevronDown
-                        size={16}
-                        className={isOpen ? "rotate-180 transition-transform" : "transition-transform"}
-                    />
-                </span>
-            </button>
-
-            {isOpen && (
-                <div
-                    role="dialog"
-                    aria-label="Choose seasonal sales period"
-                    className="absolute right-0 z-30 mt-2 w-[350px] max-w-[calc(100vw-3rem)] rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-xl"
-                >
-                    <div className="flex items-start justify-between gap-3">
-                        <div>
-                            <h3 className="text-sm font-bold text-[#1A1220]">
-                                Select sales period
-                            </h3>
-                            <p className="mt-1 text-xs leading-5 text-[#7A6A84]">
-                                Choose the completed POS sales months to analyse.
-                                At least 12 months of recorded sales are needed for
-                                a seasonal pattern.
-                            </p>
-                        </div>
-                        <button
-                            type="button"
-                            onClick={() => setIsOpen(false)}
-                            className="text-xs font-semibold text-[#6D3DF5] hover:text-[#4E2C66]"
-                        >
-                            Close
-                        </button>
-                    </div>
-
-                    <div className="mt-4 grid grid-cols-2 gap-3">
-                        <label className="block">
-                            <span className="mb-1.5 block text-xs font-semibold text-[#5F4E75]">
-                                From month
-                            </span>
-                            <input
-                                type="month"
-                                value={draftRange.startMonth}
-                                max={latestMonth}
-                                onChange={(event) => {
-                                    setDraftRange((current) => ({
-                                        ...current,
-                                        startMonth: event.target.value,
-                                    }));
-                                    setValidationError(null);
-                                }}
-                                className="h-10 w-full rounded-lg border border-[#E6DDF0] bg-white px-2.5 text-sm font-medium text-[#2B174C] outline-none transition focus:border-[#8A67E8] focus:ring-2 focus:ring-[#E8DEFF]"
-                            />
-                        </label>
-
-                        <label className="block">
-                            <span className="mb-1.5 block text-xs font-semibold text-[#5F4E75]">
-                                To month
-                            </span>
-                            <input
-                                type="month"
-                                value={draftRange.endMonth}
-                                max={latestMonth}
-                                onChange={(event) => {
-                                    setDraftRange((current) => ({
-                                        ...current,
-                                        endMonth: event.target.value,
-                                    }));
-                                    setValidationError(null);
-                                }}
-                                className="h-10 w-full rounded-lg border border-[#E6DDF0] bg-white px-2.5 text-sm font-medium text-[#2B174C] outline-none transition focus:border-[#8A67E8] focus:ring-2 focus:ring-[#E8DEFF]"
-                            />
-                        </label>
-                    </div>
-
-                    <div className="mt-3 flex flex-wrap gap-2">
-                        {[12, 24, 36].map((months) => (
-                            <button
-                                key={months}
-                                type="button"
-                                onClick={() => handlePresetRange(months)}
-                                className="rounded-lg border border-[#E6DDF0] bg-[#FCFAFF] px-2.5 py-1.5 text-xs font-semibold text-[#5F4E75] transition hover:border-[#CDB8F5] hover:text-[#4E2C66]"
-                            >
-                                Last {months} months
+                        </Table>
+                        {filtered.length > 15 && (
+                            <button type="button" onClick={() => setShowAll((v) => !v)} style={{ ...buttonStyle(), marginTop: 10 }}>
+                                {showAll ? "Show fewer" : `Show all ${formatNumber(filtered.length)} products`}
                             </button>
-                        ))}
-                    </div>
-
-                    <p className="mt-3 text-xs text-[#806A8C]">
-                        Selected range: {getMonthSpan(
-                        draftRange.startMonth,
-                        draftRange.endMonth
-                    ) || 0} month(s)
-                    </p>
-
-                    {validationError && (
-                        <p className="mt-2 rounded-lg border border-[#F2C4C4] bg-[#FFF0F0] px-3 py-2 text-xs leading-5 text-[#B3261E]">
-                            {validationError}
-                        </p>
-                    )}
-
-                    <div className="mt-4 flex justify-end gap-2">
-                        <button
-                            type="button"
-                            onClick={() => {
-                                setDraftRange(range);
-                                setValidationError(null);
-                            }}
-                            className="h-9 rounded-lg border border-[#E6DDF0] bg-white px-3 text-xs font-semibold text-[#5F4E75] transition hover:bg-[#FCFAFF]"
-                        >
-                            Reset
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => void handleApply()}
-                            disabled={applying || loading}
-                            className="h-9 rounded-lg bg-[#2B174C] px-3.5 text-xs font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:cursor-wait disabled:opacity-70"
-                        >
-                            {applying || loading ? "Updating..." : "Apply period"}
-                        </button>
-                    </div>
-                </div>
-            )}
+                        )}
+                    </>
+                ) : <Empty>{query ? "No matching products." : "No POS sales in the last few weeks."}</Empty>}
+            </Card>
         </div>
     );
 }
 
-function SeasonalPanelHeader({
-                                 range,
-                                 onApplyRange,
-                                 loading,
-                             }: {
-    range: SeasonalDateRange;
-    onApplyRange: (range: SeasonalDateRange) => Promise<void>;
-    loading: boolean;
-}) {
-    return (
-        <div className="flex flex-col gap-4 border-b border-[#E6DDF0] pb-4 xl:flex-row xl:items-start xl:justify-between">
-            <div className="flex items-start gap-3">
-                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F2ECFF] text-[#5C35CC]">
-                    <TrendingUp size={20} />
-                </div>
-                <div>
-                    <h2 className="text-[17px] font-bold text-[#1A1220]">
-                        Seasonal Demand
-                    </h2>
-                    <p className="mt-1 max-w-3xl text-sm leading-6 text-[#7A6A84]">
-                        Prepare for upcoming busy and quiet months using recorded POS demand. Historical patterns below are evidence, not confirmed future predictions.
-                    </p>
-                </div>
-            </div>
+/* -------------------------------------------------------
+ * BUSY AND SLOW MONTHS
+ * ------------------------------------------------------- */
 
-            <details className="relative shrink-0 rounded-xl border border-[#E6DDF0] bg-white px-3 py-2">
-                <summary className="cursor-pointer text-xs font-semibold text-[#5F4E75]">Historical basis · change source period</summary>
-                <p className="mt-2 max-w-xs text-xs leading-5 text-[#806A8C]">This controls past sales records, not how far ahead the system predicts. Prefer complete months and up to 36 months of history.</p>
-                <div className="mt-2"><SeasonalPeriodPicker range={range} onApply={onApplyRange} loading={loading} /></div>
-            </details>
-        </div>
-    );
-}
+const MONTH_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-function SeasonalForecastPanel({
-                                   seasonalData,
-                                   seasonalLoading,
-                                   seasonalError,
-                                   seasonalRange,
-                                   onApplySeasonalRange,
-                               }: {
+function SeasonalForecastPanel({ seasonalData, seasonalLoading, seasonalError, seasonalRange, onApplySeasonalRange, onOpenStockPlan }: {
     seasonalData: SeasonalApiResponse | null;
     seasonalLoading: boolean;
     seasonalError: string | null;
     seasonalRange: SeasonalDateRange;
     onApplySeasonalRange: (range: SeasonalDateRange) => Promise<void>;
+    onOpenStockPlan?: () => void;
 }) {
-    if (seasonalLoading && !seasonalData) {
-        return <PanelLoading label="Seasonal Demand Patterns" />;
-    }
-
-    if (seasonalError && !seasonalData) {
-        return (
-            <PanelError
-                title="Seasonal Demand Patterns could not load"
-                message={seasonalError}
-            />
-        );
-    }
-
-    const seasonal = seasonalData?.seasonal;
-
-    if (!seasonal) {
-        return <ForecastEmptyState />;
-    }
-
-    const seasonalHeader = (
-        <SeasonalPanelHeader
-            range={seasonalRange}
-            onApplyRange={onApplySeasonalRange}
-            loading={seasonalLoading}
-        />
+    const span = getMonthSpan(seasonalRange.startMonth, seasonalRange.endMonth);
+    const preset = [12, 24, 36].includes(span) ? String(span) : "custom";
+    const picker = (
+        <label style={{ display: "grid", gap: 4, fontSize: 12, fontWeight: 600, color: C.text }}>
+            Sales from
+            <select value={preset} disabled={seasonalLoading} style={inputStyle}
+                    onChange={(e) => { if (e.target.value !== "custom") void onApplySeasonalRange(getLastMonthsRange(Number(e.target.value))); }}>
+                <option value="12">Last 12 months</option>
+                <option value="24">Last 2 years</option>
+                <option value="36">Last 3 years</option>
+                {preset === "custom" && <option value="custom">{monthText(seasonalRange.startMonth)} – {monthText(seasonalRange.endMonth)}</option>}
+            </select>
+        </label>
     );
+
+    if (seasonalLoading && !seasonalData) return <Loading label="busy months" />;
+    if (seasonalError && !seasonalData) return <ErrorBox message={seasonalError} onRetry={() => void onApplySeasonalRange(seasonalRange)} />;
+    const seasonal = seasonalData?.seasonal;
+    if (!seasonal) return <ForecastEmptyState />;
 
     if (!seasonal.isReady) {
         return (
-            <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
-                {seasonalHeader}
-
-                <div className="mt-5 rounded-xl border border-[#F4D79A] bg-[#FFF8E8] px-4 py-3">
-                    <h3 className="text-sm font-bold text-[#6E4300]">
-                        Seasonal Demand Patterns need more history
-                    </h3>
-                    <p className="mt-1 text-sm leading-6 text-[#8A5A06]">
-                        {seasonal.message}
-                    </p>
-                </div>
-
-                <div className="mt-5 grid gap-3 sm:grid-cols-3">
-                    <InsightValue
-                        label="POS sales months available"
-                        value={`${formatNumber(
-                            seasonal.historyMonthsAvailable
-                        )} of ${formatNumber(seasonal.minimumHistoryMonths)} months`}
-                    />
-                    <InsightValue
-                        label="Completed POS items sold"
-                        value={`${formatNumber(seasonal.totalUnitsSold)} items sold`}
-                    />
-                    <InsightValue
-                        label="Why it is not ready"
-                        value="Not enough monthly history"
-                        detail="At least 12 distinct months of completed POS sales are needed for branch-level seasonal patterns."
-                    />
-                </div>
-
-                {seasonal.monthlyHistory.length > 0 && (
-                    <div className="mt-5 overflow-x-auto rounded-xl border border-[#E6DDF0]">
-                        <table className="w-full min-w-[620px]">
-                            <thead className="border-b border-[#E6DDF0] bg-[#FFFCF7]">
-                            <tr>
-                                <ForecastTableHeader>Recorded Month</ForecastTableHeader>
-                                <ForecastTableHeader>Items Sold in POS</ForecastTableHeader>
-                                <ForecastTableHeader>Number of POS Orders</ForecastTableHeader>
-                            </tr>
-                            </thead>
-                            <tbody>
-                            {seasonal.monthlyHistory.map((month) => (
-                                <tr
-                                    key={month.monthKey}
-                                    className="border-b border-[#EEE7F2] last:border-b-0"
-                                >
-                                    <ForecastTableCell strong>
-                                        {month.label}
-                                    </ForecastTableCell>
-                                    <ForecastTableCell>
-                                        {formatNumber(month.totalUnits)} items
-                                    </ForecastTableCell>
-                                    <ForecastTableCell>
-                                        {formatNumber(month.orderCount)}
-                                    </ForecastTableCell>
-                                </tr>
-                            ))}
-                            </tbody>
-                        </table>
-                    </div>
-                )}
-
-                <p className="mt-4 text-xs leading-5 text-[#806A8C]">
-                    This branch-wide seasonal view is separate from the product-level
-                    seasonal signals in the Product Demand tab.
-                </p>
-            </section>
+            <Card title="Busy and slow months" action={picker}
+                  sub={`Shows after 12 months of POS sales. This branch has ${formatNumber(seasonal.historyMonthsAvailable)} so far.`}>
+                <Empty>Not enough sales history yet. Try a longer period, or check back later.</Empty>
+            </Card>
         );
     }
 
-    const rows: SeasonalDisplayRow[] = seasonal.seasonalMonths
-        .filter((month) => month.observations > 0)
-        .sort((first, second) => first.monthNumber - second.monthNumber)
-        .map((month, index, allMonths) => {
-            const previous = index > 0 ? numberValue(allMonths[index - 1].totalUnits) : null;
-
-            return {
-                ...month,
-                sourceYears: getSeasonalSourceYears(
-                    month.monthNumber,
-                    seasonal.monthlyHistory
-                ),
-                // Filled after the overall period mean is calculated below.
-                changeFromAverage: null,
-                changeFromPrevious:
-                    previous === null
-                        ? null
-                        : seasonalPercentageDifference(
-                            numberValue(month.totalUnits),
-                            previous
-                        ),
-            };
-        });
-
-    const averageMonthlyItems =
-        rows.length > 0
-            ? rows.reduce((total, row) => total + numberValue(row.totalUnits), 0) /
-            rows.length
-            : 0;
-
-    // Compare every calendar month against the SAME selected-period mean.
-    // Previously this compared each month with its own averageUnits, causing
-    // misleading +0% results when only one observation existed per month.
-    rows.forEach((row) => {
-        row.changeFromAverage = seasonalPercentageDifference(
-            numberValue(row.totalUnits),
-            averageMonthlyItems
-        );
-    });
-
-    const latestMonthKey = new Date().toISOString().slice(0, 7);
-    const includesCurrentPartialMonth = seasonal.monthlyHistory.some(
-        (month) => month.monthKey === latestMonthKey
-    );
-
-    const peakRows = [...rows]
-        .sort((first, second) => second.totalUnits - first.totalUnits)
-        .slice(0, 2);
-    const lowestRows = [...rows]
-        .sort((first, second) => first.totalUnits - second.totalUnits)
-        .slice(0, Math.min(4, rows.length));
-    const seasonality = getSeasonalityStrength(rows);
-    const highestRow = peakRows[0];
-    const highestVsAverage = highestRow
-        ? seasonalPercentageDifference(highestRow.totalUnits, averageMonthlyItems)
-        : null;
-    const oneYearOnly = rows.every((row) => row.observations === 1);
-    const periodLabel = `${formatSeasonalMonthYear(
-        seasonalData?.scope.historyStartDate
-    )} – ${formatSeasonalMonthYear(seasonalData?.scope.historyEndDate)}`;
-    const sourceYears = Array.from(
-        new Set(rows.flatMap((row) => row.sourceYears.split(", ").filter((year) => year && year !== "—")))
-    ).join(", ");
-    const peakNames = peakRows.map((row) => row.month).join(" and ");
-    const lowestNames = lowestRows.map((row) => row.month).join(", ");
-    const recentTrendValue =
-        seasonal.recentTrendPercent === null ||
-        seasonal.recentTrendPercent === undefined
-            ? trendLabel(seasonal.recentTrend)
-            : `${formatSeasonalPercentage(
-                seasonal.recentTrendPercent
-            )} · ${trendLabel(seasonal.recentTrend)}`;
+    const rows = seasonal.seasonalMonths
+        .filter((m) => m.observations > 0)
+        .sort((a, b) => a.monthNumber - b.monthNumber)
+        .map((m) => ({ ...m, average: m.observations > 0 ? numberValue(m.totalUnits) / m.observations : 0 }));
+    const usual = rows.length ? rows.reduce((sum, r) => sum + r.average, 0) / rows.length : 0;
+    const vsUsual = (value: number) => (usual > 0 ? ((value - usual) / usual) * 100 : null);
+    const byAverage = [...rows].sort((a, b) => b.average - a.average);
+    const busiest = byAverage.slice(0, 2);
+    const slowest = byAverage.slice(-2).reverse();
+    const values = MONTH_SHORT.map((_, i) => rows.find((r) => r.monthNumber === i + 1)?.average ?? null);
+    const oneYearOnly = rows.every((r) => r.observations <= 1);
+    const years = (monthNumber: number) => Array.from(new Set(seasonal.monthlyHistory
+        .filter((h) => Number(String(h.monthKey).slice(5, 7)) === monthNumber).map((h) => String(h.monthKey).slice(0, 4)))).sort().join(", ");
+    const period = `${monthText(seasonalData?.scope.historyStartDate || seasonalRange.startMonth)} – ${monthText(seasonalData?.scope.historyEndDate || seasonalRange.endMonth)}`;
 
     return (
-        <section className="rounded-[14px] border border-[#E6DDF0] bg-[#FCFBFE] p-4 shadow-sm sm:p-5">
-            {seasonalHeader}
-
-            {seasonalError && (
-                <div className="mt-3 rounded-xl border border-[#F4D79A] bg-[#FFF8E8] px-3 py-2 text-xs leading-5 text-[#8A5A06]">
-                    The selected period could not be refreshed. Showing the most recently loaded seasonal data. {seasonalError}
-                </div>
-            )}
-
-            <section className="mt-4 rounded-xl border border-[#D9C9F4] bg-[#F7F1FF] p-4">
-                <h3 className="text-sm font-bold text-[#2B174C]">Upcoming monthly demand forecast</h3>
-                <p className="mt-1 text-sm leading-6 text-[#5F4E75]">Not available yet. The current API returns historical POS patterns, not validated predictions for the next 3, 6 or 12 months or product/category seasonal projections. We will add a future-month selector when that calculation is implemented.</p>
-                <p className="mt-2 text-xs text-[#806A8C]">For now, use the recorded peak and low months below as planning clues only, not as next-year forecasts.</p>
-            </section>
-
-            {includesCurrentPartialMonth && (
-                <div className="mt-3 rounded-xl border border-[#F4D79A] bg-[#FFF8E8] px-3 py-2 text-xs leading-5 text-[#8A5A06]">
-                    <span className="font-semibold">Partial-month caution:</span>{" "}
-                    The current calendar month is included in the backend results. Its sales are incomplete,
-                    so low-month rankings, monthly averages, and recent-trend figures may be misleading.
-                    Select a range ending in the previous completed month for a fair comparison.
-                </div>
-            )}
-
-            {seasonalLoading && (
-                <p className="mt-3 text-xs font-medium text-[#6D3DF5]">
-                    Updating the selected sales period...
-                </p>
-            )}
-
-            <details className="mt-4 rounded-xl border border-[#E6DDF0] bg-white p-4">
-                <summary className="cursor-pointer text-sm font-semibold text-[#2B174C]">View historical monthly patterns and planning clues</summary>
-                <div className="mt-4 grid items-stretch gap-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,0.8fr)]">
-                    <section className="flex min-h-[420px] flex-col rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
-                        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                            <div>
-                                <h3 className="text-[16px] font-bold text-[#1A1220]">
-                                    Monthly Demand Pattern
-                                </h3>
-                                <p className="mt-1 text-xs text-[#7A6A84]">
-                                    Completed POS item quantities across {periodLabel}.
-                                </p>
-                            </div>
-                            <div className="flex flex-wrap gap-x-4 gap-y-2 text-[11px] font-medium text-[#6A5976]">
-                            <span className="inline-flex items-center gap-1.5">
-                                <span className="h-0.5 w-5 rounded bg-[#6D3DF5]" />
-                                Items sold per month
-                            </span>
-                                <span className="inline-flex items-center gap-1.5">
-                                <span className="h-0 w-5 border-t-2 border-dashed border-[#B9A7D8]" />
-                                12-month average
-                            </span>
-                            </div>
-                        </div>
-                        <div className="mt-3 flex min-h-0 flex-1 items-end">
-                            <SeasonalDemandChart rows={rows} average={averageMonthlyItems} />
-                        </div>
-                    </section>
-
-                    <section className="flex min-h-[420px] flex-col rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
-                        <h3 className="text-[16px] font-bold text-[#1A1220]">
-                            Seasonal Insights
-                        </h3>
-                        <div className="mt-3 space-y-2.5">
-                            <div className="flex gap-2.5">
-                                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#EDFBF1] text-[#138342]">
-                                    <TrendingUp size={15} />
-                                </div>
-                                <div>
-                                    <p className="text-[13px] font-semibold text-[#2B174C]">Peak Demand Months</p>
-                                    <p className="mt-0.5 text-[11px] leading-4 text-[#5F4E75]">
-                                        {peakNames || "No peak month"} had the highest recorded demand. The highest month was {highestVsAverage === null ? "—" : `${formatSeasonalPercentage(highestVsAverage)} above`} the selected-period average.
-                                    </p>
-                                </div>
-                            </div>
-
-                            <div className="flex gap-2.5">
-                                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#F2ECFF] text-[#5C35CC]">
-                                    <TrendingUp size={15} />
-                                </div>
-                                <div>
-                                    <p className="text-[13px] font-semibold text-[#2B174C]">Recent Demand Change</p>
-                                    <p className="mt-0.5 text-[11px] leading-4 text-[#5F4E75]">
-                                        {recentTrendValue}. This compares recent completed POS item sales with the three months before them.
-                                    </p>
-                                </div>
-                            </div>
-
-                            <div className="flex gap-2.5">
-                                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#F1F8FF] text-[#3376B1]">
-                                    <TriangleAlert size={15} />
-                                </div>
-                                <div>
-                                    <p className="text-[13px] font-semibold text-[#2B174C]">Lower Demand Months</p>
-                                    <p className="mt-0.5 text-[11px] leading-4 text-[#5F4E75]">
-                                        {lowestNames || "No lower-demand month"} had the lowest completed POS item quantities in this sales period.
-                                    </p>
-                                </div>
-                            </div>
-
-                            <div className="flex gap-2.5">
-                                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#FFF4D8] text-[#A56607]">
-                                    <CalendarDays size={15} />
-                                </div>
-                                <div>
-                                    <p className="text-[13px] font-semibold text-[#2B174C]">Planning Recommendation</p>
-                                    <p className="mt-0.5 text-[11px] leading-4 text-[#5F4E75]">
-                                        Review product availability and booking capacity 2–3 weeks before peak months, especially for products with high-demand or low-stock signals.
-                                    </p>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="mt-auto rounded-xl border border-[#E5DCF5] bg-[#F7F1FF] p-2.5">
-                            <p className="text-[10px] font-semibold uppercase tracking-[0.07em] text-[#6D3DF5]">
-                                Key takeaway
-                            </p>
-                            <p className="mt-1 text-xs leading-4 text-[#4D3862]">
-                                This branch shows a {oneYearOnly ? "preliminary " : ""}{seasonality.label.toLowerCase()} seasonal demand pattern. {peakNames || "The highest-demand months"} recorded the most completed POS item sales during {periodLabel}.
-                            </p>
-                        </div>
-                    </section>
-                </div>
-
-            </details>
-            <details className="mt-4 rounded-xl border border-[#E6DDF0] bg-white p-4">
-                <summary className="cursor-pointer text-sm font-semibold text-[#2B174C]">View detailed historical month breakdown</summary>
-                <div className="mt-3"><SeasonalBreakdownTable rows={rows} average={averageMonthlyItems} /></div>
-            </details>
-
-            <div className="mt-4 rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-4 py-3 text-xs leading-5 text-[#5F4E75]">
-                <p className="font-semibold text-[#2B174C]">Data clarity</p>
-                <p className="mt-1">
-                    This view uses completed POS sales only. The sales record years represented in this pattern are {sourceYears || "not available"}. A month&apos;s demand level compares its item quantity with the average month in this selected period.
-                </p>
+        <div style={{ ...stack(), opacity: seasonalLoading ? 0.6 : 1 }}>
+            <Card title="Busy and slow months" sub={`Average units sold in each calendar month, ${period}.`} action={picker}>
+                {seasonalError && <div style={{ marginBottom: 10 }}><ErrorBox message={`Could not update the period. ${seasonalError}`} /></div>}
+                <LineChart ariaLabel="Average units sold per calendar month" labels={MONTH_SHORT}
+                           format={(v) => `${formatNumber(Math.round(v))} units`}
+                           series={[
+                               { name: "Average units", color: SERIES[0], values },
+                               { name: "Usual month", color: "#B9A7D8", values: MONTH_SHORT.map(() => usual), dashed: true },
+                           ]} />
                 {oneYearOnly && (
-                    <p className="mt-1 text-[#806A8C]">
-                        Only one historical record is currently available for each calendar month, so this seasonal pattern is preliminary. It becomes more reliable as additional years of POS sales are collected.
+                    <p style={{ margin: "10px 0 0", fontSize: 13, color: C.text }}>
+                        This uses one year of sales, so one unusual month can change the pattern.{" "}
+                        {span < 36 && <LinkButton onClick={() => void onApplySeasonalRange(getLastMonthsRange(36))}>Use 3 years</LinkButton>}
                     </p>
                 )}
+            </Card>
+
+            <div style={grid(150)}>
+                <Kpi label="Busiest months" value={busiest.map((r) => MONTH_SHORT[r.monthNumber - 1]).join(", ") || "–"}
+                     sub={busiest[0] ? <><Trend value={vsUsual(busiest[0].average)} /> vs a usual month</> : undefined} />
+                <Kpi label="Slowest months" value={slowest.map((r) => MONTH_SHORT[r.monthNumber - 1]).join(", ") || "–"}
+                     sub={slowest[0] ? <><Trend value={vsUsual(slowest[0].average)} /> vs a usual month</> : undefined} />
+                <Kpi label="Last 3 months" value={<Trend value={seasonal.recentTrendPercent ?? null} />} sub="vs the 3 months before" />
             </div>
-        </section>
+
+            {onOpenStockPlan && (
+                <p style={{ margin: 0, fontSize: 13, color: C.text }}>
+                    Ready to plan? <LinkButton onClick={onOpenStockPlan}>See what to stock for the next 3 months</LinkButton>
+                </p>
+            )}
+
+            <details style={{ border: `1px solid ${C.line}`, borderRadius: 14, background: "#fff", padding: "12px 16px" }}>
+                <summary style={{ cursor: "pointer", fontSize: 14, fontWeight: 700, color: C.ink }}>Month by month</summary>
+                <div style={{ marginTop: 10 }}>
+                    <Table minWidth={480} head={["Month", "Average units", "vs usual", "Years"]}>
+                        {rows.map((r) => (
+                            <Row key={r.monthNumber} cells={[
+                                <strong key="m" style={{ color: C.ink }}>{r.month}</strong>,
+                                formatNumber(Math.round(r.average)),
+                                <Trend key="v" value={vsUsual(r.average)} />,
+                                <span key="y" style={{ color: C.muted }}>{years(r.monthNumber) || "–"}</span>,
+                            ]} />
+                        ))}
+                    </Table>
+                </div>
+            </details>
+        </div>
     );
 }
 
-function BookingDemandPanel({
-                                bookingData, bookingLoading, bookingError,
-                            }: {
+/* -------------------------------------------------------
+ * UPCOMING BOOKINGS
+ * ------------------------------------------------------- */
+
+function BookingDemandPanel({ bookingData, bookingLoading, bookingError, onOpenStockPlan }: {
     bookingData?: BookingApiResponse | null;
     bookingLoading?: boolean;
     bookingError?: string | null;
+    onOpenStockPlan?: () => void;
 }) {
-    if (bookingLoading && !bookingData) return <PanelLoading label="Rental and booking demand" />;
-    if (bookingError && !bookingData) return <PanelError title="Booking data unavailable" message={bookingError} />;
+    const [showAll, setShowAll] = useState(false);
+    if (bookingLoading && !bookingData) return <Loading label="bookings" />;
+    if (bookingError && !bookingData) return <ErrorBox message={bookingError} />;
     const booking = bookingData?.booking;
-    if (!booking) return <p className="rounded-xl border border-[#E6DDF0] p-5 text-sm text-[#6B5B78]">Booking demand information is not available for this scope.</p>;
-    const packages = booking.topPackages ?? [];
-    const allocations = booking.allocationSummary;
+    if (!booking) return <Empty>No booking information for this branch.</Empty>;
+    const upcoming = [...booking.upcomingBookings].sort((a, b) => `${a.eventDate} ${a.eventTime}`.localeCompare(`${b.eventDate} ${b.eventTime}`));
+    const multiBranch = new Set(upcoming.map((b) => b.branchId)).size > 1;
+    const unassigned = booking.allocationSummary?.bookingsWithoutAllocation || 0;
+    const maxPackage = Math.max(1, ...booking.topPackages.map((p) => p.bookings));
     return (
-        <div className="space-y-4">
-            <div className="rounded-xl border border-[#E6DDF0] bg-[#FBF8FF] px-4 py-3 text-xs leading-5 text-[#5F4E75]">
-                <strong className="text-[#2B174C]">Recorded bookings · next {booking.periodDays} days.</strong>{" "}
-                These counts describe bookings already recorded, not a statistical prediction of new bookings. Individual rental demand and capacity forecasts require item-level rental schedules and availability data.
+        <div style={stack()}>
+            <div style={grid(150)}>
+                <Kpi label={`Bookings, next ${booking.periodDays} days`} value={formatNumber(booking.expectedBookings)} />
+                <Kpi label="Confirmed" value={formatNumber(booking.confirmedBookings)} />
+                <Kpi label="Being prepared" value={formatNumber(booking.preparingBookings)} />
+                <Kpi label="Busiest date" value={booking.peakBookingDate ? booking.peakBookingDate.label : "–"}
+                     sub={booking.peakBookingDate ? `${formatNumber(booking.peakBookingDate.bookings)} booking${booking.peakBookingDate.bookings === 1 ? "" : "s"}` : undefined} />
             </div>
-            <div className="grid gap-3 sm:grid-cols-3">
-                <InsightValue label="Upcoming bookings" value={formatNumber(booking.expectedBookings)} detail="Existing bookings in the selected period" />
-                <InsightValue label="Confirmed" value={formatNumber(booking.confirmedBookings)} detail="Confirmed bookings" />
-                <InsightValue label="Preparing" value={formatNumber(booking.preparingBookings)} detail="Bookings in preparation" />
-            </div>
-            <section className="rounded-xl border border-[#E6DDF0] bg-white p-4">
-                <h3 className="text-sm font-bold text-[#2B174C]">Recorded package bookings</h3>
-                {packages.length ? (
-                    <div className="mt-3 divide-y divide-[#EEE7F2]">
-                        {packages.slice(0, 10).map((pkg) => (
-                            <div key={pkg.packageName} className="flex items-center justify-between gap-3 py-2 text-sm">
-                                <span className="text-[#4D3862]">{pkg.packageName}</span>
-                                <strong className="text-[#2B174C]">{formatNumber(pkg.bookings)} bookings</strong>
-                            </div>
+
+            {unassigned > 0 && (
+                <div role="status" style={{ border: "1px solid #F4D79A", background: "#FFF8E8", borderRadius: 12, padding: "10px 14px", fontSize: 13, color: "#8A5A06" }}>
+                    {formatNumber(unassigned)} upcoming booking{unassigned === 1 ? " has" : "s have"} no items assigned yet. Check them in Bookings.
+                </div>
+            )}
+
+            <Card title="Next bookings">
+                {upcoming.length ? (
+                    <>
+                        <Table minWidth={560} textCols={[1, 2, 3]} head={["Date", "Customer", "Package", "Status"]}>
+                            {(showAll ? upcoming : upcoming.slice(0, 8)).map((b) => (
+                                <Row key={b.id} textCols={[1, 2, 3]} cells={[
+                                    <ItemName key="d" name={b.eventDateLabel || b.eventDate} detail={[timeText(b.eventTime), multiBranch ? b.branchName : ""].filter(Boolean).join(" · ") || undefined} />,
+                                    b.customerName || "–",
+                                    packageText(b.packageName),
+                                    <Badge key="s" tone={String(b.status).toLowerCase() === "preparing" ? "amber" : "green"}>{String(b.status || "").replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase())}</Badge>,
+                                ]} />
+                            ))}
+                        </Table>
+                        {upcoming.length > 8 && (
+                            <button type="button" onClick={() => setShowAll((v) => !v)} style={{ ...buttonStyle(), marginTop: 10 }}>
+                                {showAll ? "Show fewer" : `Show all ${formatNumber(upcoming.length)} bookings`}
+                            </button>
+                        )}
+                    </>
+                ) : <Empty>No bookings in the next {booking.periodDays} days.</Empty>}
+            </Card>
+
+            <Card title="Packages booked">
+                {booking.topPackages.length ? (
+                    <ol style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 10 }}>
+                        {booking.topPackages.slice(0, 8).map((p) => (
+                            <li key={p.packageName}>
+                                <span style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13 }}>
+                                    <span style={{ color: C.text }}>{packageText(p.packageName)}</span>
+                                    <strong style={{ color: C.ink }}>{formatNumber(p.bookings)}</strong>
+                                </span>
+                                <span aria-hidden style={{ display: "block", height: 8, borderRadius: 4, background: C.track, marginTop: 5, overflow: "hidden" }}>
+                                    <span style={{ display: "block", height: "100%", width: `${(p.bookings / maxPackage) * 100}%`, background: SERIES[3], borderRadius: 4 }} />
+                                </span>
+                            </li>
                         ))}
-                    </div>
-                ) : <p className="mt-2 text-sm text-[#7A6A84]">No package booking breakdown is available.</p>}
-            </section>
-            <section className="rounded-xl border border-[#E6DDF0] bg-white p-4">
-                <h3 className="text-sm font-bold text-[#2B174C]">Individual rentals & capacity readiness</h3>
-                <p className="mt-2 text-sm leading-6 text-[#6B5B78]">
-                    {allocations && bookingData?.scope.branchId === null ? `${formatNumber(allocations.allocatedUnits)} item units are linked to bookings across branches. ` : ""}
-                    Individual rental demand, date-overlap availability, and capacity shortages cannot be calculated reliably from this response. No shortage is assumed.
+                    </ol>
+                ) : <Empty>No package bookings coming up.</Empty>}
+            </Card>
+
+            {onOpenStockPlan && (
+                <p style={{ margin: 0, fontSize: 13, color: C.text }}>
+                    Need to know if there are enough rental items? <LinkButton onClick={onOpenStockPlan}>Check the stock plan</LinkButton>
                 </p>
-                {allocations?.bookingsWithoutAllocation > 0 && (
-                    <p className="mt-2 text-xs text-[#A56607]">{formatNumber(allocations.bookingsWithoutAllocation)} bookings have no linked item allocation; verify requirements before confirming availability.</p>
-                )}
-            </section>
+            )}
         </div>
     );
 }
 
-function ForecastAccuracyPanel({ data }: { data: ForecastApiResponse }) {
-    return (
-        <div className="space-y-4">
-            <section className="rounded-xl border border-[#E6DDF0] bg-[#FBF8FF] p-4">
-                <h3 className="text-sm font-bold text-[#2B174C]">Forecast method and evaluation</h3>
-                <p className="mt-2 text-sm leading-6 text-[#6B5B78]">The current service provides projected demand based on up to {formatNumber(data.scope.historyWeeks)} weeks of recorded sales. The exact model configuration and its validation must be verified in the backend before being presented as a confirmed mathematical method.</p>
-            </section>
-            <div className="grid gap-3 sm:grid-cols-2">
-                <InsightValue label="MAE" value="Not available" detail="Requires historical out-of-sample predictions and actual results" />
-                <InsightValue label="RMSE" value="Not available" detail="Requires historical out-of-sample predictions and actual results" />
-            </div>
-            <section className="rounded-xl border border-[#E6DDF0] bg-white p-4">
-                <h3 className="text-sm font-bold text-[#2B174C]">Actual vs. predicted demand</h3>
-                <p className="mt-2 text-sm leading-6 text-[#6B5B78]">A comparison chart will appear after time-aligned historical predictions and actual sales are available. Current live projections cannot be used as evidence of forecast accuracy.</p>
-                <details className="mt-3 rounded-lg bg-[#FBF8FF] p-3 text-sm text-[#5F4E75]">
-                    <summary className="cursor-pointer font-semibold text-[#2B174C]">View error computations</summary>
-                    <p className="mt-2">MAE = average of absolute differences between actual and predicted demand.</p>
-                    <p className="mt-1">RMSE = square root of the average squared prediction errors.</p>
-                    <p className="mt-1">Both require historical backtesting, with predictions generated without using future observations.</p>
-                </details>
-            </section>
-        </div>
-    );
-}
+/* -------------------------------------------------------
+ * TABS
+ * ------------------------------------------------------- */
+
+const TAB_LABELS: Record<ForecastTab, string> = {
+    plan: "Stock plan",
+    inventory: "Product demand",
+    seasonal: "Busy months",
+    events: "Events",
+    booking: "Bookings",
+    accuracy: "Accuracy",
+};
 
 export function ForecastDetails({
                                     data,
@@ -2828,10 +1372,11 @@ export function ForecastDetails({
                                     bookingError,
                                     activeTab,
                                     onTabChange,
-                                    title,
-                                    subtitle,
                                     canViewInventory,
-                                    showProductSummaryCards = true,
+                                    scopeBranchId = null,
+                                    branches,
+                                    onPickBranch,
+                                    showAccuracy = true,
                                 }: {
     data: ForecastApiResponse;
     seasonalData: SeasonalApiResponse | null;
@@ -2844,70 +1389,42 @@ export function ForecastDetails({
     bookingError?: string | null;
     activeTab: ForecastTab;
     onTabChange: (tab: ForecastTab) => void;
-    title: string;
-    subtitle: string;
-    canViewInventory: boolean;
-    /** Set false when the owner page already shows these KPI cards above the details panel. */
+    /** Not shown any more; kept so existing pages still compile. */
+    title?: string;
+    subtitle?: string;
     showProductSummaryCards?: boolean;
+    canViewInventory: boolean;
+    /** The Owner's selected branch (null = all branches). Managers and Staff always see their own branch. */
+    scopeBranchId?: number | null;
+    /** Owner, all branches: branch comparison on the Product demand tab. */
+    branches?: BranchForecastSummary[];
+    onPickBranch?: (branchId: number) => void;
+    showAccuracy?: boolean;
 }) {
+    const order: ForecastTab[] = ["plan", "inventory", "seasonal", "events", "booking", ...(showAccuracy ? ["accuracy" as const] : [])];
+    const tab = order.includes(activeTab) ? activeTab : order[0];
+    const openPlan = () => onTabChange("plan");
     return (
-        <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
-            <div className="flex flex-col gap-3 border-b border-[#E6DDF0] pb-4 lg:flex-row lg:items-center lg:justify-between">
-                <div>
-                    <h2 className="text-[16px] font-bold text-[#1A1220]">
-                        {title}
-                    </h2>
-                    <p className="mt-1 text-xs text-[#7A6A84]">{subtitle}</p>
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                    <ForecastTabButton
-                        active={activeTab === "inventory"}
-                        onClick={() => onTabChange("inventory")}
-                        label="Product & Inventory"
-                    />
-                    <ForecastTabButton
-                        active={activeTab === "seasonal"}
-                        onClick={() => onTabChange("seasonal")}
-                        label="Seasonal Demand"
-                    />
-                    <ForecastTabButton active={activeTab === "booking"} onClick={() => onTabChange("booking")} label="Rental & Booking" />
-
-                </div>
+        <div>
+            <Tabs label="Forecast sections" idPrefix="forecast" value={tab} onChange={onTabChange} tabs={order.map((id) => ({ id, label: TAB_LABELS[id] }))} />
+            <div id="forecast-panel" role="tabpanel" aria-labelledby={`forecast-tab-${tab}`} style={{ paddingTop: 16 }}>
+                {tab === "plan" && <StockPlanPanel branchId={scopeBranchId} />}
+                {tab === "inventory" && <InventoryForecastPanel data={data} canViewInventory={canViewInventory} branches={branches} onPickBranch={onPickBranch} />}
+                {tab === "seasonal" && (
+                    <SeasonalForecastPanel seasonalData={seasonalData} seasonalLoading={seasonalLoading} seasonalError={seasonalError}
+                                           seasonalRange={seasonalRange} onApplySeasonalRange={applySeasonalRange} onOpenStockPlan={openPlan} />
+                )}
+                {tab === "events" && <EventsPanel branchId={scopeBranchId} canViewInventory={canViewInventory} onOpenStockPlan={openPlan} />}
+                {tab === "booking" && <BookingDemandPanel bookingData={bookingData} bookingLoading={bookingLoading} bookingError={bookingError} onOpenStockPlan={openPlan} />}
+                {tab === "accuracy" && <AccuracyPanel branchId={scopeBranchId} />}
             </div>
-
-            <div className="mt-4">
-                {activeTab === "inventory" && (
-                    <InventoryForecastPanel
-                        data={data}
-                        seasonalData={seasonalData}
-                        seasonalLoading={seasonalLoading}
-                        canViewInventory={canViewInventory}
-                        showSummaryCards={showProductSummaryCards}
-                    />
-                )}
-
-                {activeTab === "seasonal" && (
-                    <SeasonalForecastPanel
-                        seasonalData={seasonalData}
-                        seasonalLoading={seasonalLoading}
-                        seasonalError={seasonalError}
-                        seasonalRange={seasonalRange}
-                        onApplySeasonalRange={applySeasonalRange}
-                    />
-                )}
-                {activeTab === "booking" && (
-                    <BookingDemandPanel bookingData={bookingData} bookingLoading={bookingLoading} bookingError={bookingError} />
-                )}
-                <details className="mt-5 rounded-xl border border-[#E6DDF0] bg-[#FCFBFE] p-4">
-                    <summary className="cursor-pointer text-xs font-semibold text-[#5F4E75]">How forecasts are calculated and evaluated (technical reference)</summary>
-                    <div className="mt-3"><ForecastAccuracyPanel data={data} /></div>
-                </details>
-
-            </div>
-        </section>
+        </div>
     );
 }
+
+/* -------------------------------------------------------
+ * MANAGER AND STAFF PAGE
+ * ------------------------------------------------------- */
 
 export function BranchForecastWorkspace({
                                             data,
@@ -2922,67 +1439,27 @@ export function BranchForecastWorkspace({
                                             bookingData,
                                             bookingLoading,
                                             bookingError,
-                                            title,
-                                            description,
+                                            refresh,
                                             canViewInventory,
                                         }: LiveForecastProps & {
-    title: string;
-    description: string;
+    /** Not shown any more; kept so existing pages still compile. */
+    title?: string;
+    description?: string;
     canViewInventory: boolean;
 }) {
-    const [activeTab, setActiveTab] = useState<ForecastTab>("inventory");
+    // Managers start on the stock plan; Staff (no stock figures) start on product demand.
+    const [activeTab, setActiveTab] = useState<ForecastTab>(canViewInventory ? "plan" : "inventory");
 
-    if (loading && !data) {
-        return <ForecastLoadingState />;
-    }
+    if (loading && !data) return <ForecastLoadingState />;
+    if (error && !data) return <ForecastErrorState message={error} onRetry={() => void refresh()} />;
+    if (!data) return <ForecastEmptyState />;
 
-    if (error && !data) {
-        return <ForecastErrorState message={error} />;
-    }
-
-    if (!data) {
-        return <ForecastEmptyState />;
-    }
-
-    const branchName = data.items[0]?.branchName || "Assigned Branch";
+    const branchName = data.items[0]?.branchName || "Your branch";
 
     return (
-        <div className="space-y-4">
-            {error && (
-                <div className="rounded-xl border border-[#F4D79A] bg-[#FFF8E8] px-4 py-3 text-sm text-[#8A5A06]">
-                    Showing the most recently loaded forecast. Refresh again to retry
-                    the latest request.
-                </div>
-            )}
-
-            <section className="rounded-[14px] border border-[#E6DDF0] bg-white p-4 shadow-sm">
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                    <div className="flex min-w-0 items-start gap-3">
-                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#EFE8F8] text-[#4E2C66]">
-                            <TrendingUp size={18} />
-                        </div>
-
-                        <div>
-                            <h2 className="text-[16px] font-bold text-[#1A1220]">
-                                {title}
-                            </h2>
-                            <p className="mt-0.5 text-xs leading-5 text-[#7A6A84]">
-                                {description}
-                            </p>
-                        </div>
-                    </div>
-
-                    <p className="text-xs text-[#806A8C]">
-                        Last updated:{" "}
-                        <span className="font-semibold text-[#4E2C66]">
-                            {lastUpdated
-                                ? formatCurrentDateTime(lastUpdated)
-                                : "Loading..."}
-                        </span>
-                    </p>
-                </div>
-            </section>
-
+        <div style={stack()}>
+            {error && <ErrorBox message="Showing the last forecast that loaded. The latest update failed." onRetry={() => void refresh()} />}
+            <ScopeBar title={branchName} updated={lastUpdated} />
             <ForecastDetails
                 data={data}
                 seasonalData={seasonalData}
@@ -2995,105 +1472,38 @@ export function BranchForecastWorkspace({
                 bookingError={bookingError}
                 activeTab={activeTab}
                 onTabChange={setActiveTab}
-                title={`${branchName} Demand Forecast Details`}
-                subtitle={`Uses ${data.scope.historyWeeks} weeks of completed POS sales. Seasonal demand uses live backend records.`}
                 canViewInventory={canViewInventory}
+                showAccuracy={canViewInventory}
             />
         </div>
     );
 }
 
-export function BranchForecastSelector({
-                                           branches,
-                                           selectedBranchId,
-                                           onSelectBranch,
-                                       }: {
+/** Owner branch picker: "All branches" or one branch. */
+export function OwnerBranchPicker({ branches, selectedBranchId, onSelectBranch }: {
+    branches: Array<{ id: number; name: string }>;
+    selectedBranchId: number | null;
+    onSelectBranch: (branchId: number | null) => void;
+}) {
+    return (
+        <label style={{ display: "grid", gap: 4, fontSize: 12, fontWeight: 600, color: C.text }}>
+            Branch
+            <select value={selectedBranchId ?? ""} style={{ ...inputStyle, minWidth: 200 }}
+                    onChange={(e) => onSelectBranch(e.target.value ? Number(e.target.value) : null)}>
+                <option value="">All branches</option>
+                {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+            </select>
+        </label>
+    );
+}
+
+/** Kept for pages that import it. */
+export function BranchForecastSelector({ branches, selectedBranchId, onSelectBranch }: {
     branches: BranchForecastSummary[];
     selectedBranchId: number | null;
     onSelectBranch: (branchId: number) => void;
 }) {
-    const [query, setQuery] = useState("");
-    const [isOpen, setIsOpen] = useState(false);
-
-    const selectedBranch = branches.find(
-        (branch) => branch.id === selectedBranchId
-    );
-
-    const filteredBranches = useMemo(
-        () =>
-            branches.filter((branch) =>
-                branch.name.toLowerCase().includes(query.trim().toLowerCase())
-            ),
-        [branches, query]
-    );
-
-    return (
-        <div className="relative w-full lg:w-[320px]">
-            <div className="relative">
-                <input
-                    value={isOpen ? query : selectedBranch?.name || ""}
-                    onFocus={() => {
-                        setIsOpen(true);
-                        setQuery("");
-                    }}
-                    onBlur={() => {
-                        window.setTimeout(() => setIsOpen(false), 150);
-                    }}
-                    onChange={(event) => {
-                        setQuery(event.target.value);
-                        setIsOpen(true);
-                    }}
-                    placeholder="Search or select branch"
-                    aria-label="Search or select branch demand forecast"
-                    className="h-[42px] w-full rounded-xl border border-[#E6DDF0] bg-white px-4 pr-10 text-sm font-medium text-[#1A1220] outline-none transition placeholder:text-[#9B8AAA] focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
-                />
-
-                <button
-                    type="button"
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => {
-                        setIsOpen((value) => !value);
-                        setQuery("");
-                    }}
-                    className="absolute right-1 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-[#806A8C] hover:bg-[#F7F1FF]"
-                    aria-label="Toggle branch list"
-                >
-                    <ChevronDown
-                        size={16}
-                        className={isOpen ? "rotate-180 transition-transform" : "transition-transform"}
-                    />
-                </button>
-            </div>
-
-            {isOpen && (
-                <div className="absolute z-30 mt-2 max-h-64 w-full overflow-y-auto rounded-xl border border-[#E6DDF0] bg-white p-1.5 shadow-lg">
-                    {filteredBranches.length > 0 ? (
-                        filteredBranches.map((branch) => (
-                            <button
-                                key={branch.id}
-                                type="button"
-                                onMouseDown={(event) => event.preventDefault()}
-                                onClick={() => {
-                                    onSelectBranch(branch.id);
-                                    setIsOpen(false);
-                                    setQuery("");
-                                }}
-                                className={`w-full rounded-lg px-3 py-2.5 text-left text-sm transition ${
-                                    branch.id === selectedBranchId
-                                        ? "bg-[#F2EBFB] font-semibold text-[#2B174C]"
-                                        : "text-[#5F4E75] hover:bg-[#F7F1FF]"
-                                }`}
-                            >
-                                {branch.name}
-                            </button>
-                        ))
-                    ) : (
-                        <p className="px-3 py-2.5 text-sm text-[#806A8C]">
-                            No matching branch.
-                        </p>
-                    )}
-                </div>
-            )}
-        </div>
-    );
+    return <OwnerBranchPicker branches={branches} selectedBranchId={selectedBranchId} onSelectBranch={(id) => { if (id !== null) onSelectBranch(id); }} />;
 }
+
+export { ScopeBar };

@@ -6540,6 +6540,62 @@ function formatAuditActionDetails(log: Pick<AuditLogRow, "action" | "details" | 
     let text = clean(decoded);
     if (!text) return Array.isArray(decoded) ? "Additional details recorded." : "";
     if (/^[{\[]/.test(text)) return "Additional details recorded.";
+    // Normalize older rental audit text into the same short, one-line style
+    // as consumable inventory. This is display-only; saved audit history is unchanged.
+    const rentalActions = new Set([
+        "added rental equipment", "imported rental equipment", "updated rental equipment",
+        "corrected rental stock count", "restocked rental equipment", "started rental maintenance",
+        "approved rental repair", "approved repair completion", "resolved missing rental equipment",
+        "wrote off missing rental units", "confirmed recovered rental units", "deleted rental equipment",
+        "added rental category", "renamed rental category", "deleted rental category",
+        "prepared rental equipment", "released rental equipment", "received rental equipment return",
+        "inspected returned rental equipment", "cleaned rental equipment", "released rental booking equipment",
+        "received rental booking return", "received rental return", "received rental equipment purchase",
+        "reported rental equipment issue", "reported missing rental equipment", "reported rental routine care",
+        "reported damaged rental equipment", "reported damaged equipment",
+        "completed routine rental maintenance", "submitted rental repair completion",
+        "marked repaired rental equipment ready", "marked repaired equipment ready",
+        "recovered missing rental equipment", "replaced missing rental equipment",
+    ]);
+    if (rentalActions.has(action)) {
+        // New Lambda records are already formatted as "Product: detail".
+        if (/^[^;]+:\s*(?:\+?\d+\s+units?\b|rental rate\b|stock\s+\d+\s*→|details updated\b|added\b|\d+\s+unit)/i.test(text)) return text;
+        const parts = text.split(/;\s*/).map(part => part.trim()).filter(Boolean);
+        const name = parts.shift() || "";
+        if (!parts.length) return name;
+        const simple: string[] = [];
+        const quantity = /^(\d+) unit\(s\)$/i.exec(parts[0] || "");
+        if (quantity) {
+            const prefix = /^restocked|^imported|^received rental equipment purchase|^added rental equipment/i.test(action) ? "+" : "";
+            simple.push(`${prefix}${quantity[1]} ${quantity[1] === "1" ? "unit" : "units"}`);
+            parts.shift();
+        }
+        const stockIn = /^initially received (\d+) unit\(s\)$/i.exec(parts[0] || "");
+        if (stockIn) { simple.push(`+${stockIn[1]} ${stockIn[1] === "1" ? "unit" : "units"}`); parts.shift(); }
+        for (const part of parts) {
+            const rate = /^rental rate:\s*PHP\s*([\d,.]+)\s*->\s*PHP\s*([\d,.]+)/i.exec(part);
+            const stock = /^verified stock:\s*(\d+)\s*->\s*(\d+)/i.exec(part);
+            const removed = /^(\d+) unit\(s\) removed from active stock/i.exec(part);
+            const reconciled = /^(\d+) unit\(s\) reconciled/i.exec(part);
+            const approved = /^(\d+) (?:unit\(s\) approved for repair|repaired unit\(s\) accepted)/i.exec(part);
+            const changedName = /^name:\s*(.+?)\s*->\s*(.+)$/i.exec(part);
+            if (rate) simple.push(`rental rate ₱${rate[1]} → ₱${rate[2]}`);
+            else if (stock) simple.push(`stock ${stock[1]} → ${stock[2]} units`);
+            else if (removed) simple.push(`${removed[1]} units removed`);
+            else if (reconciled || approved) {
+                const count = (reconciled || approved)![1];
+                simple.push(`${count} ${count === "1" ? "unit" : "units"}`);
+            } else if (changedName) simple.push(`name ${changedName[1]} → ${changedName[2]}`);
+            else if (/^booking\s+[^:]+:\s*/i.test(part)) simple.push(part.replace(/^booking\s+[^:]+:\s*/i, ""));
+            else if (/^category:\s*/i.test(part) && !simple.length) simple.push(part);
+            else if (/^inspection pending$/i.test(part)) simple.push("Inspection pending");
+            else if (/^(\d+) (?:booking )?unit\(s\)$/i.test(part) && !simple.some(x => /\bunits?\b/i.test(x)))
+                simple.push(part.replace(/unit\(s\)/, "units").replace("booking ", ""));
+            // Ignore duplicate receipt numbers, long notes, and empty fields in the display.
+        }
+        const visible = simple.slice(0, 3).join("; ");
+        return name && visible ? `${name}: ${visible}` : name || visible || text;
+    }
     let match: RegExpExecArray | null;
     if ((match = /^(Archived|Deleted) variant (.+?) \([^)]*\) of (.+?); sibling variants were not changed\.?$/i.exec(text))) {
         return `${match[3]} – ${match[2]}`;

@@ -129,147 +129,637 @@ type OwnerVatExport = {
     rows: OwnerVatExportRow[];
 };
 
-export function createVatReportPdf(data: OwnerVatExport, store: string, branch: string, dateFrom: string, dateTo: string, salesSource: string, taxRegistration: string): Blob {
-    const isVatReport = taxRegistration === "VAT_REGISTERED";
-    // PDF core fonts are WinAnsi. Compose ASCII-only content, so xref offsets
-    // equal JavaScript string lengths. Do not print untrusted strings as PDF operators.
-    const ascii = (value: unknown) => String(value ?? "").normalize("NFKD")
-        .replace(/[^\x20-\x7E]/g, " ").replace(/\s+/g, " ").trim();
-    const esc = (value: unknown) => ascii(value)
-        .replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
-    const money = (value: number | null | undefined) =>
-        value == null || !Number.isFinite(Number(value)) ? "--" :
-            `PHP ${Number(value).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+export function createVatReportPdf(
+    data: OwnerVatExport,
+    store: string,
+    branch: string,
+    dateFrom: string,
+    dateTo: string,
+    salesSource: string,
+    taxRegistration: string,
+    additionalFilters: string[] = [],
+): Blob {
+    return createInventoryStyledTransactionPdf(
+        data, store, branch, dateFrom, dateTo, salesSource, taxRegistration, additionalFilters,
+    );
+}
 
-    const W = 842, H = 595; // Landscape A4 in PDF points.
-    const pages: string[][] = [[]];
-    let page = pages[0];
-    let cursorY = 0;
-    const push = (command: string) => { page.push(command); };
-    const txt = (value: unknown, x: number, y: number, size = 9, bold = false, color = "0.20 0.14 0.29") => {
-        push(`${color} rg BT /${bold ? "F2" : "F1"} ${size} Tf 1 0 0 1 ${x.toFixed(2)} ${(H - y).toFixed(2)} Tm (${esc(value)}) Tj ET`);
-    };
-    const line = (x1: number, y: number, x2: number, color = "0.88 0.84 0.92") =>
-        push(`${color} RG 0.6 w ${x1} ${H - y} m ${x2} ${H - y} l S`);
-    const rect = (x: number, y: number, w: number, h: number, color: string) =>
-        push(`${color} rg ${x} ${H - y - h} ${w} ${h} re f`);
-    const chunks = (value: unknown, max: number) => {
-        const v = ascii(value);
-        if (!v) return ["--"];
-        const result: string[] = [];
-        for (let i = 0; i < v.length; i += max) result.push(v.slice(i, i + max));
-        return result;
-    };
-    const startPage = (first: boolean) => {
-        rect(0, 0, W, 11, "0.18 0.09 0.31");
-        txt(isVatReport ? "STOCKNBOOK  /  VAT TRANSACTION REPORT" : "STOCKNBOOK  /  SALES TRANSACTION REPORT", 30, 36, first ? 17 : 13, true);
-        txt("INTERNAL REPORT - NOT A BIR TAX RETURN", 584, 36, 8, false, "0.42 0.32 0.53");
-        line(30, 47, 812);
-        if (first) {
-            txt(`Store: ${store}`, 30, 63, 10, true);
-            txt(`Branch: ${branch}`, 30, 78, 9);
-            txt(`Period: ${dateFrom || "All dates"} to ${dateTo || "All dates"}`, 300, 78, 9);
-            txt(`Source: ${salesSource}`, 644, 78, 9);
-            rect(30, 91, 782, 59, "0.965 0.950 0.992");
-            if (isVatReport) {
-                const sums = data.vatSummary;
-                txt("VATABLE SALES (recorded)", 43, 108, 8);
-                txt(money(sums?.vatableSales), 43, 132, 13, true);
-                txt("OUTPUT VAT (recorded)", 299, 108, 8);
-                txt(money(sums?.outputVat), 299, 132, 13, true);
-                txt("CUSTOMER TOTAL (incl. VAT)", 554, 108, 8);
-                txt(money(sums?.customerTotal), 554, 132, 13, true);
-                const reason = sums?.coverageReason || "Only recorded, verifiable VAT transactions are included.";
-                txt(`Coverage: ${sums?.coverage || "UNKNOWN"}  |  Unverified records: ${sums?.unverifiedRecords ?? "--"}`, 30, 163, 8, true);
-                chunks(reason, 140).slice(0, 2).forEach((part, i) => txt(part, 30, 178 + i * 11, 8));
-                cursorY = 203;
-            } else {
-                txt("TOTAL RECORDED SALES", 43, 108, 8);
-                txt(money(data.transactionSummary?.totalSales), 43, 132, 13, true);
-                txt("TRANSACTIONS", 299, 108, 8);
-                txt(String(data.transactionSummary?.count ?? data.rows.length), 299, 132, 13, true);
-                txt("CURRENT REGISTRATION", 554, 108, 8);
-                txt(taxRegistration === "NON_VAT" ? "Non-VAT Registered" : "Registration not verified", 554, 132, 12, true);
-                txt(data.bookingIntegration?.available === false
-                    ? "Booking records could not be verified; only known transactions are included."
-                    : "Historical VAT and Non-VAT classifications are retained per transaction.", 30, 167, 8);
-                cursorY = 181;
-            }
-        } else {
-            txt(`Branch: ${branch}  |  ${dateFrom || "All dates"} to ${dateTo || "All dates"}  |  ${salesSource}`, 30, 64, 8);
-            cursorY = 83;
-        }
-    };
-    const positions = [30, 205, 335, 425, 485, 562, 620, 695, 755];
-    const widths = [175, 130, 90, 60, 77, 58, 75, 60, 57];
-    const headings = ["ORDER ID", "DATE / TIME", "BRANCH", "SOURCE", "PAYMENT", "TAX", "TOTAL incl.", "VATABLE", "OUTPUT VAT"];
-    const tableHead = () => {
-        rect(30, cursorY, 782, 23, "0.94 0.91 0.98");
-        headings.forEach((heading, i) => txt(heading, positions[i] + 3, cursorY + 15, 7.1, true));
-        cursorY += 23;
-    };
-    startPage(true);
-    tableHead();
-    if (!data.rows.length) txt("No matching transactions for the selected scope.", 35, cursorY + 24, 10);
-    for (let n = 0; n < data.rows.length; n++) {
-        const row = data.rows[n];
-        const tax = String(row.taxType || "").toUpperCase();
-        const cells = [
-            ascii(row.orderId), ascii(row.salesSource.toLowerCase() === "booking" && !/[T ]\d{2}:\d{2}/.test(row.createdAt || "") ? `${row.date} (event date; time unknown)` : row.createdAt || row.date), ascii(row.branchName),
-            ascii(row.salesSource), ascii(row.paymentMode).replace(/_/g, " "),
-            tax === "VAT" ? "VAT" : tax === "NON_VAT" ? "Non-VAT" : tax,
-            money(row.totalInclusive).replace("PHP ", ""),
-            money(row.vatableSales).replace("PHP ", ""),
-            money(row.outputVat).replace("PHP ", ""),
-        ];
-        const lines = cells.map((cell, i) => chunks(cell, Math.max(5, Math.floor((widths[i] - 8) / 3.5))));
-        const rows = Math.max(...lines.map((parts) => parts.length));
-        const rowHeight = Math.max(23, rows * 10 + 8);
-        if (cursorY + rowHeight > H - 49) {
-            page = [];
-            pages.push(page);
-            startPage(false);
-            tableHead();
-        }
-        if (n % 2 === 0) rect(30, cursorY, 782, rowHeight, "0.986 0.981 0.994");
-        lines.forEach((parts, i) => parts.forEach((part, k) => txt(part, positions[i] + 3, cursorY + 13 + 10 * k, 7, false)));
-        cursorY += rowHeight;
-        line(30, cursorY, 812, "0.93 0.91 0.96");
+/** Shared bulk transaction PDF renderer for Owner and Manager POS.
+ * Kept inside the existing OwnerPOS.tsx (no new source modules).
+ * Matches Inventory's report styling without changing Inventory exports.
+ */
+function normalizePdfText(value: string) {
+    return String(value)
+        .replace(/₱/g, "PHP ")
+        .replace(/[–—−]/g, "-").replace(/×/g, "x").replace(/·/g, " | ")
+        .replace(/•/g, "-")
+        .replace(/↳/g, "-")
+        .replace(/[“”]/g, '"')
+        .replace(/[‘’]/g, "'")
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/[^\x20-\x7E]/g, "");
+}
+
+function escapePdf(value: string) {
+    return normalizePdfText(value)
+        .replace(/\\/g, "\\\\")
+        .replace(/\(/g, "\\(")
+        .replace(/\)/g, "\\)");
+}
+
+function getPdfColumnWeight(header: string) {
+    const key = header.toLowerCase();
+
+    if (
+        key.includes("product") ||
+        key.includes("package") ||
+        key.includes("customer") ||
+        key.includes("details") ||
+        key.includes("inclusion")
+    ) {
+        return 1.7;
     }
-    // Footer is always visible, including in reports spanning multiple pages.
-    pages.forEach((commands, i) => {
-        commands.push(`0.87 0.83 0.92 RG 0.6 w 30 34 m 812 34 l S`);
-        const footer = `Generated ${new Date().toLocaleString("en-PH", { timeZone: "Asia/Manila" })} | Page ${i + 1} of ${pages.length} | ${isVatReport ? "Output VAT only; input VAT and adjustments are excluded" : "Internal sales extract; not a tax return"}`;
-        commands.push(`0.42 0.32 0.53 rg BT /F1 7.3 Tf 1 0 0 1 30 20 Tm (${esc(footer)}) Tj ET`);
+
+    if (
+        key.includes("reference") ||
+        key.includes("branch") ||
+        key.includes("category") ||
+        key.includes("suggested")
+    ) {
+        return 1.35;
+    }
+
+    if (key.includes("order id")) return 1.75;
+    if (key.includes("date / time")) return 1.4;
+    if (key.includes("sales source")) return 1.15;
+    if (key.includes("payment")) return 1.15;
+    if (key.includes("output vat")) return 1.05;
+    if (key.includes("equipment no.")) return 1.45;
+    if (key.includes("cost / rate")) return 1.3;
+    if (key.includes("date") || key.includes("schedule")) return 1.15;
+    if (key.includes("current") || key.includes("forecast")) return 1.1;
+    if (key.includes("status") || key.includes("risk")) return 0.95;
+
+    return 1;
+}
+
+function isPdfNumericColumn(header: string) {
+    const key = header.toLowerCase();
+
+    return [
+        "stock",
+        "level",
+        "quantity",
+        "sales",
+        "revenue",
+        "price",
+        "value",
+        "count",
+        "added",
+        "amount",
+        "bookings",
+        "downpayment",
+        "discount",
+    ].some((word) => key.includes(word));
+}
+
+function wrapPdfText(value: string, maxCharacters: number, maxLines = 3) {
+    const text = normalizePdfText(value) || "-";
+    const words = text.split(" ");
+    const lines: string[] = [];
+    let currentLine = "";
+
+    for (let word of words) {
+        while (word.length > maxCharacters) {
+            if (currentLine) {
+                lines.push(currentLine);
+                currentLine = "";
+            }
+
+            lines.push(word.slice(0, maxCharacters));
+            word = word.slice(maxCharacters);
+
+            if (lines.length >= maxLines) break;
+        }
+
+        if (lines.length >= maxLines) break;
+
+        const candidate = currentLine ? `${currentLine} ${word}` : word;
+
+        if (candidate.length <= maxCharacters) {
+            currentLine = candidate;
+        } else {
+            if (currentLine) lines.push(currentLine);
+            currentLine = word;
+        }
+
+        if (lines.length >= maxLines) break;
+    }
+
+    if (currentLine && lines.length < maxLines) {
+        lines.push(currentLine);
+    }
+
+    const result = lines.length ? lines.slice(0, maxLines) : ["-"];
+
+    if (
+        lines.length > maxLines ||
+        result.join(" ").length < text.length
+    ) {
+        const finalIndex = result.length - 1;
+        result[finalIndex] =
+            result[finalIndex].slice(0, Math.max(1, maxCharacters - 3)) + "...";
+    }
+
+    return result;
+}
+
+function formatDashboardPdfTitle(title: string) {
+    const cleaned = normalizePdfText(title)
+        .replace(/[_-]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    if (!cleaned) return "Dashboard Report";
+
+    return cleaned
+        .split(" ")
+        .map((word) => {
+            if (!word) return word;
+            return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+        })
+        .join(" ");
+}
+
+/** Opt-in report layout; default dashboard/report exports retain their existing styling. */
+type DashboardPdfOptions = {
+    filters?: string[];
+    summary?: string[];
+    centerColumns?: boolean;
+    totalRow?: string[];
+};
+
+function createTablePdf({
+                            title,
+                            storeName,
+                            branch,
+                            dateRange,
+                            headers,
+                            rows,
+                            options,
+                        }: {
+    title: string;
+    storeName: string;
+    branch: string;
+    dateRange: string;
+    headers: string[];
+    rows: string[][];
+    options?: DashboardPdfOptions;
+}) {
+    // Nine transaction fields need an A4 landscape table to prevent cramped columns.
+    // Every other visual element uses the exact Inventory PDF report styling.
+    const landscape = headers.length >= 8;
+    const pageWidth = landscape ? 841.89 : 595.28;
+    const pageHeight = landscape ? 595.28 : 841.89;
+    const outerMargin = 25;
+    const pageInset = 24;
+    const marginX = 42;
+    const marginBottom = 54;
+    const contentWidth = pageWidth - marginX * 2;
+    const regularFont = "F1";
+    const boldFont = "F2";
+    const titleText = formatDashboardPdfTitle(title);
+    const fontSize = headers.length >= 6 ? 7 : headers.length >= 5 ? 7.6 : 8.2;
+    const headerFontSize = Math.max(7, fontSize - 0.1);
+    const metaFontSize = 10.2;
+    const lineHeight = fontSize + 2.8;
+    const cellPaddingX = 5;
+    const cellPaddingY = 5;
+
+    const cream: [number, number, number] = [0.992, 0.98, 0.956];
+    const white: [number, number, number] = [1, 1, 1];
+    const purple: [number, number, number] = [0.169, 0.09, 0.298];
+    const purpleText: [number, number, number] = [0.169, 0.09, 0.298];
+    const ink: [number, number, number] = [0.102, 0.071, 0.125];
+    const muted: [number, number, number] = [0.373, 0.306, 0.459];
+    const border: [number, number, number] = [0.902, 0.866, 0.941];
+    const tint: [number, number, number] = [0.976, 0.965, 0.992];
+    const divider: [number, number, number] = [0.9, 0.86, 0.94];
+    const altRow: [number, number, number] = [0.989, 0.984, 0.995];
+
+    const centered = options?.centerColumns === true;
+    const weights = headers.map(header => centered && header === "Weeks" ? 2.1 : centered && header === "Rank" ? 0.65 : getPdfColumnWeight(header));
+    const totalWeight = weights.reduce((total, weight) => total + weight, 0);
+
+    let runningX = marginX;
+    const columns = headers.map((header, index) => {
+        const width = (contentWidth * weights[index]) / totalWeight;
+        const column = {
+            header,
+            x: runningX,
+            width,
+            numeric: isPdfNumericColumn(header),
+        };
+
+        runningX += width;
+        return column;
     });
-    // A complete PDF object/xref table for all pages, using only ASCII content.
-    const objects: string[] = [
-        "<< /Type /Catalog /Pages 2 0 R >>",
-        "", // Filled with all page references after the streams are built.
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
+
+    const point = (value: number) => Number(value.toFixed(2));
+    const pages: string[] = [];
+    let commands: string[] = [];
+    let cursorY = 0;
+
+    // Helvetica ASCII glyph widths, for exact centered alignment and wrapping.
+    const regularWidths = [278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,278,278,584,584,584,556,1015,667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,611,722,667,944,667,667,611,278,278,278,469,556,333,556,556,500,556,556,278,556,556,222,222,500,222,833,556,556,556,556,333,500,278,556,500,722,500,500,500,334,260,334,584];
+    const boldWidths = [278,333,474,556,556,889,722,238,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,333,333,584,584,584,611,975,722,722,722,722,667,611,778,722,278,556,722,611,833,722,778,667,778,722,667,611,722,667,944,667,667,611,333,278,333,584,556,333,556,611,556,611,556,333,611,611,278,278,556,278,889,611,611,611,611,389,556,333,611,556,778,556,556,500,389,280,389,584];
+    function measure(value: string, size: number, font: string) {
+        const text = normalizePdfText(value);
+        if (!centered) return text.length * size * 0.52;
+        const widths = font === boldFont ? boldWidths : regularWidths;
+        return Array.from(text).reduce((n,c)=>n+(widths[c.charCodeAt(0)-32] ?? 600),0)*size/1000;
+    }
+    function wrapCentered(value: string, width: number, size: number, font: string) {
+        const text = normalizePdfText(value);
+        if (!text) return [""];
+        const lines: string[] = [];
+        let line = "";
+        for(const word of text.split(" ")) {
+            if(line && measure(`${line} ${word}`,size,font)>width) {lines.push(line);line="";}
+            if(measure(word,size,font)>width) {
+                for(const char of word) {
+                    if(line && measure(line+char,size,font)>width) {lines.push(line);line="";}
+                    line+=char;
+                }
+            } else line=line ? `${line} ${word}` : word;
+        }
+        if(line) lines.push(line);
+        return lines.length?lines:[""];
+    }
+
+    function addText(
+        value: string,
+        x: number,
+        y: number,
+        size: number,
+        font: string,
+        color: [number, number, number],
+        align: "left" | "center" | "right" = "left"
+    ) {
+        const normalized = normalizePdfText(value);
+        if (centered && !normalized) return;
+        const text = normalized || "-";
+        const textWidth = measure(text, size, font);
+        const adjustedX =
+            align === "center" ? x - textWidth / 2 : align === "right" ? x - textWidth : x;
+
+        commands.push(
+            `q ${color.join(" ")} rg BT /${font} ${point(size)} Tf 1 0 0 1 ${point(
+                adjustedX
+            )} ${point(y)} Tm (${escapePdf(text)}) Tj ET Q`
+        );
+    }
+
+    function fillRect(
+        x: number,
+        y: number,
+        width: number,
+        height: number,
+        color: [number, number, number]
+    ) {
+        commands.push(
+            `q ${color.join(" ")} rg ${point(x)} ${point(y)} ${point(width)} ${point(
+                height
+            )} re f Q`
+        );
+    }
+
+    function strokeRect(
+        x: number,
+        y: number,
+        width: number,
+        height: number,
+        color: [number, number, number],
+        lineWidth = 0.7
+    ) {
+        commands.push(
+            `q ${color.join(" ")} RG ${point(lineWidth)} w ${point(x)} ${point(y)} ${point(
+                width
+            )} ${point(height)} re S Q`
+        );
+    }
+
+    function drawDivider(y: number, color: [number, number, number] = divider, lineWidth = 0.7) {
+        commands.push(
+            `q ${color.join(" ")} RG ${point(lineWidth)} w ${point(marginX)} ${point(y)} m ${point(
+                pageWidth - marginX
+            )} ${point(y)} l S Q`
+        );
+    }
+
+    function wrapCellText(value: string, columnWidth: number, linesLimit = 4) {
+        const headerTightness = headers.length >= 6 ? 0.94 : 1;
+        const maxCharacters = Math.max(
+            4,
+            Math.floor(((columnWidth - cellPaddingX * 2) / (fontSize * 0.52)) * headerTightness)
+        );
+        return wrapPdfText(value, maxCharacters, linesLimit);
+    }
+
+    function drawTableHeader() {
+        const headerLines = headers.map((header, index) => {
+            const limit = Math.max(
+                4,
+                Math.floor((columns[index].width - cellPaddingX * 2) / (headerFontSize * 0.52))
+            );
+            return centered ? wrapCentered(header, columns[index].width - cellPaddingX * 2, headerFontSize, boldFont) : wrapPdfText(header, limit, 3);
+        });
+        const headerLineCount = Math.max(...headerLines.map((lines) => lines.length));
+        const headerHeight = Math.max(26, headerLineCount * (headerFontSize + 2) + cellPaddingY * 2);
+        const bottomY = cursorY - headerHeight;
+
+        fillRect(marginX, bottomY, contentWidth, headerHeight, tint);
+        strokeRect(marginX, bottomY, contentWidth, headerHeight, border, 0.75);
+
+        columns.forEach((column, index) => {
+            if (index > 0) {
+                commands.push(
+                    `q ${border.join(" ")} RG 0.45 w ${point(column.x)} ${point(bottomY)} m ${point(
+                        column.x
+                    )} ${point(cursorY)} l S Q`
+                );
+            }
+
+            const lines = headerLines[index];
+            lines.forEach((line, lineIndex) => {
+                const textWidth = line.length * headerFontSize * 0.52;
+                const textX = centered ? column.x + column.width / 2 : column.numeric
+                    ? column.x + column.width - cellPaddingX - textWidth
+                    : column.x + cellPaddingX;
+                const baseline = centered ? cursorY - (headerHeight - lines.length*(headerFontSize+2))/2 - headerFontSize : cursorY - cellPaddingY - headerFontSize;
+                addText(line, textX, baseline - lineIndex*(headerFontSize+2), headerFontSize, boldFont, purpleText, centered ? "center" : "left");
+            });
+        });
+
+        cursorY = bottomY;
+    }
+
+    function drawPageTitle(continued: boolean) {
+        const cardX = outerMargin;
+        const cardY = pageInset;
+        const cardWidth = pageWidth - outerMargin * 2;
+        const cardHeight = pageHeight - pageInset * 2;
+
+        fillRect(0, 0, pageWidth, pageHeight, cream);
+        fillRect(cardX, cardY, cardWidth, cardHeight, white);
+        fillRect(cardX, pageHeight - pageInset - 6, cardWidth, 6, purple);
+
+        let topY = pageHeight - 58;
+        addText(storeName || "Store", pageWidth / 2, topY, 21, boldFont, purpleText, "center");
+        topY -= 17;
+
+        if (branch) {
+            addText(`Branch: ${branch}`, pageWidth / 2, topY, 11.5, boldFont, purpleText, "center");
+            topY -= 16;
+        }
+
+        for (const line of wrapCentered(`Date range: ${dateRange}`, contentWidth, metaFontSize, regularFont)) {
+            addText(line, pageWidth / 2, topY, metaFontSize, regularFont, muted, "center"); topY -= 12;
+        }
+        for (const filter of options?.filters || []) {
+            for (const line of wrapCentered(filter, contentWidth, 9, regularFont)) {
+                addText(line, pageWidth / 2, topY, 9, regularFont, muted, "center"); topY -= 11;
+            }
+        }
+        drawDivider(topY, border, 0.7);
+
+        topY -= continued ? 24 : 28;
+        addText(
+            continued ? `${titleText} (continued)` : titleText,
+            pageWidth / 2,
+            topY,
+            continued ? 16 : 18,
+            boldFont,
+            purpleText,
+            "center"
+        );
+
+        // Keep the report heading clean: only the transaction/tax summary is displayed.
+        // This layout is shared by the Owner and Manager transaction PDF downloads.
+        topY -= 23;
+        for (const summary of options?.summary || []) {
+            const lines = wrapCentered(summary, contentWidth, 9.2, regularFont);
+            for (const line of lines) {
+                addText(line, pageWidth / 2, topY, 9.2, regularFont, muted, "center");
+                topY -= 14;
+            }
+        }
+        cursorY = topY - 9;
+        drawTableHeader();
+    }
+
+    function finishPage() {
+        if (commands.length > 0) {
+            pages.push(commands.join("\n"));
+            commands = [];
+        }
+    }
+
+    function startPage(continued: boolean) {
+        if (commands.length > 0) finishPage();
+        drawPageTitle(continued);
+    }
+
+    function drawTableRow(row: string[], rowIndex: number, isTotal = false) {
+        const rowFont = isTotal ? boldFont : regularFont;
+        const cellLines = columns.map((column, index) => centered
+            ? wrapCentered(row[index] ?? "-", column.width - cellPaddingX * 2, fontSize, rowFont)
+            : wrapCellText(row[index] ?? "-", column.width, headers.length >= 6 ? 5 : 4)
+        );
+        const maxLines = Math.max(...cellLines.map((lines) => lines.length));
+        const rowHeight = Math.max(24, maxLines * lineHeight + cellPaddingY * 2);
+
+        if (cursorY - rowHeight < marginBottom + 30) {
+            startPage(true);
+        }
+
+        const rowBottom = cursorY - rowHeight;
+        fillRect(marginX, rowBottom, contentWidth, rowHeight, isTotal ? tint : rowIndex % 2 === 0 ? white : altRow);
+        strokeRect(marginX, rowBottom, contentWidth, rowHeight, border, 0.45);
+
+        columns.forEach((column, index) => {
+            if (index > 0) {
+                commands.push(
+                    `q ${border.join(" ")} RG 0.3 w ${point(column.x)} ${point(rowBottom)} m ${point(
+                        column.x
+                    )} ${point(cursorY)} l S Q`
+                );
+            }
+
+            cellLines[index].forEach((line, lineIndex) => {
+                const textWidth = line.length * fontSize * 0.52;
+                const textX = centered ? column.x + column.width / 2 : column.numeric
+                    ? column.x + column.width - cellPaddingX - textWidth
+                    : column.x + cellPaddingX;
+                const baseline = centered ? cursorY - (rowHeight - cellLines[index].length*lineHeight)/2 - fontSize : cursorY - cellPaddingY - fontSize;
+                addText(line, textX, baseline - lineIndex*lineHeight, fontSize, rowFont, isTotal ? purpleText : ink, centered ? "center" : "left");
+            });
+        });
+
+        cursorY = rowBottom;
+    }
+
+    startPage(false);
+
+    if (rows.length === 0) {
+        addText(
+            "No records found for the selected report period.",
+            pageWidth / 2,
+            cursorY - 26,
+            10,
+            regularFont,
+            muted,
+            "center"
+        );
+    } else {
+        rows.forEach((row, index) => drawTableRow(row, index));
+        if (options?.totalRow) drawTableRow(options.totalRow, rows.length, true);
+    }
+
+    finishPage();
+
+    const pageStreams = pages.map((stream, index) => {
+        const footerText = `Powered by StockNBook | Page ${index + 1} of ${pages.length}`;
+        return `${stream}
+q ${divider.join(" ")} RG 0.6 w ${point(marginX)} 42 m ${point(
+            pageWidth - marginX
+        )} 42 l S Q
+q ${muted.join(" ")} rg BT /F1 8 Tf 1 0 0 1 ${point(
+            pageWidth / 2 - footerText.length * 2.05
+        )} 26 Tm (${escapePdf(footerText)}) Tj ET Q`;
+    });
+
+    const pageObjectIds = pageStreams.map((_, index) => 5 + index * 2);
+    const contentObjectIds = pageStreams.map((_, index) => 6 + index * 2);
+
+    const objects: Record<number, string> = {
+        1: "<< /Type /Catalog /Pages 2 0 R >>",
+        2: `<< /Type /Pages /Kids [${pageObjectIds
+            .map((id) => `${id} 0 R`)
+            .join(" ")}] /Count ${pageObjectIds.length} >>`,
+        3: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        4: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
+    };
+
+    pageStreams.forEach((stream, index) => {
+        const pageId = pageObjectIds[index];
+        const contentId = contentObjectIds[index];
+
+        objects[pageId] =
+            `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] ` +
+            `/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${contentId} 0 R >>`;
+
+        objects[contentId] = `<< /Length ${stream.length} >>
+stream
+${stream}
+endstream`;
+    });
+
+    const maxObjectId = Math.max(...Object.keys(objects).map(Number));
+    let pdf = "%PDF-1.4\n";
+    const offsets: number[] = [0];
+
+    for (let id = 1; id <= maxObjectId; id += 1) {
+        offsets[id] = pdf.length;
+        pdf += `${id} 0 obj\n${objects[id]}\nendobj\n`;
+    }
+
+    const xrefOffset = pdf.length;
+    pdf += `xref\n0 ${maxObjectId + 1}\n`;
+    pdf += "0000000000 65535 f \n";
+
+    for (let id = 1; id <= maxObjectId; id += 1) {
+        pdf += `${String(offsets[id]).padStart(10, "0")} 00000 n \n`;
+    }
+
+    pdf += `trailer\n<< /Size ${maxObjectId + 1} /Root 1 0 R >>\n`;
+    pdf += `startxref\n${xrefOffset}\n%%EOF`;
+
+    return pdf;
+}
+
+
+const reportMoney = (raw: number | null | undefined): string =>
+    raw == null || !Number.isFinite(Number(raw))
+        ? "Not verified"
+        : `PHP ${Number(raw).toLocaleString("en-PH", {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+
+const reportPayment = (mode: string) => String(mode || "-").replace(/_/g, " ");
+
+/** Exact Inventory report typography, borders, colors and pagination; same export API for both POS roles. */
+function createInventoryStyledTransactionPdf(
+    data: OwnerVatExport,
+    store: string,
+    branch: string,
+    dateFrom: string,
+    dateTo: string,
+    salesSource: string,
+    taxRegistration: string,
+    additionalFilters: string[] = [],
+): Blob {
+    const isVat = taxRegistration === "VAT_REGISTERED";
+    // Preserve historically recorded VAT data even if current registration differs.
+    const showTax = isVat || Boolean(data.vatSummary) || data.rows.some(record =>
+        String(record.taxType || "").toUpperCase() === "VAT" ||
+        record.vatableSales != null || record.outputVat != null
+    );
+    const headers = showTax
+        ? ["Order ID", "Date / Time", "Branch", "Sales Source", "Payment", "Tax", "Total Sales", "VATable Sales", "Output VAT"]
+        : ["Order ID", "Date / Time", "Branch", "Sales Source", "Payment", "Total Sales"];
+    const rows = data.rows.map(record => {
+        const bookingHasTime = /[T ]\d{2}:\d{2}/.test(record.createdAt || "");
+        const transactionDate = String(record.salesSource || "").toLowerCase() === "booking" && !bookingHasTime
+            ? `${record.date} (event date; time unknown)`
+            : (record.createdAt || record.date);
+        const base = [
+            record.orderId || "-", transactionDate || "-", record.branchName || "-",
+            record.salesSource || "-", reportPayment(record.paymentMode), reportMoney(record.totalInclusive),
+        ];
+        return showTax ? [
+            ...base.slice(0, 5),
+            record.taxType === "NON_VAT" ? "Non-VAT" : record.taxType || "-",
+            ...base.slice(5),
+            reportMoney(record.vatableSales), reportMoney(record.outputVat),
+        ] : base;
+    });
+    const totalFromApi = data.transactionSummary?.totalSales;
+    const transactionCount = data.transactionSummary?.count ?? data.rows.length;
+    const summary: string[] = [
+        `Transactions: ${transactionCount} | Total Sales: ${reportMoney(totalFromApi)}`,
+        `Tax Registration: ${isVat ? "VAT Registered" : taxRegistration === "NON_VAT" ? "Non-VAT Registered" : "Not verified"}`,
     ];
-    const references: string[] = [];
-    pages.forEach((commands) => {
-        const pageId = objects.length + 1;
-        const streamId = pageId + 1;
-        const stream = commands.join("\n") + "\n";
-        references.push(`${pageId} 0 R`);
-        objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${streamId} 0 R >>`);
-        objects.push(`<< /Length ${stream.length} >>\nstream\n${stream}endstream`);
+    if (showTax) {
+        summary.push(`Recorded VATable Sales: ${reportMoney(data.vatSummary?.vatableSales)} | Recorded Output VAT: ${reportMoney(data.vatSummary?.outputVat)}`);
+    }
+    summary.push("Internal transaction report - not a BIR tax return");
+    const scope = dateFrom || dateTo
+        ? `${dateFrom || "Any start date"} to ${dateTo || "Any end date"}`
+        : "All dates";
+    const pdf = createTablePdf({
+        title: "Sales Transaction Report",
+        storeName: store || "StockNBook Store",
+        branch: branch || "All Branches",
+        dateRange: scope,
+        headers,
+        rows,
+        options: {
+            centerColumns: true,
+            filters: [`Sales Source: ${salesSource || "All Sales"}`, ...additionalFilters],
+            summary,
+        },
     });
-    objects[1] = `<< /Type /Pages /Kids [${references.join(" ")}] /Count ${references.length} >>`;
-    let contents = "%PDF-1.4\n";
-    const offsets = [0];
-    objects.forEach((obj, i) => {
-        offsets.push(contents.length);
-        contents += `${i + 1} 0 obj\n${obj}\nendobj\n`;
-    });
-    const xref = contents.length;
-    contents += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
-    for (let i = 1; i < offsets.length; i++) contents += `${String(offsets[i]).padStart(10, "0")} 00000 n \n`;
-    contents += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
-    return new Blob([contents], { type: "application/pdf" });
+    return new Blob([pdf], {type: "application/pdf"});
 }
 
 /** Database-backed transaction detail. Missing historical values remain null. */
@@ -318,13 +808,96 @@ export function bookingBillingRows(b: BookingBilling): Array<[string, number]> {
         ["Deposit Refunded", b.depositRefunded], ["Remaining Deposit", b.depositHeld],
         ["Remaining Additional Charges", b.claimBalance]];
 }
+/** Compact, read-only booking settlement overview for Owner and Manager POS.
+ * Keep booking revenue and refundable security deposits clearly separated.
+ * The full financial record remains unchanged in the API and individual PDFs.
+ */
 export function BookingBillingPreview({ billing }: { billing: BookingBilling }) {
-    return <div className="mt-3 space-y-1 border-t border-[#E8DFF0] pt-3">
-        <p className="font-bold text-[#2B174C]">Booking billing &amp; deposit settlement</p>
-        {bookingBillingRows(billing).map(([label, amount]) => <p key={label} className="flex justify-between gap-4"><span className="text-[#806A8C]">{label}</span><strong>{peso(amount)}</strong></p>)}
-        <p className="flex justify-between gap-4"><span className="text-[#806A8C]">Settlement Status</span><strong className="capitalize">{billing.settlementStatus?.replace(/_/g, " ") || "Not recorded"}</strong></p>
-    </div>;
+    const showAmount = (value: number) => Number.isFinite(value) && Math.abs(value) >= 0.005;
+    const rows: Array<[string, number]> = [
+        ["Booking payments", billing.bookingPaid],
+        ["Booking refunds", billing.bookingRefunded],
+        ["Booking balance due", billing.balance],
+        // Only show the required amount if the deposit has not yet been fully collected.
+        ["Deposit required", billing.depositRequired > billing.depositCollected + 0.005 ? billing.depositRequired : 0],
+        ["Deposit collected", billing.depositCollected],
+        ["Deposit refunded", billing.depositRefunded],
+        ["Deposit applied to charges", billing.depositApplied],
+        ["Deposit still held", billing.depositHeld],
+        ["Additional charges", billing.additionalCharges],
+        ["Additional charges paid", billing.chargePaid],
+        ["Unpaid additional charges", billing.claimBalance],
+    ];
+    const visibleRows = rows.filter(([, value]) => showAmount(value));
+    const status = billing.settlementStatus?.replace(/_/g, " ").trim();
+    const isSettled = status?.toLowerCase() === "settled";
+
+    if (visibleRows.length === 0 && !status) return null;
+    return (
+        <section aria-label="Booking payment and deposit details" className="mt-3 border-t border-[#E8DFF0] pt-3">
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <h4 className="text-xs font-bold text-[#2B174C]">Booking settlement</h4>
+                {status && (
+                    <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold capitalize ${isSettled ? "bg-[#E7F6EC] text-[#19663F]" : "bg-[#F0EAF8] text-[#5A3878]"}`}>
+                        {status}
+                    </span>
+                )}
+            </div>
+            {visibleRows.length > 0 && (
+                <div className="grid gap-x-8 gap-y-1.5 sm:grid-cols-2">
+                    {visibleRows.map(([label, amount]) => (
+                        <p key={label} className="flex min-w-0 items-center justify-between gap-3">
+                            <span className="text-[#806A8C]">{label}</span>
+                            <strong className="shrink-0 font-semibold text-[#2B174C]">{peso(amount)}</strong>
+                        </p>
+                    ))}
+                </div>
+            )}
+        </section>
+    );
 }
+/** Shared compact item list for transaction details (PDF itemization is unchanged). */
+export function TransactionItemsPreview({ detail }: { detail: OwnerOrderInvoice }) {
+    if (!detail.itemsAvailable) {
+        return <p className="px-4 py-4 text-xs text-[#806A8C]">
+            {detail.detailNotice || "Saved item details could not be verified."} PDF download requires verified items and prices.
+        </p>;
+    }
+    // All-inclusive packages only need item names and quantities. Walk-in / extra sales retain prices.
+    const showPrices = detail.items.some(item => !item.included);
+    const unitCount = detail.items.reduce((count, item) => count + (Number.isFinite(item.quantity) ? item.quantity : 0), 0);
+    return (
+        <div className="px-4 py-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+                <h4 className="text-xs font-bold text-[#2B174C]">Items / services</h4>
+                <span className="text-[11px] text-[#806A8C]">{unitCount} unit{unitCount === 1 ? "" : "s"}</span>
+            </div>
+            <div className="overflow-x-auto rounded-lg border border-[#ECE4F2]">
+                <table className={`w-full text-left text-xs ${showPrices ? "min-w-[460px]" : "min-w-[260px]"}`}>
+                    <thead className="bg-[#FAF7FF] text-[11px] font-semibold text-[#806A8C]">
+                    <tr>
+                        <th className="px-3 py-2">Item / Service</th>
+                        <th className="px-3 py-2 text-center">Qty</th>
+                        {showPrices && <th className="px-3 py-2 text-right">Unit Price</th>}
+                        {showPrices && <th className="px-3 py-2 text-right">Amount</th>}
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {detail.items.map((item, index) => (
+                        <tr key={`${index}-${item.name}`} className="border-t border-[#F0EAF5]">
+                            <td className="px-3 py-2 font-medium text-[#2B174C]">{item.name}</td>
+                            <td className="px-3 py-2 text-center">{item.quantity}</td>
+                            {showPrices && <td className="px-3 py-2 text-right">{item.included || item.unitPrice == null ? "—" : peso(item.unitPrice)}</td>}
+                            {showPrices && <td className="px-3 py-2 text-right font-semibold">{item.included ? "Included" : item.lineTotal == null ? "—" : peso(item.lineTotal)}</td>}
+                        </tr>
+                    ))}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    );
+}
+
 export function BookingFinancials({ order }: { order: Order }) {
     const values: Array<[string, number | null | undefined]> = [["Sales",order.total], ["Additional Charges",order.additionalCharges], ["Deposit Refunded",order.depositRefunded]];
     return <div className="min-w-0 space-y-0.5">{values.map(([label,value]) => <p key={label} className="flex flex-wrap items-center justify-between gap-x-2"><span className="text-[#806A8C]">{label}</span><strong className="whitespace-nowrap text-right">{value == null ? "—" : peso(value)}</strong></p>)}</div>;
@@ -666,7 +1239,7 @@ function TransactionTable({ pos, orders, branchName }: {
                                         <section aria-label={`Details for order ${order.id}`} className="overflow-hidden rounded-xl border border-[#E3D8EA] bg-white shadow-sm">
                                             <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#E8DFF0] px-4 py-3">
                                                 <div className="space-y-1">
-                                                    <h3 className="text-sm font-bold text-[#2B174C]">Transaction invoice preview</h3>
+                                                    <h3 className="text-sm font-bold text-[#2B174C]">Transaction details</h3>
                                                     <p className="text-[11px] text-[#806A8C]">{detail.storeName} · {detail.branchName} · {detail.salesSource === "BOOKING" && !/[T ]\d{2}:\d{2}/.test(detail.createdAt || "") ? `${detail.date} (event date; completion time unavailable)` : detail.createdAt || detail.date}</p>
                                                     <p className="text-[11px] text-[#806A8C]">Customer: {detail.customerName || "Walk-in"} · Payment: {detail.paymentMode ? detail.paymentMode.replace(/_/g," ") : "Not recorded"} · Tax: {detail.taxType || "Unverified"}</p>
                                                 </div>
@@ -679,27 +1252,7 @@ function TransactionTable({ pos, orders, branchName }: {
                                                     className="inline-flex h-[36px] w-[36px] shrink-0 items-center justify-center rounded-xl border border-[#D5C4EB] bg-white text-[#57328E] hover:bg-[#F1EAFF] disabled:cursor-not-allowed disabled:opacity-40"
                                                 ><Download size={17} /></button>
                                             </div>
-                                            {detail.itemsAvailable ? (
-                                                <div className="overflow-x-auto px-4 py-3">
-                                                    <table className="w-full min-w-[530px] text-left text-xs">
-                                                        <thead className="border-b border-[#E8DFF0] bg-[#FAF7FF] text-[10px] font-semibold uppercase text-[#806A8C]">
-                                                        <tr><th className="px-3 py-2">Item / Service</th><th className="px-3 py-2 text-center">Qty</th><th className="px-3 py-2 text-right">Unit Price</th><th className="px-3 py-2 text-right">Amount</th></tr>
-                                                        </thead>
-                                                        <tbody>
-                                                        {detail.items.map((item, i) => (
-                                                            <tr key={`${i}-${item.name}`} className="border-b border-[#F0EAF5] last:border-0">
-                                                                <td className="px-3 py-2 font-medium text-[#2B174C]">{item.name}</td>
-                                                                <td className="px-3 py-2 text-center">{item.quantity}</td>
-                                                                <td className="px-3 py-2 text-right">{item.included ? "Included" : item.unitPrice == null ? "—" : peso(item.unitPrice)}</td>
-                                                                <td className="px-3 py-2 text-right font-semibold">{item.included ? "Included" : item.lineTotal == null ? "—" : peso(item.lineTotal)}</td>
-                                                            </tr>
-                                                        ))}
-                                                        </tbody>
-                                                    </table>
-                                                </div>
-                                            ) : (
-                                                <p className="px-4 py-4 text-xs text-[#806A8C]">{detail.detailNotice || "Original items and prices could not be verified."} PDF export is unavailable for this transaction.</p>
-                                            )}
+                                            <TransactionItemsPreview detail={detail} />
                                             <div className="space-y-1 border-t border-[#E8DFF0] bg-[#FAF7FF] px-4 py-3 text-xs">
                                                 {["VAT", "VAT_REGISTERED"].includes(detail.taxType?.toUpperCase() || "") && detail.vatAmount != null && detail.total != null && (
                                                     <>
@@ -707,9 +1260,9 @@ function TransactionTable({ pos, orders, branchName }: {
                                                         <p className="flex justify-between gap-4"><span className="text-[#806A8C]">Output VAT (recorded)</span><strong>{peso(detail.vatAmount)}</strong></p>
                                                     </>
                                                 )}
-                                                <p className="flex justify-between gap-4 font-bold text-[#2B174C]"><span>Recorded Total</span><span>{detail.total == null ? "—" : peso(detail.total)}</span></p>
+                                                <p className="flex justify-between gap-4 font-bold text-[#2B174C]"><span>Total Sales</span><span>{detail.total == null ? "—" : peso(detail.total)}</span></p>
                                                 {detail.bookingBilling && <BookingBillingPreview billing={detail.bookingBilling} />}
-                                                <p className="pt-2 text-[10px] text-[#806A8C]">Internal transaction copy only. An Order ID is not a BIR-issued invoice number.</p>
+                                                <p className="pt-2 text-[10px] text-[#806A8C]">Internal transaction record only. Order ID is not a BIR-issued invoice number.</p>
                                             </div>
                                         </section>
                                     )}
@@ -978,6 +1531,10 @@ export default function OwnerPOS({ pos }: { pos: UsePOSReturn }) {
             const pdf = createVatReportPdf(
                 { vatSummary: data.vatSummary, transactionSummary: data.transactionSummary, bookingIntegration: data.bookingIntegration, rows: data.rows },
                 storeName, scopeName, dateFrom, dateTo, sourceName, data.taxRegistration || "NON_VAT",
+                [
+                    `Payment: ${pos.ownerPaymentFilter ? pos.ownerPaymentFilter.replace(/_/g, " ") : "All Payments"}`,
+                    ...(pos.ownerOrderSearch.trim() ? [`Search: ${pos.ownerOrderSearch.trim()}`] : []),
+                ],
             );
             const url = URL.createObjectURL(pdf);
             const link = document.createElement("a");

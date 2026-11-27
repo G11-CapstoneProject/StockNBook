@@ -653,6 +653,7 @@ export function OrdersTable({
                                 stickyHeader = false,
                                 allowHorizontalScroll = true,
                                 renderActions,
+                                headerActions,
                             }: {
     title: string;
     subtitle: string;
@@ -668,19 +669,18 @@ export function OrdersTable({
     stickyHeader?: boolean;
     allowHorizontalScroll?: boolean;
     renderActions?: (order: Order) => ReactNode;
+    headerActions?: ReactNode;
 }) {
     return (
         <section
             className={`overflow-hidden rounded-[14px] border border-[#E6DDF0] bg-white shadow-sm ${containerClassName}`}
         >
-            <div className="border-b border-[#E6DDF0] bg-white px-3 py-3">
-                <h3 className="text-[16px] font-bold text-[#1A1220]">
-                    {title}
-                </h3>
-
-                <p className="mt-0.5 text-xs text-[#7A6A84]">
-                    {subtitle}
-                </p>
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E6DDF0] bg-white px-3 py-3">
+                <div className="min-w-0 flex-1">
+                    <h3 className="text-[16px] font-bold text-[#1A1220]">{title}</h3>
+                    <p className="mt-0.5 text-xs text-[#7A6A84]">{subtitle}</p>
+                </div>
+                {headerActions && <div className="w-full shrink-0 sm:w-auto">{headerActions}</div>}
             </div>
 
             <div

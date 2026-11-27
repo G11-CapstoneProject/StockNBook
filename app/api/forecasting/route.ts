@@ -34,7 +34,14 @@ export async function POST(request: NextRequest) {
             "get_inventory_forecast",
             "get_booking_forecast",
             "get_seasonal_analysis",
-            "get_forecast_report"
+            "get_forecast_report",
+            // Stock Plan, Accuracy and Events tabs
+            "get_seasonal_stock_plan",
+            "get_forecast_accuracy",
+            "list_store_events",
+            "save_store_event",
+            "delete_store_event",
+            "get_event_forecast"
         ];
 
 

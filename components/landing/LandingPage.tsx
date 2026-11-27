@@ -27,7 +27,6 @@ import {
     Store,
     Users,
     X,
-    LockKeyhole,
     LogIn,
     UserRound,
     Building2,
@@ -69,6 +68,7 @@ type PricingPlan = {
     period: string;
     description: string;
     features: string[];
+    limits: string[];
     buttonText: string;
     highlighted?: boolean;
 };
@@ -94,40 +94,52 @@ function buildPublicPlan(plan: {
     has_forecasting: boolean;
     has_multi_store: boolean;
 }): PricingPlan {
-    const normalizedName = plan.name.toLowerCase();
-    const isStarter = plan.price === 0 || normalizedName.includes("starter");
-    const isBusiness = normalizedName.includes("business");
+    const normalizedName = plan.name.trim().toLowerCase();
+    const isStarter = normalizedName === "starter" || plan.price === 0;
+    const isGrowth = normalizedName === "growth";
+    const isScale = normalizedName === "scale";
 
+    // Read all prices, capacity limits and feature flags from the existing Plans API.
+    // Only the public-facing descriptions depend on the familiar plan names.
     const features = [
-        "Inventory and product catalog",
-        "Booking management",
-        "Basic POS and sales recording",
-        limitText(plan.max_inventory, "inventory items"),
-        limitText(plan.max_bookings, "bookings per month"),
-        limitText(plan.max_staff, "staff accounts"),
-        limitText(plan.max_branches, "branches"),
+        "Consumable product inventory",
+        "Rental equipment inventory",
+        "Booking and reservation management",
+        "Point-of-sale (POS) and sales recording",
         ...(plan.has_low_stock_alerts ? ["Low-stock notifications"] : []),
         ...(plan.has_analytics ? ["Business analytics and reports"] : []),
-        ...(plan.has_forecasting ? ["Sales forecasting"] : []),
-        ...(plan.has_multi_store ? ["Multi-store access"] : []),
+        ...(plan.has_forecasting ? ["Demand forecasting"] : []),
+        ...(plan.has_multi_store ? ["Multi-branch management"] : []),
+    ];
+    const limits = [
+        plan.max_inventory == null
+            ? "Unlimited inventory items"
+            : `Up to ${plan.max_inventory.toLocaleString("en-PH")} inventory items in total`,
+        limitText(plan.max_bookings, "new bookings per month"),
+        limitText(plan.max_staff, plan.max_staff === 1 ? "staff account" : "staff accounts"),
+        limitText(plan.max_branches, plan.max_branches === 1 ? "branch" : "branches"),
     ];
 
     return {
         id: plan.id,
         name: plan.name,
-        label: isStarter ? "Free" : isBusiness ? "Standard" : "Advanced",
+        label: isStarter ? "Get started" : isGrowth ? "For growing teams" : isScale ? "Complete access" : "Business plan",
         price: formatPlanPrice(plan.price),
         amount: plan.price,
         period: "/month",
         description: isStarter
-            ? "A simple starting plan with the essential tools for your business."
-            : `A ${isBusiness ? "standard" : "advanced"} plan with limits and features configured by the platform administrator.`,
+            ? "Start managing your inventory, bookings, and sales with essential business tools at no cost."
+            : isGrowth
+                ? "Handle more products, staff, and branches as your business expands."
+                : isScale
+                    ? "Manage larger operations with increased capacity and the advanced tools included in this plan."
+                    : "Manage your business with the capacity and features included in this plan.",
         features,
+        limits,
         buttonText: isStarter ? `Use ${plan.name}` : `Choose ${plan.name}`,
-        highlighted: isBusiness,
+        highlighted: isGrowth,
     };
 }
-
 
 const heroHighlights = [
     {
@@ -3085,16 +3097,8 @@ function PricingSection({
                 </h2>
 
                 <p className="mx-auto mt-4 max-w-2xl text-center text-sm leading-7 text-[#706578] sm:text-base">
-                    Start with the free plan, then upgrade when your inventory,
-                    bookings, staff, and reporting needs grow.
+                    Start for free and upgrade when your inventory, team, branches, or reporting needs grow.
                 </p>
-
-                <div className="mx-auto mt-6 flex max-w-2xl items-start gap-3 rounded-xl border border-[#E6D9BA] bg-[#FFFBF0] px-4 py-3">
-                    <div className="mt-1 h-2 w-2 shrink-0 rounded-full bg-[#C9951A]" />
-                    <p className="text-sm leading-6 text-[#6F6043]">
-                        Plan prices, limits, and feature access are managed by the platform administrator.
-                    </p>
-                </div>
 
                 {loading ? (
                     <div className="mt-12 rounded-2xl border border-[#E7E0ED] bg-white px-6 py-16 text-center text-sm text-[#7A6E88]">
@@ -3127,7 +3131,36 @@ function PricingSection({
                     </div>
                 )}
 
-                <p className="mt-8 text-center text-xs leading-5 text-[#7A6E88]">
+                <div className="mt-8 grid gap-3 text-left sm:grid-cols-3">
+                    <div className="rounded-2xl border border-[#E9E0EE] bg-white/85 p-4 shadow-sm">
+                        <div className="flex items-center gap-2.5">
+                            <Boxes className="h-4 w-4 shrink-0 text-[#C9951A]" />
+                            <h3 className="text-sm font-semibold text-[#2D1B4E]">How inventory is counted</h3>
+                        </div>
+                        <p className="mt-2 text-xs leading-5 text-[#706578] sm:text-sm">
+                            Both inventory types share one item allowance. For example, 30 consumable products and 20 rental equipment types count as 50 inventory items. Adding stock units to an existing item does not increase this count.
+                        </p>
+                    </div>
+                    <div className="rounded-2xl border border-[#E9E0EE] bg-white/85 p-4 shadow-sm">
+                        <div className="flex items-center gap-2.5">
+                            <CalendarDays className="h-4 w-4 shrink-0 text-[#C9951A]" />
+                            <h3 className="text-sm font-semibold text-[#2D1B4E]">How bookings are counted</h3>
+                        </div>
+                        <p className="mt-2 text-xs leading-5 text-[#706578] sm:text-sm">
+                            Only new booking requests created this calendar month count toward the monthly limit. Earlier months’ bookings do not.
+                        </p>
+                    </div>
+                    <div className="rounded-2xl border border-[#E9E0EE] bg-white/85 p-4 shadow-sm">
+                        <div className="flex items-center gap-2.5">
+                            <ShieldCheck className="h-4 w-4 shrink-0 text-[#C9951A]" />
+                            <h3 className="text-sm font-semibold text-[#2D1B4E]">When a paid plan expires</h3>
+                        </div>
+                        <p className="mt-2 text-xs leading-5 text-[#706578] sm:text-sm">
+                            Your existing products, equipment, and bookings stay saved. New additions follow the Starter plan limits after downgrade.
+                        </p>
+                    </div>
+                </div>
+                <p className="mt-5 text-center text-xs leading-5 text-[#7A6E88]">
                     No automatic recurring charges. Paid subscriptions use manual GCash payment verification.
                 </p>
             </div>
@@ -3145,76 +3178,86 @@ function PricingCard({
     return (
         <article
             className={[
-                "relative flex h-full flex-col overflow-hidden rounded-2xl border bg-white shadow-sm transition duration-200 hover:-translate-y-1 hover:shadow-xl",
+                "relative flex h-full flex-col rounded-[26px] border transition-all duration-200 hover:-translate-y-1 hover:shadow-xl",
                 plan.highlighted
-                    ? "snb-pricing-spotlight border-[#2D1B4E] ring-2 ring-[#2D1B4E]"
-                    : "border-[#EBE4F0]",
+                    ? "snb-pricing-spotlight border-[#E9E0EE] bg-[#F1ECF8] p-1.5 shadow-[0_18px_45px_rgba(45,27,78,0.11)] lg:-top-4"
+                    : "border-[#EBE4F0] bg-white shadow-[0_8px_24px_rgba(45,27,78,0.05)]",
             ].join(" ")}
         >
             {plan.highlighted && (
-                <div className="bg-[#2D1B4E] px-4 py-2 text-center text-xs font-medium uppercase tracking-[0.16em] text-white">
-                    Standard plan
+                <div className="flex items-center justify-center gap-2 px-4 py-2.5 text-center text-xs font-semibold tracking-wide text-[#2D1B4E]">
+                    <Sparkles className="h-4 w-4 shrink-0 text-[#C9951A]" aria-hidden="true" />
+                    Recommended for growing teams
                 </div>
             )}
 
-            <div className="flex h-full flex-col p-6">
+            <div
+                className={[
+                    "flex h-full flex-col bg-white px-6 pb-7 pt-7 sm:px-7",
+                    plan.highlighted ? "rounded-[21px]" : "rounded-[26px]",
+                ].join(" ")}
+            >
                 <div>
-                    <p className="text-xs font-medium uppercase tracking-[0.18em] text-[#C9951A]">
+                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#C9951A]">
                         {plan.label}
                     </p>
 
-                    <h3 className="mt-3 text-3xl font-semibold text-[#1A1220]">
+                    <h3 className="mt-3 text-2xl font-semibold tracking-tight text-[#21172C] sm:text-[28px]">
                         {plan.name}
                     </h3>
 
-                    <div className="mt-5 flex items-end gap-1">
-                        <span className="text-4xl font-semibold tracking-tight text-[#1A1220]">
+                    <div className="mt-4 flex items-end gap-1">
+                        <span className="text-[40px] font-semibold leading-none tracking-tight text-[#21172C] sm:text-[44px]">
                             {plan.price}
                         </span>
-
                         <span className="pb-1 text-sm text-[#7A6E88]">
                             {plan.period}
                         </span>
                     </div>
 
-                    <p className="mt-4 min-h-[72px] text-sm leading-6 text-[#7A6E88]">
+                    <p className="mt-4 min-h-[72px] text-sm leading-6 text-[#706578]">
                         {plan.description}
                     </p>
-                </div>
-
-                <div className="mt-7 flex-1 border-t border-[#EBE4F0] pt-6">
-                    <p className="text-xs font-medium uppercase tracking-[0.16em] text-[#7A6E88]">
-                        Included features
-                    </p>
-
-                    <ul className="mt-4 space-y-3">
-                        {plan.features.map((feature) => (
-                            <li
-                                key={feature}
-                                className="flex items-start gap-2.5 text-sm leading-5 text-[#3F354C]"
-                            >
-                                <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#FFF7E2]">
-                                    <Check className="h-3.5 w-3.5 text-[#C9951A]" />
-                                </span>
-
-                                <span>{feature}</span>
-                            </li>
-                        ))}
-                    </ul>
                 </div>
 
                 <button
                     type="button"
                     onClick={() => onSelectPlan(plan)}
                     className={[
-                        "mt-8 h-12 w-full rounded-xl text-sm font-medium transition duration-200",
+                        "mt-5 flex h-12 w-full items-center justify-center rounded-xl px-4 text-sm font-semibold transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#C9951A] focus-visible:ring-offset-2",
                         plan.highlighted
                             ? "bg-[#2D1B4E] text-white hover:bg-[#3D2560]"
-                            : "border border-[#2D1B4E] bg-white text-[#2D1B4E] hover:bg-[#2D1B4E] hover:text-white",
+                            : "bg-[#F1ECF8] text-[#2D1B4E] hover:bg-[#E9E0EE]",
                     ].join(" ")}
                 >
                     {plan.buttonText}
                 </button>
+
+                <div className="mt-7 flex-1 border-t border-[#EBE4F0] pt-6">
+                    <p className="text-xs font-semibold uppercase tracking-[0.15em] text-[#7A6E88]">
+                        Plan limits
+                    </p>
+                    <ul className="mt-4 space-y-3">
+                        {plan.limits.map((limit) => (
+                            <li key={limit} className="flex items-start gap-2.5 text-sm leading-5 text-[#3F354C]">
+                                <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[#C9951A]" aria-hidden="true" />
+                                <span>{limit}</span>
+                            </li>
+                        ))}
+                    </ul>
+
+                    <p className="mt-6 border-t border-[#EBE4F0] pt-5 text-xs font-semibold uppercase tracking-[0.15em] text-[#7A6E88]">
+                        Included features
+                    </p>
+                    <ul className="mt-4 space-y-3">
+                        {plan.features.map((feature) => (
+                            <li key={feature} className="flex items-start gap-2.5 text-sm leading-5 text-[#3F354C]">
+                                <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[#C9951A]" aria-hidden="true" />
+                                <span>{feature}</span>
+                            </li>
+                        ))}
+                    </ul>
+                </div>
             </div>
         </article>
     );
@@ -3238,122 +3281,100 @@ function SubscriptionModal({
             role="dialog"
             aria-modal="true"
             aria-labelledby="plan-access-dialog-title"
-            className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-[#160C27]/65 px-4 py-6 backdrop-blur-[3px] sm:px-6"
+            className="snb-plan-overlay fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-[#1A102B]/65 px-4 py-5 font-sans text-[#21172C] backdrop-blur-sm sm:px-6"
             onMouseDown={onClose}
         >
-            <div className="flex min-h-full w-full items-center justify-center py-6 sm:py-10">
+            <div className="flex min-h-full w-full items-center justify-center py-5 sm:py-8">
                 <div
-                    className="relative w-full max-w-[720px] overflow-hidden rounded-[26px] border border-white/80 bg-white shadow-[0_30px_90px_rgba(26,13,48,0.30)]"
+                    className="snb-plan-dialog relative w-full max-w-[700px] overflow-hidden rounded-3xl border border-[#E9E0EE] bg-white shadow-[0_28px_75px_rgba(26,13,48,0.28)]"
                     onMouseDown={(event) => event.stopPropagation()}
                 >
-                    <button
-                        type="button"
-                        onClick={onClose}
-                        aria-label="Close plan selection dialog"
-                        className="absolute right-5 top-5 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-[#F2EEF8] text-[#70647F] transition hover:bg-[#E8E0F2] hover:text-[#2D1B4E]"
-                    >
-                        <X className="h-5 w-5" />
-                    </button>
+                    <div className="relative bg-[#2D1B4E] px-6 py-7 text-white sm:px-8">
+                        <button
+                            type="button"
+                            onClick={onClose}
+                            aria-label="Close plan selection dialog"
+                            className="absolute right-4 top-4 flex h-9 w-9 items-center justify-center rounded-lg text-white/75 transition hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F1C85C]"
+                        >
+                            <X className="h-5 w-5" />
+                        </button>
 
-                    <div className="px-6 pb-5 pt-7 sm:px-8 sm:pb-6 sm:pt-8">
-                        <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:gap-6">
-                            <div className="mx-auto flex h-28 w-28 shrink-0 items-center justify-center rounded-full bg-[radial-gradient(circle_at_35%_30%,_#F5F0FF_0%,_#EAE1FB_55%,_#F8F5FC_100%)] text-[#5B35A5] shadow-inner sm:mx-0">
-                                <div className="flex h-[74px] w-[60px] items-center justify-center rounded-[18px] border border-[#8060D0] bg-[linear-gradient(160deg,_#7B55D0_0%,_#4E2A9C_100%)] shadow-[0_12px_24px_rgba(91,53,165,0.25)]">
-                                    <LockKeyhole className="h-9 w-9 text-white" strokeWidth={1.9} />
-                                </div>
-                            </div>
-
-                            <div className="min-w-0 flex-1 text-center sm:text-left">
-                                <div className="inline-flex items-center rounded-full border border-[#E5DCF2] bg-[#F8F5FF] px-3 py-1 text-xs font-semibold text-[#5B35A5]">
-                                    {plan.name} plan selected
-                                </div>
-
-                                <h2
-                                    id="plan-access-dialog-title"
-                                    className="mt-3 max-w-[500px] text-2xl font-semibold leading-tight tracking-[-0.025em] text-[#171125] sm:text-[30px]"
-                                >
-                                    Continue to choose your plan
-                                </h2>
-
-                                <p className="mt-2 max-w-[520px] text-sm leading-6 text-[#6F657A] sm:text-[15px]">
-                                    Log in or sign up first so we can connect your selected plan to your account and store securely.
-                                </p>
-                            </div>
+                        <div className="flex items-center gap-2.5 pr-9">
+                            <Image
+                                src="/logo.png"
+                                alt="StockNBook logo"
+                                width={176}
+                                height={176}
+                                className="h-10 w-10 shrink-0 object-contain"
+                            />
+                            <span className={`${lora.className} text-xl font-bold tracking-[-0.045em] text-white sm:text-2xl`}>
+                                Stock<span className="text-[#D4A126]">N</span>Book
+                            </span>
                         </div>
+                        <h2 id="plan-access-dialog-title" className={`${lora.className} mt-3 text-xl font-semibold leading-snug text-white sm:text-2xl`}>
+                            Continue with {plan.name}
+                        </h2>
+                        <p className="mt-1 max-w-xl text-sm leading-6 text-white/80">
+                            Sign up or log in to review the plan for your business.
+                        </p>
+                    </div>
 
-                        <div className="mt-6 h-px bg-[#ECE6F2]" />
-
-                        <div className="mt-5 grid gap-4 sm:grid-cols-2">
-                            <div className="rounded-2xl border border-[#E8E0F3] bg-[linear-gradient(145deg,_#FBF9FF_0%,_#F4EFFC_100%)] p-5 sm:p-6">
-                                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[#E9E1FA] text-[#5B35A5]">
-                                    <UserRound className="h-6 w-6" />
+                    <div className="px-6 pb-6 pt-5 sm:px-8 sm:pb-8">
+                        <div className="grid gap-4 sm:grid-cols-2">
+                            <div className="flex flex-col rounded-2xl border border-[#E9E0EE] bg-[#FCFAFD] p-5">
+                                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#F1ECF8] text-[#2D1B4E]">
+                                    <UserRound className="h-5 w-5" />
                                 </div>
-
-                                <h3 className="mt-4 text-lg font-semibold text-[#171125]">
+                                <h3 className="mt-3 text-lg font-semibold text-[#21172C]">
                                     New to StockNBook?
                                 </h3>
-
-                                <p className="mt-1 text-sm leading-6 text-[#6F657A]">
-                                    Create your account to get started.
+                                <p className="mt-1 text-sm leading-6 text-[#706578]">
+                                    Create an account for your business to get started.
                                 </p>
-
-                                <ul className="mt-4 space-y-2.5">
-                                    <li className="flex items-start gap-2.5 text-sm text-[#4F465C]">
-                                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[#5B35A5]" />
-                                        <span>Create your store and account</span>
+                                <ul className="mt-4 space-y-2.5 text-sm text-[#4F4559]">
+                                    <li className="flex items-start gap-2">
+                                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[#C9951A]" />
+                                        <span>Register your store and branch</span>
                                     </li>
-                                    <li className="flex items-start gap-2.5 text-sm text-[#4F465C]">
-                                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[#5B35A5]" />
-                                        <span>Start with the {plan.name} plan</span>
-                                    </li>
-                                    <li className="flex items-start gap-2.5 text-sm text-[#4F465C]">
-                                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[#5B35A5]" />
-                                        <span>Manage everything in one place</span>
+                                    <li className="flex items-start gap-2">
+                                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[#C9951A]" />
+                                        <span>Review available subscription plans</span>
                                     </li>
                                 </ul>
-
                                 <button
                                     type="button"
                                     onClick={() => handleAuthenticate("signup")}
-                                    className="mt-5 inline-flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#5B35A5] px-5 text-sm font-semibold text-white shadow-[0_8px_20px_rgba(91,53,165,0.20)] transition hover:bg-[#4B238F] hover:shadow-[0_10px_24px_rgba(91,53,165,0.25)]"
+                                    className="mt-5 inline-flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#2D1B4E] px-5 text-sm font-semibold text-white transition hover:bg-[#3D2560] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#C9951A]"
                                 >
                                     Sign up
                                     <ArrowRight className="h-4 w-4" />
                                 </button>
                             </div>
 
-                            <div className="rounded-2xl border border-[#E8E0F3] bg-[linear-gradient(145deg,_#FBF9FF_0%,_#F4EFFC_100%)] p-5 sm:p-6">
-                                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[#E9E1FA] text-[#5B35A5]">
-                                    <LogIn className="h-6 w-6" />
+                            <div className="flex flex-col rounded-2xl border border-[#E9E0EE] bg-[#FCFAFD] p-5">
+                                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#F1ECF8] text-[#2D1B4E]">
+                                    <LogIn className="h-5 w-5" />
                                 </div>
-
-                                <h3 className="mt-4 text-lg font-semibold text-[#171125]">
+                                <h3 className="mt-3 text-lg font-semibold text-[#21172C]">
                                     Already have an account?
                                 </h3>
-
-                                <p className="mt-1 text-sm leading-6 text-[#6F657A]">
-                                    Log in to continue with your selected plan.
+                                <p className="mt-1 text-sm leading-6 text-[#706578]">
+                                    Log in to manage your store and review its plan.
                                 </p>
-
-                                <ul className="mt-4 space-y-2.5">
-                                    <li className="flex items-start gap-2.5 text-sm text-[#4F465C]">
-                                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[#5B35A5]" />
-                                        <span>Use your existing account</span>
+                                <ul className="mt-4 space-y-2.5 text-sm text-[#4F4559]">
+                                    <li className="flex items-start gap-2">
+                                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[#C9951A]" />
+                                        <span>Use your existing StockNBook account</span>
                                     </li>
-                                    <li className="flex items-start gap-2.5 text-sm text-[#4F465C]">
-                                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[#5B35A5]" />
-                                        <span>Keep your data and settings</span>
-                                    </li>
-                                    <li className="flex items-start gap-2.5 text-sm text-[#4F465C]">
-                                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[#5B35A5]" />
-                                        <span>Continue where you left off</span>
+                                    <li className="flex items-start gap-2">
+                                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[#C9951A]" />
+                                        <span>Keep your existing business records</span>
                                     </li>
                                 </ul>
-
                                 <button
                                     type="button"
                                     onClick={() => handleAuthenticate("login")}
-                                    className="mt-5 inline-flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-[#6D49B5] bg-white px-5 text-sm font-semibold text-[#5B35A5] transition hover:bg-[#F7F2FD]"
+                                    className="mt-5 inline-flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-[#2D1B4E] bg-white px-5 text-sm font-semibold text-[#2D1B4E] transition hover:bg-[#F1ECF8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#C9951A]"
                                 >
                                     Log in
                                     <ArrowRight className="h-4 w-4" />
@@ -3361,20 +3382,24 @@ function SubscriptionModal({
                             </div>
                         </div>
 
-                        <div className="mt-5 flex items-start justify-center gap-3 rounded-xl border border-[#E8E1F0] bg-[#FBFAFD] px-4 py-3.5 text-center sm:text-left">
-                            <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-[#5B35A5]" />
-                            <div>
-                                <p className="text-sm font-medium text-[#41374E]">
-                                    Your information is safe with us.
-                                </p>
-                                <p className="mt-0.5 text-xs leading-5 text-[#7A7084]">
-                                    We use your account to securely connect your plan and subscription activity to your store.
-                                </p>
-                            </div>
+                        <div className="mt-5 flex items-start gap-2.5 border-t border-[#E9E0EE] pt-4">
+                            <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-[#C9951A]" />
+                            <p className="text-xs leading-5 text-[#706578]">
+                                Selecting a plan does not activate a paid subscription. Paid plans require payment verification after account setup or login.
+                            </p>
                         </div>
                     </div>
                 </div>
             </div>
+            <style jsx global>{`
+                @keyframes snbPlanOverlayFade { from { opacity: 0; } to { opacity: 1; } }
+                @keyframes snbPlanDialogIn { from { opacity: 0; transform: translateY(12px) scale(.97); } to { opacity: 1; transform: translateY(0) scale(1); } }
+                .snb-plan-overlay { animation: snbPlanOverlayFade .23s ease-out both; }
+                .snb-plan-dialog { animation: snbPlanDialogIn .4s cubic-bezier(.2,.75,.2,1) both; }
+                @media (prefers-reduced-motion: reduce) {
+                    .snb-plan-overlay, .snb-plan-dialog { animation: none !important; }
+                }
+            `}</style>
         </div>
     );
 }

@@ -513,7 +513,8 @@ async function listBusinesses(connection, search) {
              pl.id AS plan_id,
              pl.plan_name AS plan_name,
              COALESCE((SELECT SUM(p2.${c.amount}) FROM subscription_payments p2 WHERE p2.${c.storeId} = s.id AND UPPER(p2.${c.status}) = 'APPROVED'), 0) AS lifetime_paid,
-             (SELECT COUNT(*) FROM products prod WHERE prod.store_id = s.id) AS inventory_item_count
+             ((SELECT COUNT(*) FROM products prod WHERE prod.store_id = s.id AND prod.deleted_at IS NULL) +
+              (SELECT COUNT(*) FROM equipment eq WHERE eq.store_id = s.id AND eq.deleted_at IS NULL)) AS inventory_item_count
          FROM stores s
                   LEFT JOIN users ou ON ou.store_id = s.id AND ou.role = 'owner'
                   LEFT JOIN subscriptions sub ON sub.store_id = s.id
@@ -1835,14 +1836,18 @@ async function getStorePlanDetails(connection, storeId) {
     const maxBranches = limitOrNull(plan?.max_branches);
 
     const [inventoryRows] = await connection.execute(
-        `SELECT COUNT(*) AS total FROM products WHERE store_id = ? AND deleted_at IS NULL`,
-        [storeId]
+        `SELECT
+             (SELECT COUNT(*) FROM products WHERE store_id = ? AND deleted_at IS NULL) +
+             (SELECT COUNT(*) FROM equipment WHERE store_id = ? AND deleted_at IS NULL) AS total`,
+        [storeId, storeId]
     );
 
     let bookingCount = 0;
     try {
         const [bookingRows] = await connection.execute(
-            "SELECT COUNT(*) AS total FROM bookings WHERE store_id = ?",
+            `SELECT COUNT(*) AS total FROM bookings WHERE store_id = ?
+               AND created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
+               AND created_at < DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01')`,
             [storeId]
         );
         bookingCount = Number(bookingRows[0]?.total || 0);
@@ -1886,8 +1891,8 @@ async function getStorePlanDetails(connection, storeId) {
     return {
         plan_name: plan?.name || "Starter",
         features: [
-            { label: `${maxInventory ?? "Unlimited"} inventory items`, enabled: true },
-            { label: `${maxBookings ?? "Unlimited"} bookings`, enabled: true },
+            { label: `${maxInventory ?? "Unlimited"} inventory items (consumables + rentals combined)`, enabled: true },
+            { label: `${maxBookings ?? "Unlimited"} new bookings per month`, enabled: true },
             { label: `${maxStaff ?? "Unlimited"} staff accounts`, enabled: true },
             { label: `${maxBranches ?? "Unlimited"} branches`, enabled: true },
             { label: "Low-stock alerts", enabled: Boolean(plan?.has_low_stock_alerts) },
@@ -1896,8 +1901,8 @@ async function getStorePlanDetails(connection, storeId) {
             { label: "Multi-store management", enabled: Boolean(plan?.has_multi_store) },
         ],
         usage: [
-            usageRow("Inventory", Number(inventoryRows[0]?.total || 0), maxInventory),
-            usageRow("Bookings", bookingCount, maxBookings),
+            usageRow("Inventory (consumables + rentals)", Number(inventoryRows[0]?.total || 0), maxInventory),
+            usageRow("Bookings this month", bookingCount, maxBookings),
             usageRow("Staff", staffCount, maxStaff),
             usageRow("Branches", branchCount, maxBranches),
         ],

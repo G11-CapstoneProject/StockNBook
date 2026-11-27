@@ -1,128 +1,134 @@
+
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { RefreshCw } from "lucide-react";
+import { BarChart3, RefreshCw } from "lucide-react";
+
 import RoleSidebar from "@/components/sidebar/RoleSidebar";
-import RequirePermission from "@/components/permissions/RequirePermission";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
-import { AnalyticsLoadingScreen } from "@/components/analytics/_shared";
+
 import OwnerAnalytics from "@/components/analytics/OwnerAnalytics";
 import ManagerAnalytics from "@/components/analytics/ManagerAnalytics";
+import StaffAnalytics from "@/components/analytics/StaffAnalytics";
+
+import RequirePermission from "@/components/permissions/RequirePermission";
 import PlanFeatureGate from "@/components/permissions/PlanFeatureGate";
 
-function formatCurrentDateTime(value: Date) {
-    const dateLabel = value.toLocaleDateString("en-US", {
-        month: "long",
-        day: "numeric",
-        year: "numeric",
-    });
-
-    const timeLabel = value
-        .toLocaleTimeString("en-US", {
-            hour: "numeric",
-            minute: "2-digit",
-            hour12: true,
-        })
-        .toLowerCase();
-
-    return `${dateLabel} | ${timeLabel}`;
-}
-
 export default function AnalyticsPage() {
-    const { user, loading: userLoading } = useCurrentUser();
     const router = useRouter();
-    const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
+    const { user, loading } = useCurrentUser();
 
-    const currentUser = user as {
-        role?: string;
-        permissions?: Record<string, boolean | string>;
-    } | null;
+    const [refreshing, setRefreshing] = useState(false);
 
-    const role = String(currentUser?.role || "").trim().toLowerCase();
+    const role = String(user?.role || "").toLowerCase();
+
+    const canViewAnalytics =
+        role === "owner" ||
+        role === "manager" ||
+        (role === "staff" &&
+            user?.permissions?.analytics === true);
 
     useEffect(() => {
-        const updateTime = () => setCurrentDateTime(new Date());
+        if (loading || !user) return;
 
-        updateTime();
-        const timer = window.setInterval(updateTime, 30_000);
+        if (!canViewAnalytics) {
+            router.replace("/dashboard");
+        }
+    }, [loading, user, canViewAnalytics, router]);
 
-        return () => window.clearInterval(timer);
+    const handleRefresh = useCallback(() => {
+        setRefreshing(true);
+
+        window.dispatchEvent(
+            new Event("stocknbook-refresh-analytics")
+        );
+
+        // The workspace manages the actual API loading state.
+        // This button only triggers the refresh event.
+        setRefreshing(false);
     }, []);
 
-    useEffect(() => {
-        if (userLoading || !currentUser) return;
-
-        if (role === "staff") {
-            router.push("/dashboard");
-        }
-    }, [userLoading, currentUser, role, router]);
-
-    if (userLoading) {
-        return <AnalyticsLoadingScreen />;
+    if (loading) {
+        return (
+            <div className="flex min-h-screen items-center justify-center bg-[#FDFAF4]">
+                <p className="text-sm text-[#81718D]">
+                    Loading Analytics...
+                </p>
+            </div>
+        );
     }
 
-    if (!user || role === "staff") {
+    if (!user || !canViewAnalytics) {
         return null;
     }
 
-    const subtitle =
-        role === "owner"
-            ? "Track sales performance, customer demand, and business insights across branches"
-            : "Review sales performance, customer demand, and branch insights";
-
     return (
         <RequirePermission permission="analytics">
-            <div className="flex min-h-screen bg-[#FDFAF4] font-sans text-[#1A1220]">
-                <RoleSidebar />
+            <PlanFeatureGate feature="analytics">
+                <div className="flex min-h-screen bg-[#FDFAF4]">
+                    <RoleSidebar />
 
-                <main className="min-w-0 flex-1 overflow-y-auto">
-                    <header className="sticky top-0 z-20 border-b border-[#E9E0EF] bg-[#FFFDF8]/95 backdrop-blur">
-                        <div className="flex min-h-[72px] flex-wrap items-center justify-between gap-4 px-6 py-3">
-                            <div>
-                                <div className="flex flex-wrap items-center gap-2.5">
-                                    <h1 className="text-[25px] font-bold text-[#1A1220]">
-                                        Analytics &amp; Forecasting
-                                    </h1>
-                                    <span className="inline-flex h-[34px] items-center rounded-xl border border-[#E7D9FF] bg-[#FAF6FF] px-3 text-xs font-semibold text-[#5E32A7]">
-                                        Premium Feature
-                                    </span>
+                    <main className="min-w-0 flex-1 p-5 lg:p-8">
+                        <div className="mx-auto max-w-7xl space-y-6">
+
+                            {/* PAGE HEADER */}
+
+                            <div className="flex flex-wrap items-center justify-between gap-4">
+                                <div className="flex items-start gap-3">
+                                    <div className="rounded-xl bg-[#EEE5F5] p-3 text-[#7651A5]">
+                                        <BarChart3 size={22} />
+                                    </div>
+
+                                    <div>
+                                        <h1 className="text-2xl font-bold text-[#302044]">
+                                            Analytics
+                                        </h1>
+
+                                        <p className="mt-1 text-sm text-[#81718D]">
+                                            Understand historical sales,
+                                            product demand, bookings,
+                                            packages, and branch performance.
+                                        </p>
+                                    </div>
                                 </div>
-                                <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                    {subtitle}
-                                </p>
-                            </div>
-
-                            <div className="flex items-center gap-2.5">
-                                <span className="inline-flex h-[42px] items-center rounded-xl border border-[#E6DDF0] bg-white px-3.5 text-sm font-semibold text-[#2B174C] shadow-sm">
-                                    {currentDateTime
-                                        ? formatCurrentDateTime(currentDateTime)
-                                        : "Loading date..."}
-                                </span>
 
                                 <button
                                     type="button"
-                                    onClick={() => window.dispatchEvent(new Event("stocknbook-refresh-analytics"))}
-                                    className="inline-flex h-[42px] items-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
+                                    onClick={handleRefresh}
+                                    disabled={refreshing}
+                                    className="flex items-center gap-2 rounded-lg border border-[#DDD2E8] bg-white px-4 py-2.5 text-sm font-semibold text-[#7651A5] transition hover:bg-[#F7F1FA] disabled:opacity-50"
                                 >
-                                    <RefreshCw size={16} />
-                                    Refresh
+                                    <RefreshCw
+                                        size={16}
+                                        className={
+                                            refreshing
+                                                ? "animate-spin"
+                                                : ""
+                                        }
+                                    />
+
+                                    Refresh Analytics
                                 </button>
                             </div>
-                        </div>
-                    </header>
 
-                    <section className="px-6 py-4">
-                        <PlanFeatureGate feature="analytics">
-                            {role === "owner" ? (
+                            {/* ROLE-SPECIFIC ANALYTICS */}
+
+                            {role === "owner" && (
                                 <OwnerAnalytics />
-                            ) : role === "manager" ? (
+                            )}
+
+                            {role === "manager" && (
                                 <ManagerAnalytics />
-                            ) : null}
-                        </PlanFeatureGate>
-                    </section>
-                </main>
-            </div>
+                            )}
+
+                            {role === "staff" && (
+                                <StaffAnalytics />
+                            )}
+                        </div>
+                    </main>
+                </div>
+            </PlanFeatureGate>
         </RequirePermission>
     );
 }

@@ -846,22 +846,26 @@ export function PriceModal({
 }) {
     // Pricing rules (unchanged in the Bookings Lambda):
     //   Package → fixed package price. Older Rental bookings → fixed by daily rates.
-    //   Custom  → ONE agreed price for everything (consumables and rental equipment). It can be discounted;
-    //             a price below the normal total needs a short reason for the record.
+    //   Custom  → ONE agreed price for everything (consumables and rental equipment). It can be discounted.
+    // Discount and down payment share one unit switch: % or ₱.
     const bookingType = getManagerBookingTypeLabel(booking);
     const fixedPackage = bookingType === "Package";
     const fixedRental = bookingType === "Rental";
     const fixedPrice = fixedPackage || fixedRental;
     type Line = { name: string; detail: string; amount: number };
+    type Unit = "percent" | "amount";
     const [lines, setLines] = useState<Line[]>([]);
     const [consumablesTotal, setConsumablesTotal] = useState(0);
     const [rentalTotal, setRentalTotal] = useState(0);
     const [packageBase, setPackageBase] = useState(0);
     const [includedRentals, setIncludedRentals] = useState<string[]>([]);
     const [showItems, setShowItems] = useState(false);
+    const [unit, setUnit] = useState<Unit>("percent");
+    const [discountText, setDiscountText] = useState("");
+    const [dpText, setDpText] = useState("30");
+    // Custom quote: type the total yourself (e.g. extra requests above the item prices).
+    const [manualPrice, setManualPrice] = useState(false);
     const [price, setPrice] = useState(String(getTotalPrice(booking) || ""));
-    const [reason, setReason] = useState("");
-    const [dpPercent, setDpPercent] = useState("30");
     const [fixedDp, setFixedDp] = useState(Number(booking.required_down_payment ?? booking.requiredDownPayment ??
         booking.down_payment_amount ?? booking.downPaymentAmount ?? 0));
     const [deposit, setDeposit] = useState("0");
@@ -870,7 +874,10 @@ export function PriceModal({
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState("");
     const cents = (n: number) => Math.round(n * 100);
+    const r2 = (n: number) => Math.round(n * 100) / 100;
+    const fmt = (n: number) => String(r2(n));
     const isMoney = (raw: string) => /^\d+(\.\d{1,2})?$/.test(raw.trim());
+    const toNumber = (raw: string) => (raw.trim() === "" ? Number.NaN : Number(raw));
 
     useEffect(() => {
         let cancelled = false;
@@ -908,9 +915,13 @@ export function PriceModal({
                 const normal = Number(st.salesSubtotal || 0) + Number(st.rentalSubtotal || 0);
                 const startPrice = savedPrice > 0 ? savedPrice : normal > 0 ? normal : getTotalPrice(booking);
                 setPrice(startPrice > 0 ? startPrice.toFixed(2) : "");
+                // A saved price above the item total was typed by hand; a lower one shows as its % off.
+                if (normal > 0 && startPrice > normal + 0.005) setManualPrice(true);
+                const savedDiscount = normal > 0 && startPrice > 0 ? normal - startPrice : 0;
+                setDiscountText(savedDiscount > 0.005 ? String(Math.round(savedDiscount / normal * 10000) / 100) : "");
                 const existingDp = Number(booking.required_down_payment ?? booking.requiredDownPayment ?? 0);
                 setFixedDp(existingDp);
-                if (startPrice > 0 && existingDp > 0) setDpPercent(String(Math.round(existingDp / startPrice * 10000) / 100));
+                if (startPrice > 0 && existingDp > 0) setDpText(String(Math.round(existingDp / startPrice * 10000) / 100));
             } catch (cause) {
                 if (!cancelled) setError(cause instanceof Error ? cause.message : "Couldn't load this booking's items.");
             } finally { if (!cancelled) setLoading(false); }
@@ -919,30 +930,64 @@ export function PriceModal({
     }, [booking.id, booking.branchId, booking.branch_id]);
 
     // ── Price ──
-    const normalTotal = Math.round((consumablesTotal + rentalTotal) * 100) / 100;
-    const finalPrice = fixedPrice ? getTotalPrice(booking) : (isMoney(price) ? Number(price) : 0);
-    const discount = !fixedPrice && normalTotal > 0 ? Math.round((normalTotal - finalPrice) * 100) / 100 : 0;
+    const normalTotal = r2(consumablesTotal + rentalTotal);
+    const priceEntry = !fixedPrice && (manualPrice || normalTotal <= 0);
+    const useDiscount = !fixedPrice && !priceEntry;
+    const discountValue = toNumber(discountText);
+    const discountError = !useDiscount || discountText.trim() === "" ? ""
+        : !Number.isFinite(discountValue) || discountValue < 0 ? "Enter a discount of 0 or more."
+            : unit === "percent" && discountValue > 100 ? "A discount can't be more than 100%."
+                : unit === "amount" && discountValue > normalTotal + 0.005 ? `A discount can't be more than the normal total (${peso(normalTotal)}).`
+                    : "";
+    const discountAmount = useDiscount && discountText.trim() !== "" && !discountError
+        ? r2(unit === "percent" ? normalTotal * discountValue / 100 : discountValue) : 0;
+    const finalPrice = fixedPrice ? getTotalPrice(booking)
+        : priceEntry ? (isMoney(price) ? Number(price) : 0)
+            : r2(normalTotal - discountAmount);
+    const discount = !fixedPrice && normalTotal > 0 ? r2(normalTotal - finalPrice) : 0;
     const discountPercent = normalTotal > 0 ? Math.round(discount / normalTotal * 1000) / 10 : 0;
-    const needsReason = discount > 0.005;
     // ── Down payment ── (a consumables-only package keeps the down payment set in the package)
     const dpFromPackage = fixedPackage && hasRental === false;
-    const dpRate = Number(dpPercent);
-    const dpRateValid = dpPercent.trim() !== "" && Number.isFinite(dpRate) && dpRate >= 0 && dpRate <= 100;
-    const dp = dpFromPackage ? fixedDp : (dpRateValid ? Math.round(finalPrice * dpRate) / 100 : 0);
+    const dpValue = toNumber(dpText);
+    const dpError = dpFromPackage ? ""
+        : !Number.isFinite(dpValue) || dpValue < 0 ? "Enter a down payment of 0 or more."
+            : unit === "percent" && dpValue > 100 ? "A down payment can't be more than 100%."
+                : unit === "amount" && dpValue > finalPrice + 0.005 ? "The down payment can't be more than the total price."
+                    : "";
+    const dp = dpFromPackage ? fixedDp : dpError ? 0 : r2(unit === "percent" ? finalPrice * dpValue / 100 : dpValue);
+    const dpPercentOfPrice = finalPrice > 0 ? Math.round(dp / finalPrice * 1000) / 10 : 0;
     const depositValue = hasRental && isMoney(deposit) ? Number(deposit) : 0;
-    const setPriceFromDiscount = (percent: number) => { setPrice((Math.round(normalTotal * (100 - percent)) / 100).toFixed(2)); setError(""); };
+    const showUnitSwitch = useDiscount || !dpFromPackage;
+
+    // Switching % ↔ ₱ keeps the same amounts, shown in the new unit.
+    const switchUnit = (next: Unit) => {
+        if (next === unit) return;
+        setUnit(next); setError("");
+        if (useDiscount && discountText.trim() !== "" && !discountError)
+            setDiscountText(discountAmount > 0 ? fmt(next === "percent" ? discountAmount / normalTotal * 100 : discountAmount) : "");
+        if (!dpFromPackage && !dpError && finalPrice > 0)
+            setDpText(fmt(next === "percent" ? dp / finalPrice * 100 : dp));
+    };
+    const startManualPrice = () => { setManualPrice(true); setPrice((finalPrice > 0 ? finalPrice : normalTotal).toFixed(2)); setError(""); };
+    const stopManualPrice = () => {
+        setManualPrice(false); setError("");
+        const off = normalTotal - finalPrice;
+        setDiscountText(off > 0.005 && off <= normalTotal ? fmt(unit === "percent" ? off / normalTotal * 100 : off) : "");
+    };
 
     async function handleConfirm() {
         if (saving || loading || hasRental === null) return;
-        if (!fixedPrice && (!isMoney(price) || finalPrice <= 0)) { setError("Enter a price greater than ₱0."); return; }
-        if (needsReason && reason.trim().length < 5) { setError("Add a short reason for the discount (at least 5 characters)."); return; }
-        if (!dpFromPackage && !dpRateValid) { setError("Down payment must be between 0% and 100%."); return; }
+        if (discountError) { setError(discountError); return; }
+        if (!fixedPrice && finalPrice <= 0) { setError(priceEntry ? "Enter a total price greater than ₱0." : "The total price must be more than ₱0."); return; }
+        if (dpError) { setError(dpError); return; }
         if (hasRental && dp <= 0) { setError("Bookings with rental equipment need a down payment above ₱0."); return; }
-        if (dp > finalPrice) { setError("The down payment can't be more than the price."); return; }
+        if (dp > finalPrice + 0.005) { setError("The down payment can't be more than the total price."); return; }
         if (hasRental && !isMoney(deposit)) { setError("Enter a valid security deposit (₱0 if none)."); return; }
         setSaving(true); setError("");
         try {
-            await onConfirm(finalPrice, dp, depositValue, "", undefined, needsReason ? `Discount ₱${discount.toFixed(2)} (${discountPercent}%): ${reason.trim()}` : undefined);
+            // No reason needed; the discount itself is saved in the activity log.
+            await onConfirm(finalPrice, dp, depositValue, "", undefined,
+                discount > 0.005 ? `Discount ${peso(discount)} (${discountPercent}% off)` : undefined);
         } catch (cause) {
             setError(cause instanceof Error ? cause.message : "Couldn't save the terms.");
         } finally { setSaving(false); }
@@ -950,6 +995,18 @@ export function PriceModal({
 
     const field = "h-11 w-full rounded-xl border border-[#E6DDF0] bg-white px-3 text-sm text-[#1A1220] outline-none focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:bg-[#F5F2F8] disabled:text-[#806A8C]";
     const row = "flex items-center justify-between gap-3";
+    const unitSign = unit === "percent" ? "%" : "₱";
+    // Input with the unit shown inside the box (inline styles so it never depends on new Tailwind classes).
+    const unitInput = (props: { id: string; label: string; value: string; invalid: boolean; onChange: (value: string) => void; placeholder: string }) => (
+        <div style={{ position: "relative" }}>
+            {unit === "amount" && <span aria-hidden="true" className="text-sm text-[#806A8C]" style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)" }}>₱</span>}
+            <input id={props.id} aria-label={props.label} inputMode="decimal" value={props.value} disabled={saving} placeholder={props.placeholder}
+                   aria-invalid={props.invalid} onChange={e => { props.onChange(e.target.value); setError(""); }}
+                   className={`${field} tabular-nums`} style={{ paddingLeft: unit === "amount" ? 28 : 12, paddingRight: 32 }}/>
+            {unit === "percent" && <span aria-hidden="true" className="text-sm text-[#806A8C]" style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)" }}>%</span>}
+        </div>
+    );
+
     return (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm">
             <div role="dialog" aria-modal="true" aria-label="Set price and payment terms" className="flex max-h-[90vh] w-full max-w-md flex-col overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white font-sans shadow-2xl">
@@ -969,46 +1026,55 @@ export function PriceModal({
                             {fixedPackage && includedRentals.length > 0 && <p className="text-xs text-[#806A8C]">Includes: {includedRentals.join(", ")}</p>}
                             <div className={`${row} border-t border-[#E6DDF0] pt-1.5 font-bold`}><span>Total</span><span className="tabular-nums">{peso(finalPrice)}</span></div>
                             <p className="text-xs text-[#806A8C]">{fixedPackage ? "Fixed by the package." : "Fixed by the equipment's daily rates."}</p>
-                        </div> : <>
-                            {normalTotal > 0 && <div className="space-y-1.5 rounded-xl bg-[#FAF8FD] p-3">
-                                {consumablesTotal > 0 && <div className={row}><span>Consumables</span><span className="tabular-nums">{peso(consumablesTotal)}</span></div>}
-                                {rentalTotal > 0 && <div className={row}><span>Rental equipment</span><span className="tabular-nums">{peso(rentalTotal)}</span></div>}
-                                <div className={`${row} border-t border-[#E6DDF0] pt-1.5 font-semibold`}><span>Normal total</span><span className="tabular-nums">{peso(normalTotal)}</span></div>
-                                {lines.length > 0 && <button type="button" onClick={() => setShowItems(v => !v)} className="text-xs font-semibold text-[#6335BC] hover:underline">
-                                    {showItems ? "Hide items" : `View items (${lines.length})`}</button>}
-                                {showItems && <ul className="space-y-1 border-t border-[#E6DDF0] pt-1.5 text-xs text-[#5F4E75]">{lines.map((l, i) =>
-                                    <li key={i} className={row}><span>{l.name} <span className="text-[#75657E]">{l.detail}</span></span><span className="tabular-nums">{peso(l.amount)}</span></li>)}</ul>}
-                            </div>}
-                            <label className="block font-semibold">Agreed price (₱)
-                                <input aria-label="Agreed price" inputMode="decimal" value={price} disabled={saving} placeholder="0.00"
-                                       onChange={e => { setPrice(e.target.value); setError(""); }} className={`${field} mt-1 tabular-nums`}/>
-                            </label>
-                            {normalTotal > 0 && <div className="flex flex-wrap gap-2">
-                                {[0, 5, 10].map(p => <button key={p} type="button" disabled={saving} onClick={() => setPriceFromDiscount(p)}
-                                                             className="rounded-lg border border-[#D8CBE7] px-2.5 py-1 text-xs font-semibold text-[#4E2C66] hover:bg-[#F7F1FF]">
-                                    {p === 0 ? "Normal price" : `${p}% off`}</button>)}
-                            </div>}
-                            {normalTotal > 0 && discount > 0.005 && <p className="text-xs font-semibold text-[#138342]">Discount: {peso(discount)} ({discountPercent}% off)</p>}
-                            {normalTotal > 0 && discount < -0.005 && <p className="text-xs text-[#806A8C]">{peso(-discount)} above the normal total (e.g. for extra requests).</p>}
-                            {needsReason && <label className="block font-semibold">Reason for the discount
-                                <input value={reason} maxLength={250} disabled={saving} placeholder="e.g. Returning customer"
-                                       onChange={e => { setReason(e.target.value); setError(""); }} className={`${field} mt-1`}/>
-                            </label>}
-                        </>}
+                        </div> : normalTotal > 0 && <div className="space-y-1.5 rounded-xl bg-[#FAF8FD] p-3">
+                            {consumablesTotal > 0 && <div className={row}><span>Consumables</span><span className="tabular-nums">{peso(consumablesTotal)}</span></div>}
+                            {rentalTotal > 0 && <div className={row}><span>Rental equipment</span><span className="tabular-nums">{peso(rentalTotal)}</span></div>}
+                            <div className={`${row} border-t border-[#E6DDF0] pt-1.5 font-semibold`}><span>Normal total</span><span className="tabular-nums">{peso(normalTotal)}</span></div>
+                            {lines.length > 0 && <button type="button" onClick={() => setShowItems(v => !v)} className="text-xs font-semibold text-[#6335BC] hover:underline">
+                                {showItems ? "Hide items" : `View items (${lines.length})`}</button>}
+                            {showItems && <ul className="space-y-1 border-t border-[#E6DDF0] pt-1.5 text-xs text-[#5F4E75]">{lines.map((l, i) =>
+                                <li key={i} className={row}><span>{l.name} <span className="text-[#75657E]">{l.detail}</span></span><span className="tabular-nums">{peso(l.amount)}</span></li>)}</ul>}
+                        </div>}
+                        {priceEntry && <label className="block font-semibold">Total price (₱)
+                            <input aria-label="Total price" inputMode="decimal" value={price} disabled={saving} placeholder="0.00"
+                                   onChange={e => { setPrice(e.target.value); setError(""); }} className={`${field} mt-1 tabular-nums`}/>
+                        </label>}
+                        {!fixedPrice && normalTotal > 0 && <button type="button" disabled={saving} onClick={priceEntry ? stopManualPrice : startManualPrice}
+                                                                   className="text-xs font-semibold text-[#6335BC] hover:underline">
+                            {priceEntry ? "Use a discount instead" : "Type the total price yourself"}</button>}
                     </section>}
 
-                    {/* Payment */}
-                    {!loading && hasRental !== null && <section aria-label="Payment" className="space-y-2">
-                        <h4 className="text-xs font-bold uppercase tracking-wide text-[#806A8C]">Payment</h4>
+                    {/* Discount and down payment: one % / ₱ switch for both */}
+                    {!loading && hasRental !== null && <section aria-label="Discount and payment" className="space-y-3">
+                        <div className={row}>
+                            <h4 className="text-xs font-bold uppercase tracking-wide text-[#806A8C]">{useDiscount ? "Discount & Down payment" : "Payment"}</h4>
+                            {showUnitSwitch && <div role="radiogroup" aria-label="Enter amounts as" className="flex rounded-lg border border-[#D8CBE7]" style={{ padding: 2 }}>
+                                {(["percent", "amount"] as Unit[]).map(option => <button key={option} type="button" role="radio" aria-checked={unit === option}
+                                                                                         disabled={saving} onClick={() => switchUnit(option)}
+                                                                                         className="rounded-md text-xs font-semibold"
+                                                                                         style={{ padding: "4px 12px", background: unit === option ? "#2B174C" : "transparent", color: unit === option ? "#FFFFFF" : "#4E2C66" }}>
+                                    {option === "percent" ? "%" : "₱"}</button>)}
+                            </div>}
+                        </div>
+                        {useDiscount && <div>
+                            <label htmlFor="booking-discount" className="block font-semibold">Discount <span className="font-normal text-[#806A8C]">(optional)</span></label>
+                            <div className="mt-1">{unitInput({ id: "booking-discount", label: "Discount", value: discountText, invalid: Boolean(discountError),
+                                onChange: setDiscountText, placeholder: unit === "percent" ? "0" : "0.00" })}</div>
+                            {discountError
+                                ? <span role="alert" className="mt-1 block text-xs font-semibold text-[#C32F2F]">{discountError}</span>
+                                : discountAmount > 0 && <span className="mt-1 block text-xs font-semibold text-[#138342]">
+                                    = {unit === "percent" ? `${peso(discountAmount)} off` : `${discountPercent}% off`}</span>}
+                        </div>}
                         {dpFromPackage
                             ? <div className={`${row} rounded-xl bg-[#FAF8FD] p-3`}><span>Down payment <span className="text-xs text-[#806A8C]">(set in the package)</span></span><strong className="tabular-nums">{peso(dp)}</strong></div>
-                            : <label className="block font-semibold">Down payment (%)
-                                <div className="mt-1 flex items-center gap-3">
-                                    <input aria-label="Down payment percentage" type="number" min={0} max={100} step="0.01" value={dpPercent} disabled={saving}
-                                           onChange={e => { setDpPercent(e.target.value); setError(""); }} className="h-11 w-24 shrink-0 rounded-xl border border-[#E6DDF0] bg-white px-3 text-sm tabular-nums text-[#1A1220] outline-none focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"/>
-                                    <span className="text-sm font-normal text-[#5F4E75]">= <strong className="tabular-nums text-[#1A1220]">{peso(dp)}</strong>, part of the price</span>
-                                </div>
-                            </label>}
+                            : <div>
+                                <label htmlFor="booking-down-payment" className="block font-semibold">Down payment</label>
+                                <div className="mt-1">{unitInput({ id: "booking-down-payment", label: "Down payment", value: dpText, invalid: Boolean(dpError),
+                                    onChange: setDpText, placeholder: unit === "percent" ? "30" : "0.00" })}</div>
+                                {dpError
+                                    ? <span role="alert" className="mt-1 block text-xs font-semibold text-[#C32F2F]">{dpError}</span>
+                                    : <span className="mt-1 block text-xs text-[#806A8C]">= {unit === "percent" ? peso(dp) : `${dpPercentOfPrice}% of the total`}, part of the price</span>}
+                            </div>}
                         {hasRental && <label className="block font-semibold">Security deposit (₱)
                             <input aria-label="Security deposit" inputMode="decimal" value={deposit} disabled={saving}
                                    onChange={e => { setDeposit(e.target.value); setError(""); }} className={`${field} mt-1 tabular-nums`}/>
@@ -1018,6 +1084,11 @@ export function PriceModal({
 
                     {/* Summary */}
                     {!loading && hasRental !== null && finalPrice > 0 && <div className="space-y-1.5 rounded-xl border border-[#E6DDF0] p-3">
+                        {!fixedPrice && normalTotal > 0 && discount > 0.005 && <>
+                            <div className={row}><span>Normal total</span><span className="tabular-nums">{peso(normalTotal)}</span></div>
+                            <div className={`${row} text-[#138342]`}><span>Discount ({discountPercent}% off)</span><span className="tabular-nums">−{peso(discount)}</span></div>
+                        </>}
+                        {!fixedPrice && normalTotal > 0 && discount < -0.005 && <div className={`${row} text-[#806A8C]`}><span>Above the normal total</span><span className="tabular-nums">+{peso(-discount)}</span></div>}
                         <div className={`${row} font-bold`}><span>Total price</span><span className="tabular-nums">{peso(finalPrice)}</span></div>
                         <div className={row}><span>Down payment</span><span className="tabular-nums">{peso(dp)}</span></div>
                         <div className={row}><span>Balance after down payment</span><span className="tabular-nums">{peso(Math.max(0, finalPrice - dp))}</span></div>
@@ -1576,9 +1647,10 @@ export function BookingRow({
                                         <h3 className="mb-1 text-[13px] font-bold text-[#2B174C]">{section.title}</h3>
                                         <dl className="divide-y divide-[#F0EAF4] border-y border-[#F0EAF4]">
                                             {section.fields.map(field => (
-                                                <div key={field.label} className="flex gap-3 py-2">
-                                                    <dt className="w-2/5 shrink-0 text-xs text-[#75657E]">{field.label}</dt>
-                                                    <dd className={`min-w-0 flex-1 whitespace-pre-wrap break-words text-xs font-medium ${field.accent ? "text-[#6335BC]" : "text-[#261940]"}`}>{field.value}</dd>
+                                                <div key={field.label} className="flex py-2" style={{ gap: 12 }}>
+                                                    {/* Inline width so the label column is always the same, whatever Tailwind classes the build includes. */}
+                                                    <dt className="text-xs text-[#75657E]" style={{ width: "40%", flexShrink: 0 }}>{field.label}</dt>
+                                                    <dd className={`whitespace-pre-wrap break-words text-xs font-medium ${field.accent ? "text-[#6335BC]" : "text-[#261940]"}`} style={{ flex: 1, minWidth: 0 }}>{field.value}</dd>
                                                 </div>
                                             ))}
                                         </dl>
@@ -2162,7 +2234,18 @@ export function BookingWorkspace({
     const [selectedId, setSelectedId] = useState<number | null>(null);
     const [detailTab, setDetailTab] = useState<BookingDetailTab>("Overview");
     const [exportOpen, setExportOpen] = useState(false);
-    const selectedBooking = bookings.find(booking => booking.id === selectedId) ?? bookings[0];
+    // Newest bookings first (by when they were made; the booking number breaks ties).
+    const orderedBookings = useMemo(() => {
+        const madeAt = (booking: Booking) => {
+            const time = Date.parse(String(booking.createdAt || booking.created_at || "").replace(" ", "T"));
+            return Number.isFinite(time) ? time : 0;
+        };
+        return [...bookings].sort((a, b) => madeAt(b) - madeAt(a) || Number(b.id) - Number(a.id));
+    }, [bookings]);
+    const openBooking = (booking: Booking) => {
+        setSelectedId(booking.id); setDetailTab("Overview"); setExportOpen(false);
+    };
+    const selectedBooking = orderedBookings.find(booking => booking.id === selectedId) ?? orderedBookings[0];
     const tabs: BookingDetailTab[] = managerView
         ? ["Overview", "Billing", "Items"]
         : ["Overview", "Billing", "Items", "Notes"];
@@ -2189,7 +2272,7 @@ export function BookingWorkspace({
                         </tr>
                         </thead>
                         <tbody>
-                        {bookings.map(booking => {
+                        {orderedBookings.map(booking => {
                             const selected = booking.id === selectedBooking?.id;
                             const payment = getSimplePaymentLabel(booking);
                             const bookingTypeLabel = getBookingTypeDisplay(booking);
@@ -2197,10 +2280,10 @@ export function BookingWorkspace({
                             const status = normalizeBookingStatus(booking.status);
                             return (
                                 <tr key={booking.id}
-                                    onClick={() => { setSelectedId(booking.id); setDetailTab("Overview"); setExportOpen(false); }}
+                                    onClick={() => openBooking(booking)}
                                     onKeyDown={event => {
                                         if (event.key === "Enter" || event.key === " ") {
-                                            event.preventDefault(); setSelectedId(booking.id); setDetailTab("Overview"); setExportOpen(false);
+                                            event.preventDefault(); openBooking(booking);
                                         }
                                     }}
                                     tabIndex={0} aria-selected={selected}

@@ -5,13 +5,7 @@ import {
     type LiveForecastProps,
 } from "./_shared";
 
+// Staff see demand and plans without stock quantities or order amounts.
 export default function StaffForecast(props: LiveForecastProps) {
-    return (
-        <BranchForecastWorkspace
-            {...props}
-            title="Staff Demand Forecast Overview"
-            description="Review product demand signals, upcoming booking demand, and inventory actions for your assigned branch."
-            canViewInventory={false}
-        />
-    );
+    return <BranchForecastWorkspace {...props} canViewInventory={false} />;
 }

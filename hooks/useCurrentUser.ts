@@ -182,7 +182,7 @@ async function requestCurrentUser(
 
 export function useCurrentUser() {
     const [user, setUser] = useState<CurrentUser | null>(() => getSessionUser());
-    const [loading, setLoading] = useState(false);
+    const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
 
     const loadUser = useCallback(async (silent = false, force = false) => {
@@ -202,17 +202,21 @@ export function useCurrentUser() {
 
         if (!token) {
             setUser(null);
-            setError("Missing token");
+            setError("Your session is missing. Please sign in again.");
 
             if (!silent) {
                 setLoading(false);
             }
-
+            // All callers of this hook are protected workspaces, not the landing page.
+            window.location.replace("/");
             return;
         }
 
         try {
             const result = await requestCurrentUser(token, force);
+            // Signup and invitation activation may replace a tab's token while an
+            // older current-user request is still in flight. Ignore that old reply.
+            if (getToken() !== token) return;
             const data = result.data;
 
             if (!result.ok) {
@@ -222,7 +226,12 @@ export function useCurrentUser() {
                  */
                 if (result.status === 401 || result.status === 403) {
                     setUser(null);
-                    setError(data.error || "Unauthorized");
+                    setError(data.error || "Your session has expired. Please sign in again.");
+                    sessionStorage.clear();
+                    localStorage.removeItem("token");
+                    sharedResult = null;
+                    sharedResultToken = "";
+                    window.location.replace("/");
                 } else {
                     setError(
                         data.error ||

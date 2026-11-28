@@ -63,6 +63,7 @@ type StaffMember = {
     employeeCode: string;
     name: string;
     email: string;
+    phone: string;
     status: "Accepted" | "Inactive";
     permissions: StaffPermissions;
 };
@@ -79,6 +80,14 @@ const defaultPermissions: StaffPermissions = {
     packages: false,
     package_access: "none",
 };
+
+function formatPersonalMobile(value: string): string {
+    const raw = String(value ?? "").trim();
+    const digits = raw.replace(/\D/g, "");
+    const local = digits.startsWith("63") ? `0${digits.slice(2)}` : digits.length === 10 && digits.startsWith("9") ? `0${digits}` : digits;
+    if (!/^09\d{9}$/.test(local)) return raw;
+    return [local.slice(0, 4), local.slice(4, 7), local.slice(7, 11)].filter(Boolean).join(" ");
+}
 
 function formatCurrentDateTime(value: Date) {
     const dateLabel = value.toLocaleDateString("en-US", {
@@ -179,8 +188,8 @@ export default function ManagerStaffManagementPage() {
         void import("@/components/dashboard/_shared")
             .then(module => module.exportTableAsPdf({
                     title: "Staff List",
-                    headers: ["Employee ID", "Staff", "Email", "Access", "Status"],
-                    rows: filteredStaff.map(staff => [staff.employeeCode || "—", staff.name, staff.email,
+                    headers: ["Employee ID", "Staff", "Email", "Phone Number", "Access", "Status"],
+                    rows: filteredStaff.map(staff => [staff.employeeCode || "—", staff.name, staff.email, formatPersonalMobile(staff.phone) || "—",
                         formatRoleSummary(staff.permissions), staff.status === "Accepted" ? "Active" : "Inactive"]),
                 }, { storeName: sessionStorage.getItem("store_name") || "StockNBook",
                     branch: branchName, dateRange: statusFilter === "all" ? "All statuses" : statusFilter },
@@ -242,7 +251,7 @@ export default function ManagerStaffManagementPage() {
         return staffList.filter((staff) => {
             const mappedStatus = staff.status === "Accepted" ? "active" : "inactive";
             const matchesStatus = statusFilter === "all" ? true : mappedStatus === statusFilter;
-            const searchText = `${staff.employeeCode} ${staff.name} ${staff.email} ${branchName} ${formatRoleSummary(staff.permissions)}`.toLowerCase();
+            const searchText = `${staff.employeeCode} ${staff.name} ${staff.email} ${staff.phone} ${formatPersonalMobile(staff.phone)} ${branchName} ${formatRoleSummary(staff.permissions)}`.toLowerCase();
             const matchesSearch = query ? searchText.includes(query) : true;
             return matchesStatus && matchesSearch;
         });
@@ -707,7 +716,7 @@ export default function ManagerStaffManagementPage() {
                                         <input
                                             value={staffSearch}
                                             onChange={(event) => setStaffSearch(event.target.value)}
-                                            placeholder="Search staff name, email, branch, or role..."
+                                            placeholder="Search name, email, phone, branch, or role..."
                                             aria-label="Search staff"
                                             className="h-[48px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-4 pl-11 pr-11 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
                                         />
@@ -758,21 +767,22 @@ export default function ManagerStaffManagementPage() {
                                         No staff found.
                                     </p>
                                     <p className="mt-1 text-sm text-[#7A6A84]">
-                                        Try another name, email, role, or status.
+                                        Try another name, email, phone, role, or status.
                                     </p>
                                 </div>
                             ) : (
                                 <div>
                                     <div
-                                        className="min-h-[180px] xl:min-h-[210px] max-h-[360px] overflow-y-auto overflow-x-hidden overscroll-contain"
+                                        className="min-h-[180px] xl:min-h-[210px] max-h-[360px] overflow-y-auto overflow-x-auto overscroll-contain"
                                         role="region" aria-label="Staff list" tabIndex={0}
                                     >
-                                        <table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-center [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]">
-                                            <colgroup><col className="w-[15%]" /><col className="w-[20%]" /><col className="w-[36%]" /><col className="w-[10%]" /><col className="w-[19%]" /></colgroup>
+                                        <table className="w-full min-w-[1000px] table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-center [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]">
+                                            <colgroup><col className="w-[13%]" /><col className="w-[21%]" /><col className="w-[14%]" /><col className="w-[22%]" /><col className="w-[9%]" /><col className="w-[21%]" /></colgroup>
                                             <thead className="sticky top-0 z-10 bg-[#FFFCF8]">
                                             <tr className="border-b border-[#E6DDF0]">
                                                 <TableHeader align="center">Employee ID</TableHeader>
                                                 <TableHeader>Staff</TableHeader>
+                                                <TableHeader>Phone Number</TableHeader>
                                                 <TableHeader>Access</TableHeader>
                                                 <TableHeader>Status</TableHeader>
                                                 <TableHeader align="center">
@@ -801,6 +811,10 @@ export default function ManagerStaffManagementPage() {
                                                                 {staff.email}
                                                             </p>
                                                         </div>
+                                                    </td>
+
+                                                    <td className="whitespace-nowrap px-3 py-2.5 text-sm text-[#1A1220]">
+                                                        {formatPersonalMobile(staff.phone) || "—"}
                                                     </td>
 
                                                     <td className="px-3 py-2.5">
@@ -1182,6 +1196,7 @@ function normalizeStaffMember(item: any): StaffMember {
         employeeCode: String(item.employee_code || item.employeeCode || ""),
         name: item.name || item.staff_name || item.full_name || "Unnamed staff",
         email: item.email || item.staff_email || "",
+        phone: String(item.phone || item.staff_phone || "").trim(),
         status: item.status === "Inactive" || item.status === "inactive" ? "Inactive" : "Accepted",
         permissions: normalizePermissions(item.permissions),
     };

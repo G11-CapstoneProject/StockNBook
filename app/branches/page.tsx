@@ -490,8 +490,6 @@ export default function BranchesPage() {
     const [addInactiveReason, setAddInactiveReason] = useState("");
     const [addOtherInactiveReason, setAddOtherInactiveReason] =
         useState("");
-    const [addManagerName, setAddManagerName] = useState("");
-    const [addManagerEmail, setAddManagerEmail] = useState("");
     const [adding, setAdding] = useState(false);
     const [showPlanLimitDialog, setShowPlanLimitDialog] = useState(false);
     const [subscriptionPlan, setSubscriptionPlan] = useState<SubscriptionPlan>("starter");
@@ -507,8 +505,6 @@ export default function BranchesPage() {
     const [editInactiveReason, setEditInactiveReason] = useState("");
     const [editOtherInactiveReason, setEditOtherInactiveReason] =
         useState("");
-    const [editManagerName, setEditManagerName] = useState("");
-    const [editManagerEmail, setEditManagerEmail] = useState("");
     const [saving, setSaving] = useState(false);
     const [deleting, setDeleting] = useState(false);
     const deletionInFlight = useRef(false);
@@ -782,8 +778,6 @@ export default function BranchesPage() {
         setAddBranchStatus("active");
         setAddInactiveReason("");
         setAddOtherInactiveReason("");
-        setAddManagerName("");
-        setAddManagerEmail("");
     };
 
     const openAddModal = () => {
@@ -840,26 +834,6 @@ export default function BranchesPage() {
             return;
         }
 
-        const normalizedManagerEmail = addManagerEmail
-            .trim()
-            .toLowerCase();
-
-        const hasManagerName = Boolean(addManagerName.trim());
-        const hasManagerEmail = Boolean(normalizedManagerEmail);
-
-        if (hasManagerName !== hasManagerEmail) {
-            notify("warning", "Incomplete manager details", "Please complete both the manager name and manager email, or leave both fields empty.");
-            return;
-        }
-
-        if (
-            hasManagerEmail &&
-            !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedManagerEmail)
-        ) {
-            notify("warning", "Invalid manager email", "Please enter a valid manager email address.");
-            return;
-        }
-
         const token =
             sessionStorage.getItem("token") ||
             localStorage.getItem("token");
@@ -871,7 +845,7 @@ export default function BranchesPage() {
 
         const confirmed = await confirmAction({
             title: "Create branch?",
-            message: `Create "${addBranchName.trim()}" as an ${addBranchStatus} branch?${hasManagerEmail ? ` A manager invitation will be sent to ${normalizedManagerEmail}.` : ""}`,
+            message: `Create "${addBranchName.trim()}" as an ${addBranchStatus} branch?`,
             confirmLabel: "Create Branch",
         });
         if (!confirmed) return;
@@ -896,11 +870,8 @@ export default function BranchesPage() {
                             inactive_reason: finalInactiveReason,
                             branch_inactive_reason:
                             finalInactiveReason,
-                            manager_name: addManagerName.trim(),
-                            manager_email: normalizedManagerEmail,
                         },
                     ],
-                    send_invitation_emails: hasManagerEmail,
                 }),
             });
 
@@ -911,33 +882,10 @@ export default function BranchesPage() {
                 return;
             }
 
-            const invitation =
-                Array.isArray(data.invite_links) &&
-                data.invite_links.length > 0
-                    ? data.invite_links[0]
-                    : null;
-
             setShowAddModal(false);
             resetAddForm();
             await loadBranches();
-
-            if (hasManagerEmail) {
-                const emailWasSent =
-                    invitation?.email_sent === true ||
-                    Number(data.invitation_emails_sent || 0) > 0;
-
-                if (emailWasSent) {
-                    notify("success", "Branch created successfully", `${addBranchName.trim()} was added and the manager invitation was emailed.`);
-                } else {
-                    const emailError =
-                        invitation?.email_error ||
-                        "The email provider did not confirm delivery.";
-
-                    notify("warning", "Branch created, email not sent", `The branch and manager invitation were saved. ${emailError}`);
-                }
-            } else {
-                notify("success", "Branch created successfully", `${addBranchName.trim()} was added to your branch directory.`);
-            }
+            notify("success", "Branch created successfully", `${addBranchName.trim()} was added to your branch directory. Assign a manager in Branch Managers when ready.`);
         } catch {
             notify("error", "Unable to create branch", "Something went wrong. Please try again.");
         } finally {
@@ -959,8 +907,6 @@ export default function BranchesPage() {
 
         setEditInactiveReason(splitReason.selectedReason);
         setEditOtherInactiveReason(splitReason.otherReason);
-        setEditManagerName(branch.manager_name || "");
-        setEditManagerEmail(branch.manager_email || "");
         setShowEditModal(true);
     };
 
@@ -1031,7 +977,6 @@ export default function BranchesPage() {
                     inactive_reason: finalInactiveReason,
                     branch_inactive_reason:
                     finalInactiveReason,
-                    manager_name: editManagerName,
                 }),
             });
 
@@ -1289,8 +1234,7 @@ export default function BranchesPage() {
                                         Add Branch
                                     </h2>
                                     <p className="mt-1 text-sm leading-6 text-[#7A6A84]">
-                                        Add a new business location and optionally
-                                        invite a branch manager.
+                                        Add a new business location to your store.
                                     </p>
                                 </div>
 
@@ -1452,57 +1396,7 @@ export default function BranchesPage() {
                                     </div>
                                 </div>
 
-                                <div className="rounded-2xl border border-[#E8DFF0] bg-white p-5">
-                                    <div className="mb-4 flex items-center gap-3">
-                                    <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#EEF4FF] text-[#3367D6]">
-                                        <UserRoundCheck className="h-5 w-5" />
-                                    </span>
-
-                                        <div>
-                                            <h3 className="font-bold text-[#1A1220]">
-                                                Branch manager
-                                                <span className="ml-2 text-xs font-medium text-[#8A7A94]">
-                                                Optional
-                                            </span>
-                                            </h3>
-                                            <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                                Leave both fields empty when the owner
-                                                will manage this branch.
-                                            </p>
-                                        </div>
-                                    </div>
-
-                                    <div className="grid gap-4 sm:grid-cols-2">
-                                        <TextInput
-                                            label="Manager name"
-                                            value={addManagerName}
-                                            onChange={setAddManagerName}
-                                            placeholder="Ana Cruz"
-                                        />
-
-                                        <TextInput
-                                            label="Manager email"
-                                            value={addManagerEmail}
-                                            onChange={setAddManagerEmail}
-                                            placeholder="manager@email.com"
-                                            type="email"
-                                        />
-                                    </div>
-
-                                    <div className="mt-5 border-t border-[#E6DDF0] pt-5">
-                                        <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-[#806A8C]">
-                                            Manager Access
-                                        </p>
-
-                                        <ManagerRoleAccessNotice />
-                                    </div>
-                                </div>
-
-                                <div className="rounded-xl border border-[#E6D9BA] bg-[#FFFBF0] px-4 py-3 text-xs leading-5 text-[#6F6043]">
-                                    A manager invitation email will be sent
-                                    automatically when a manager name and email are
-                                    provided.
-                                </div>
+                                <p className="text-xs leading-5 text-[#7A6A84]">Assign managers from the Branch Managers module after creating this branch.</p>
                             </div>
 
                             <div className="sticky bottom-0 flex gap-3 border-t border-[#E6DDF0] bg-white px-6 py-4">
@@ -1549,7 +1443,7 @@ export default function BranchesPage() {
                                         Edit Branch
                                     </h2>
                                     <p className="mt-1 text-sm text-[#7A6A84]">
-                                        Update branch and assigned manager details.
+                                        Update branch information and operating status.
                                     </p>
                                 </div>
 
@@ -1688,31 +1582,6 @@ export default function BranchesPage() {
                                             }
                                         />
                                     )}
-                                </div>
-
-                                <div className="border-t border-[#E6DDF0] pt-5">
-                                    <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-[#806A8C]">
-                                        Manager Details
-                                    </p>
-
-                                    <div className="grid gap-4 sm:grid-cols-2">
-                                        <TextInput
-                                            label="Manager name"
-                                            value={editManagerName}
-                                            onChange={setEditManagerName}
-                                        />
-                                        <ReadOnlyManagerEmail
-                                            value={editManagerEmail}
-                                        />
-                                    </div>
-                                </div>
-
-                                <div className="border-t border-[#E6DDF0] pt-5">
-                                    <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-[#806A8C]">
-                                        Manager Access
-                                    </p>
-
-                                    <ManagerRoleAccessNotice />
                                 </div>
                             </div>
 
@@ -2118,42 +1987,6 @@ function TextInput({
                 onChange={(event) => onChange(event.target.value)}
                 className="h-[42px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-3 text-sm text-[#1A1220] outline-none placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
             />
-        </div>
-    );
-}
-
-// Branch Managers receive every Manager-role module automatically after
-// activation, so the Owner no longer assigns individual Manager permissions.
-function ManagerRoleAccessNotice() {
-    return (
-        <div className="rounded-xl border border-[#EEE7F2] bg-[#FFFDF8] px-4 py-3 text-xs leading-5 text-[#5F4E75]">
-            Branch Managers automatically receive access to all Manager modules
-            for their assigned branch once they activate their account. Paid
-            features still follow your current subscription plan.
-        </div>
-    );
-}
-
-// A manager's login email is not edited from the branch form. Email changes
-// are made from Branch Managers, where the new address is verified first.
-function ReadOnlyManagerEmail({ value }: { value: string }) {
-    return (
-        <div>
-            <label className="mb-2 block text-sm font-medium text-[#1A1220]">
-                Manager email
-            </label>
-
-            <input
-                type="email"
-                value={value}
-                readOnly
-                aria-readonly="true"
-                className="h-[42px] w-full cursor-not-allowed rounded-xl border border-[#E6DDF0] bg-[#F7F4F8] px-3 text-sm text-[#7A6A84] outline-none"
-            />
-
-            <p className="mt-1.5 text-xs text-[#7A6A84]">
-                Change the login email from Branch Managers.
-            </p>
         </div>
     );
 }

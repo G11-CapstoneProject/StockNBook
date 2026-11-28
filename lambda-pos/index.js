@@ -698,26 +698,6 @@ const JWT_SECRET = requirePosEnv("JWT_SECRET");
 
 
 
-// Database TLS: local DB_SSL=false; Azure DB_SSL=true requires trusted CA and hostname verification.
-function stocknbookDatabaseTlsOptions() {
-    const mode = String(process.env.DB_SSL ?? "false").trim().toLowerCase();
-    if (mode !== "true" && mode !== "false") {
-        throw new Error("DB_SSL must be true or false.");
-    }
-    if (process.env.NODE_ENV === "production" && mode !== "true") {
-        throw new Error("DB_SSL=true is required for production database connections.");
-    }
-    if (mode === "false") return undefined;
-
-    const caPath = String(process.env.DB_SSL_CA_PATH || "").trim();
-    return {
-        rejectUnauthorized: true,
-        verifyIdentity: true,
-        minVersion: "TLSv1.2",
-        ...(caPath ? { ca: require("node:fs").readFileSync(caPath, "utf8") } : {}),
-    };
-}
-
 const dbConfig = {
     // ===== ENV SECURITY CHANGE: MySQL environment configuration BEGIN =====
     // MERGE FIX: Use the existing POS environment validator.
@@ -727,7 +707,7 @@ const dbConfig = {
     database: requirePosEnv("DB_NAME"),
     port: Number(process.env.DB_PORT || 3306),
     // ===== ENV SECURITY CHANGE: MySQL environment configuration END =====
-    ssl: stocknbookDatabaseTlsOptions(),
+    ssl: { rejectUnauthorized: false },
 };
 
 // Reuse database connections across warm requests. This avoids paying the
@@ -2242,7 +2222,7 @@ async function decreaseStockForOrder(
 
 /*
  * The JWT issued at login only carries ids (store_id / manager_id /
- * staff_id) and an email — never a display name. To log a real,
+ * staff_id) and an email â€” never a display name. To log a real,
  * human-readable employee_actions row we look the acting user's name up
  * from their own table using the id that's already in the token.
  */
@@ -3038,7 +3018,7 @@ exports.handler = async (event) => {
                 return jsonResponse(400, headers, { error: 'A valid Order ID and Sales Source are required.' });
             }
             if (tokenRole === 'staff' && source !== 'WALK_IN') {
-                return jsonResponse(403, headers, { error: 'Staff may download today’s walk-in transactions only.' });
+                return jsonResponse(403, headers, { error: 'Staff may download todayâ€™s walk-in transactions only.' });
             }
             const numberOrNull = value => value == null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
             const scopeSql = branchScope == null ? '' : ' AND t.branch_id = ?';

@@ -1067,27 +1067,53 @@ function QuantityStepper({ value, max, onChange, label, inputDisabled = false, p
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
+// Resolve a readable branch link only inside the store's active branch list.
+const EMPTY_BOOKING_BRANCHES: { id: number; name: string }[] = [];
+
+function resolveBookingBranch(
+    branches: { id: number; name: string }[],
+    branchName: string | null,
+    legacyBranchId: string | null,
+): number | null {
+    const normal = (name: string) => name.trim().replace(/\s+/g, " ").toLowerCase();
+    const id = legacyBranchId !== null && /^\d+$/.test(legacyBranchId)
+        ? Number(legacyBranchId) : null;
+    const validId = id !== null && Number.isSafeInteger(id) && id > 0 ? id : null;
+    if (branchName !== null) {
+        const key = normal(branchName);
+        if (!key) return null;
+        const matches = branches.filter(branch => normal(branch.name) === key);
+        if (matches.length !== 1) return null;
+        // If both parameters are supplied, they must select the same branch.
+        return legacyBranchId === null || validId === matches[0].id ? matches[0].id : null;
+    }
+    return validId !== null && branches.some(branch => branch.id === validId) ? validId : null;
+}
+
 export default function CustomerBookingPage() {
     const params = useParams();
     const searchParams = useSearchParams();
     const slug = params?.slug as string;
 
+    const branchNameFromUrl = searchParams.get("branch");
     const branchIdFromUrl = searchParams.get("branchId");
 
     const packageRef = useRef<HTMLDivElement>(null);
     const formRef = useRef<HTMLDivElement>(null);
 
-    const [store, setStore] = useState<Store | null>(null);
+    const [storeSnapshot, setStoreSnapshot] = useState<{ slug: string; store: Store } | null>(null);
+    const store = storeSnapshot && storeSnapshot.slug === slug ? storeSnapshot.store : null;
     const [packages, setPackages] = useState<PackageItem[]>([]);
     const [packagesLoading, setPackagesLoading] = useState(true);
     const [packagesError, setPackagesError] = useState("");
     const [packageBranchFilter, setPackageBranchFilter] = useState("all");
     const [packageSearch, setPackageSearch] = useState("");
     const [visiblePackageCount, setVisiblePackageCount] = useState(12);
-    const [branches, setBranches] = useState<{id:number;name:string}[]>([]);
+    const [branchSnapshot, setBranchSnapshot] = useState<{ storeId: Store["id"]; branches: { id: number; name: string }[] } | null>(null);
+    const branches = store && branchSnapshot && branchSnapshot.storeId === store.id ? branchSnapshot.branches : EMPTY_BOOKING_BRANCHES;
     const [branchesLoading, setBranchesLoading] = useState(false);
     const [selectedCustomBranchId, setSelectedCustomBranchId] = useState<number | null>(null);
-    const [branchesError, setBranchesError] = useState("");
+    const [branchLoadError, setBranchLoadError] = useState("");
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
 
@@ -1155,8 +1181,10 @@ export default function CustomerBookingPage() {
     const selectedPackageData = useMemo(() =>
             packages.find(p => String(p.id) === selectedPackage) || null,
         [packages, selectedPackage]);
-    const urlBranchId = branchIdFromUrl && Number.isSafeInteger(Number(branchIdFromUrl)) && Number(branchIdFromUrl)>0
-        ? Number(branchIdFromUrl) : null;
+    const urlBranchId = resolveBookingBranch(branches, branchNameFromUrl, branchIdFromUrl);
+    const branchesError = branchLoadError || (store && branchSnapshot?.storeId === store.id && !urlBranchId
+        ? "This booking link does not specify an available branch. Please use the booking link provided by your branch."
+        : "");
     const packageBranchId = selectedPackageData
         ? Number(selectedPackageData.branch_id ?? selectedPackageData.branchId ?? 0) || null : null;
     // Every public booking link is tied to a specific branch. Package selection never changes it.
@@ -1521,52 +1549,66 @@ export default function CustomerBookingPage() {
 
     useEffect(() => {
         if (!slug) return;
+        const controller = new AbortController();
+        setLoading(true);
+        setError("");
+        setStoreSnapshot(null);
         const loadStore = async () => {
             try {
-                const res = await fetch("/api/auth", {
+                const res = await fetch("/api/store", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
+                    signal: controller.signal,
                     body: JSON.stringify({ action: "get_store_by_slug", slug }),
                 });
                 const data = await res.json();
-                if (!res.ok) throw new Error(data?.error || "Failed to load store");
-                setStore(data.store);
+                if (!res.ok || !data.store) throw new Error(data?.error || "Failed to load store");
+                if (!controller.signal.aborted) setStoreSnapshot({ slug, store: data.store });
             } catch (err) {
-                setError(err instanceof Error ? err.message : "Something went wrong");
+                if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "Something went wrong");
             } finally {
-                setLoading(false);
+                if (!controller.signal.aborted) setLoading(false);
             }
         };
-        loadStore();
+        void loadStore();
+        return () => controller.abort();
     }, [slug]);
 
     useEffect(() => {
         if (!store) return;
-        let cancelled=false;
-        setBranches([]);
-        setBranchesError("");
+        const storeId = store.id;
+        const controller = new AbortController();
+        setBranchSnapshot(null);
+        setBranchLoadError("");
         setBranchesLoading(true);
-        void (async()=>{
+        void (async () => {
             try {
-                const response=await fetch('/api/bookings',{
-                    method:'POST',headers:{'Content-Type':'application/json'},
-                    body:JSON.stringify({action:'get_public_branches',storeId:store.id})});
-                const data=await response.json();
-                if(!response.ok)throw new Error(data.error||'Unable to load branches.');
-                if(cancelled)return;
-                const available=(data.branches||[]).map((b:{id:number;name:string})=>({id:Number(b.id),name:String(b.name)}));
-                setBranches(available);
-                if(urlBranchId && !available.some((b:{id:number})=>b.id===urlBranchId))
-                    setBranchesError('This booking link specifies a branch that is not available for this store.');
-            } catch(err){if(!cancelled)setBranchesError(err instanceof Error?err.message:'Unable to load branches.');}
-            finally { if (!cancelled) setBranchesLoading(false); }
+                const response = await fetch("/api/bookings", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    signal: controller.signal,
+                    body: JSON.stringify({ action: "get_public_branches", storeId }),
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || "Unable to load branches.");
+                if (controller.signal.aborted) return;
+                const available = (Array.isArray(data.branches) ? data.branches : [])
+                    .map((b: { id: number; name: string }) => ({ id: Number(b.id), name: String(b.name) }))
+                    .filter((b: { id: number; name: string }) => Number.isSafeInteger(b.id) && b.id > 0 && b.name.trim());
+                setBranchSnapshot({ storeId, branches: available });
+            } catch (err) {
+                if (!controller.signal.aborted) setBranchLoadError(err instanceof Error ? err.message : "Unable to load branches.");
+            } finally {
+                if (!controller.signal.aborted) setBranchesLoading(false);
+            }
         })();
-        return ()=>{cancelled=true;};
-    },[store,urlBranchId]);
+        return () => controller.abort();
+    }, [store?.id]);
 
     useEffect(() => {
         // A branch-specific booking link locks Custom Booking to the specified branch.
         setSelectedCustomBranchId(urlBranchId);
+        setSelectedPackage("");
         setPackageBranchFilter("all");
         setPackageSearch("");
         setSelectedCustomItems([]);
@@ -1574,7 +1616,12 @@ export default function CustomerBookingPage() {
     },[urlBranchId,store?.id]);
 
     useEffect(() => {
-        if (!store) return;
+        if (!store || !urlBranchId) {
+            setPackages([]);
+            setPackagesError("");
+            setPackagesLoading(false);
+            return;
+        }
         const controller = new AbortController();
         setPackagesLoading(true);
         setPackagesError("");
@@ -1589,7 +1636,7 @@ export default function CustomerBookingPage() {
                     body: JSON.stringify({
                         action: "get_packages",
                         store_id: store.id,
-                        ...(urlBranchId ? { branch_id: urlBranchId } : {}),
+                        branch_id: urlBranchId,
                     }),
                 });
                 if (!res.ok) throw new Error("Unable to load packages. Please try again.");
@@ -1599,7 +1646,7 @@ export default function CustomerBookingPage() {
                 setPackages(
                     (Array.isArray(data.packages) ? data.packages : []).filter(
                         (p: PackageItem) => p.status === "Active" &&
-                            (!urlBranchId || Number(p.branch_id ?? p.branchId) === urlBranchId)
+                            Number(p.branch_id ?? p.branchId) === urlBranchId
                     )
                 );
             } catch (err) {
@@ -2242,7 +2289,7 @@ export default function CustomerBookingPage() {
         );
     }
 
-    if (loading) return <CustomerPortalSkeleton />;
+    if (loading || (!store && !error)) return <CustomerPortalSkeleton />;
 
     if (error) {
         return (

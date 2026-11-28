@@ -18,6 +18,10 @@ export async function requireEffectivePlanFeature(
         body: JSON.stringify({ action: "get_subscription" }),
         requestContext: { http: { method: "POST" } },
     });
+    if (!response) {
+        return NextResponse.json({ error: "Unable to verify subscription access." }, { status: 503 });
+    }
+
     let payload: any = {};
     try {
         payload = JSON.parse(response.body || "{}");

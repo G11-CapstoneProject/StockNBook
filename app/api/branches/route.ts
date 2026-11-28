@@ -14,8 +14,8 @@ async function callLocalAuth(
             Authorization: req.headers.get("authorization") || "",
         },
         body: JSON.stringify({
-            action,
             ...body,
+            action,
         }),
         requestContext: {
             http: {
@@ -25,6 +25,13 @@ async function callLocalAuth(
     };
 
     const response = await handler(event);
+
+    if (!response) {
+        return NextResponse.json(
+            { error: "No response from the branches server." },
+            { status: 502 }
+        );
+    }
 
     let data: unknown = {};
 
@@ -57,11 +64,7 @@ export async function POST(req: NextRequest) {
     try {
         const body = await req.json();
 
-        return await callLocalAuth(req, "save_onboarding", {
-            ...body,
-            send_invitation_emails:
-                body.send_invitation_emails === true,
-        });
+        return await callLocalAuth(req, "create_branch", body);
     } catch (error) {
         console.error("Local create branch route error:", error);
         return NextResponse.json(

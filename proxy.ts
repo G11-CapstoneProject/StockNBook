@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import jwt from "jsonwebtoken";
 
-const JWT_SECRET = process.env.JWT_SECRET || "stocknbook-secret-key";
-
 export function proxy(request: NextRequest) {
     if (request.nextUrl.pathname.startsWith("/platform-admin")) {
         const token = request.cookies.get("admin_token")?.value;
@@ -12,7 +10,12 @@ export function proxy(request: NextRequest) {
         }
 
         try {
-            const payload = jwt.verify(token, JWT_SECRET) as { role: string };
+            const secret = process.env.JWT_SECRET;
+            if (!secret?.trim()) {
+                return NextResponse.redirect(new URL("/", request.url));
+            }
+
+            const payload = jwt.verify(token, secret) as { role: string };
 
             if (payload.role !== "PLATFORM_ADMIN") {
                 return NextResponse.redirect(new URL("/", request.url));

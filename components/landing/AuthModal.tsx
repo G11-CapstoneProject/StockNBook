@@ -2597,7 +2597,7 @@ export function PolicyDialog({ document, role, branchName, onClose, onReviewed }
             <footer className="flex shrink-0 flex-col gap-3 border-t border-[#EBE4F0] px-6 py-4 sm:flex-row sm:items-center sm:justify-end">
                 <button type="button" disabled={requiresReview && !hasReachedEnd}
                         onClick={() => { if (!requiresReview || hasReachedEnd) (onReviewed ?? onClose)(); }}
-                        className="min-h-11 rounded-xl bg-[#2D1B4E] px-5 py-2 text-sm font-semibold text-white enabled:hover:bg-[#3D2560] disabled:cursor-not-allowed disabled:opacity-50">Continue</button>
+                        className="min-h-11 rounded-xl bg-[#2D1B4E] px-5 py-2 text-sm font-semibold text-white enabled:hover:bg-[#3D2560] disabled:cursor-not-allowed disabled:opacity-50">Okay</button>
             </footer>
         </div>
         <style>{`

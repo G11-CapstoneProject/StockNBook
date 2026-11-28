@@ -954,7 +954,7 @@ async function receivePurchase(db, scope, equipmentRow, data, source) {
 async function checkNewRentalPlanLimit(db, storeId, numberToAdd) {
     const [paidRows] = await db.execute(
         `SELECT p.max_inventory FROM subscriptions s
-             JOIN plans p ON p.id = s.plan_id
+                                         JOIN plans p ON p.id = s.plan_id
          WHERE s.store_id = ? AND LOWER(s.status) IN ('active', 'expiring')
            AND (s.expires_at IS NULL OR DATE(s.expires_at) >= CURDATE())
          ORDER BY s.id DESC LIMIT 1`, [storeId]);
@@ -962,7 +962,7 @@ async function checkNewRentalPlanLimit(db, storeId, numberToAdd) {
     if (!plan) {
         const [starterRows] = await db.execute(
             `SELECT max_inventory FROM plans WHERE is_archived = 0
-               AND (LOWER(plan_code) = 'starter' OR LOWER(plan_name) = 'starter' OR price = 0)
+                                               AND (LOWER(plan_code) = 'starter' OR LOWER(plan_name) = 'starter' OR price = 0)
              ORDER BY price ASC, id ASC LIMIT 1`);
         plan = starterRows[0];
     }
@@ -973,8 +973,8 @@ async function checkNewRentalPlanLimit(db, storeId, numberToAdd) {
     if (!Number.isSafeInteger(limit) || limit < 0) fail(503, 'Invalid inventory limit in subscription plan.');
     const [usageRows] = await db.execute(
         `SELECT
-            (SELECT COUNT(*) FROM products WHERE store_id = ? AND deleted_at IS NULL) +
-            (SELECT COUNT(*) FROM equipment WHERE store_id = ? AND deleted_at IS NULL) AS total`,
+             (SELECT COUNT(*) FROM products WHERE store_id = ? AND deleted_at IS NULL) +
+             (SELECT COUNT(*) FROM equipment WHERE store_id = ? AND deleted_at IS NULL) AS total`,
         [storeId, storeId]);
     const current = Number(usageRows[0]?.total || 0);
     if (current + numberToAdd > limit) {
@@ -1345,14 +1345,71 @@ async function mutate(db,scope,body) {
 // reserves equipment on its event dates, without pretending units were handed out.
 // Using the allocation ledger here keeps the Rental Inventory view consistent with
 // Booking approval, the customer portal, and date-specific availability.
+// MySQL must stop abandoned workspace queries, not just the browser request.
+// MAX_EXECUTION_TIME is a server-side limit for read-only SELECTs in MySQL 8.
+// Use a statement hint so pooled connections never retain changed session settings.
+// Do not let a timed-out workspace request wait indefinitely in the pool.
+// If a queued connection arrives late, release it without issuing any query.
+function acquireRentalWorkspaceConnection() {
+    return new Promise((resolve,reject) => {
+        let expired = false;
+        const timer = setTimeout(() => {
+            expired = true;
+            reject(Object.assign(new Error("Rental inventory is busy. Please retry."),{statusCode:503}));
+        },8000);
+        dbPool.getConnection().then(connection => {
+            clearTimeout(timer);
+            if (expired) connection.release();
+            else resolve(connection);
+        },error => {
+            clearTimeout(timer);
+            if (!expired) reject(error);
+        });
+    });
+}
+function boundedRentalWorkspace(db, action) {
+    const started = Date.now();
+    const deadline = started + 25000;
+    let sequence = 0;
+    return {
+        async execute(sql, params) {
+            const remaining = deadline - Date.now();
+            if (remaining <= 0) fail(503,"Rental inventory is busy. Please retry.");
+            if (typeof sql !== "string" || !/^\s*SELECT\b/i.test(sql))
+                throw new Error("Rental workspace must use read-only SELECT statements.");
+            const step = ++sequence;
+            const timeout = Math.min(10000, remaining);
+            const boundedSql = sql.replace(/^\s*SELECT\b/i, `SELECT /*+ MAX_EXECUTION_TIME(${timeout}) */`);
+            const queryStarted = Date.now();
+            try {
+                return await db.execute(boundedSql,params);
+            } catch (err) {
+                if (err?.errno === 3024 || err?.code === "ER_QUERY_TIMEOUT") {
+                    console.warn("[rental workspace] query timed out", {action,step,elapsedMs:Date.now()-queryStarted});
+                    fail(503,"Rental inventory query exceeded its database time limit. Please retry.");
+                }
+                throw err;
+            } finally {
+                const elapsedMs = Date.now()-queryStarted;
+                if (elapsedMs >= 1500) console.warn("[rental workspace] slow query", {action,step,elapsedMs});
+            }
+        }
+    };
+}
+
 async function rentalBookableToday(db,scope) {
-    const today=todayPh();
-    const [rows]=await db.execute(`SELECT a.equipment_id AS equipmentId,COALESCE(SUM(a.quantity),0) AS bookedUnits
-                                   FROM ${V2_RENTAL_ALLOCATIONS} a
-                                   WHERE a.store_id=? AND a.branch_id=? AND a.status IN ('reserved','checked_out')
-                                     AND a.start_date<=? AND (a.end_date>=? OR a.status='checked_out')
-                                   GROUP BY a.equipment_id`,[scope.storeId,scope.branchId,today,today]);
-    return new Map(rows.map(r=>[Number(r.equipmentId),Number(r.bookedUnits)]));
+    const today = todayPh();
+    const [todayRows] = await db.execute(`SELECT bi.equipment_id AS equipmentId,
+            COALESCE(SUM(bi.quantity),0) AS bookedUnits
+        FROM bookings b
+        JOIN booking_items bi ON bi.booking_id=b.id AND bi.store_id=b.store_id
+        WHERE b.store_id=? AND b.branch_id=? AND bi.item_type='rental'
+          AND bi.item_status IN ('reserved','released')
+          AND COALESCE(b.rental_start_date,b.event_date)<=?
+          AND (COALESCE(b.rental_end_date,b.event_end_date,b.rental_start_date,b.event_date)>=?
+               OR bi.item_status='released')
+        GROUP BY bi.equipment_id`, [scope.storeId,scope.branchId,today,today]);
+    return new Map(todayRows.map(r=>[Number(r.equipmentId),Number(r.bookedUnits)]));
 }
 function rentalBookableProjection(item,bookedUnits) {
     return Math.max(0,Number(item.totalUnits)-Number(item.maintenanceUnits)-
@@ -1412,23 +1469,25 @@ async function getInventory(db,scope) {
                                                    AND m.type IN ('maintenance_completed','missing_resolved','missing_replaced')
                                                  ORDER BY m.occurred_at DESC,m.id DESC LIMIT 150`,
         [scope.storeId,scope.branchId]);
-    // Returns awaiting the one-time Staff inspection.
+    // Returns awaiting the one-time Staff inspection. Filter native item status
+    // without computing allocation status for all historical booking lines.
     const [pendingInspections]=await db.execute(`SELECT a.id AS allocationId,a.equipment_id AS equipmentId,
-                                                        COALESCE(e.name,'Archived equipment') AS equipmentName,
-                                                        a.booking_reference AS bookingReference,
-                                                        COALESCE(a.returned_received_units,a.quantity) AS units,
-                                                        COALESCE(a.inspection_damaged_units,0) AS observedDamageUnits,
-                                                        a.inspection_notes AS notes,
-                                                        DATE_FORMAT(COALESCE(a.returned_at,a.updated_at),'%Y-%m-%d') AS reportedAt,COALESCE(ru.full_name,'') AS receivedBy
-                                                 FROM ${V2_RENTAL_ALLOCATIONS} a
-                                                          JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=a.equipment_id
-                                                     AND e.store_id=a.store_id AND e.branch_id=a.branch_id
-                                                          LEFT JOIN users ru ON ru.id=a.returned_by
-                                                 WHERE a.store_id=? AND a.branch_id=? AND a.status='returned'
-                                                   AND COALESCE(a.returned_received_units,a.quantity)>0
-                                                   AND (a.inspected_at IS NULL OR a.inspection_status='pending')
-                                                 ORDER BY a.updated_at DESC,a.id DESC LIMIT 200`,
-        [scope.storeId,scope.branchId]);
+              COALESCE(e.equipment_name,'Archived equipment') AS equipmentName,
+              b.booking_reference AS bookingReference,
+              COALESCE(CASE WHEN a.returned_at IS NULL THEN NULL ELSE a.returned_quantity END,a.quantity) AS units,
+              COALESCE(a.damaged_quantity,0) AS observedDamageUnits,
+              a.return_notes AS notes,
+              DATE_FORMAT(COALESCE(a.returned_at,a.updated_at),'%Y-%m-%d') AS reportedAt,
+              COALESCE(ru.full_name,'') AS receivedBy
+        FROM bookings b JOIN booking_items a ON a.booking_id=b.id AND a.store_id=b.store_id
+        JOIN branch_inventory bi ON bi.equipment_id=a.equipment_id AND bi.store_id=b.store_id AND bi.branch_id=b.branch_id
+        JOIN equipment e ON e.id=a.equipment_id AND e.store_id=b.store_id
+        LEFT JOIN users ru ON ru.id=a.received_by AND ru.store_id=b.store_id
+        WHERE b.store_id=? AND b.branch_id=? AND a.item_type='rental'
+          AND a.item_status IN ('returned','cleaning','damaged','cleared')
+          AND COALESCE(CASE WHEN a.returned_at IS NULL THEN NULL ELSE a.returned_quantity END,a.quantity)>0
+          AND (a.inspected_at IS NULL OR a.item_status='returned')
+        ORDER BY a.updated_at DESC,a.id DESC LIMIT 200`,[scope.storeId,scope.branchId]);
     // Source of truth: open maintenance records.
     const [maintenanceRecords]=await db.execute(`SELECT m.id,
                                                         m.equipment_id AS equipmentId,
@@ -1451,19 +1510,15 @@ async function getInventory(db,scope) {
         [scope.storeId,scope.branchId]);
     // Preliminary damage recorded by Staff when receiving the booking return.
     const [pendingDamageObservations]=await db.execute(`SELECT a.id AS allocationId,
-                                                               a.booking_reference AS bookingReference,
-                                                               e.name AS equipmentName,
-                                                               a.inspection_damaged_units AS observedDamagedUnits,
-                                                               a.inspection_notes AS notes,
-                                                               DATE_FORMAT(a.returned_at,'%Y-%m-%d') AS reportedAt
-                                                        FROM ${V2_RENTAL_ALLOCATIONS} a
-                                                                 JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=a.equipment_id
-                                                            AND e.store_id=a.store_id AND e.branch_id=a.branch_id
-                                                        WHERE a.store_id=? AND a.branch_id=? AND a.status='returned'
-                                                          AND a.inspection_status='pending'
-                                                          AND COALESCE(a.inspection_damaged_units,0)>0
-                                                        ORDER BY a.returned_at DESC,a.id DESC LIMIT 200`,
-        [scope.storeId,scope.branchId]);
+              b.booking_reference AS bookingReference,e.equipment_name AS equipmentName,
+              a.damaged_quantity AS observedDamagedUnits,a.return_notes AS notes,
+              DATE_FORMAT(a.returned_at,'%Y-%m-%d') AS reportedAt
+        FROM bookings b JOIN booking_items a ON a.booking_id=b.id AND a.store_id=b.store_id
+        JOIN branch_inventory bi ON bi.equipment_id=a.equipment_id AND bi.store_id=b.store_id AND bi.branch_id=b.branch_id
+        JOIN equipment e ON e.id=a.equipment_id AND e.store_id=b.store_id
+        WHERE b.store_id=? AND b.branch_id=? AND a.item_type='rental'
+          AND a.item_status='returned' AND COALESCE(a.damaged_quantity,0)>0
+        ORDER BY a.returned_at DESC,a.id DESC LIMIT 200`,[scope.storeId,scope.branchId]);
     // Staff receiving tasks are not part of stocknbook_v2.
     const pendingReceipts=[];
     const [missingReports]=await db.execute(`SELECT r.id,r.equipment_id AS equipmentId,e.name AS equipmentName,
@@ -1682,81 +1737,129 @@ async function staffEquipmentCalendar(db,scope,body) {
 // Staff operations consume existing booking allocations; there is no equipment/catalog write access.
 // Bookings must already be confirmed by the existing booking workflow.
 async function staffRentalWorkspace(db, scope) {
+    // Time the read-only stages individually. This makes a slow database
+    // query diagnosable without logging customer information or SQL parameters.
+    const readWorkspace = async (stage, sql, params) => {
+        const started = Date.now();
+        try {
+            return await db.execute(sql, params);
+        } finally {
+            const elapsedMs = Date.now() - started;
+            if (elapsedMs >= 1500) console.warn("[rental workspace] slow query", { stage, elapsedMs });
+        }
+    };
     const bookedToday=await rentalBookableToday(db,scope);
-    const [equipment] = await db.execute(`SELECT e.id,e.equipment_number AS equipmentNumber,e.name,c.name AS category,
+    const [equipment] = await readWorkspace("equipment list",`SELECT e.id,e.equipment_number AS equipmentNumber,e.name,c.name AS category,
                                                  e.total_units AS totalUnits,e.rented_out_units AS rentedOutUnits,e.maintenance_units AS maintenanceUnits,
                                                  e.missing_units AS missingUnits,e.alert_level AS alertLevel,
-                                                 (SELECT DATE_FORMAT(MAX(m.occurred_at),'%Y-%m-%d')
-                                                  FROM ${V2_RENTAL_MOVEMENTS} m
-                                                  WHERE m.store_id=e.store_id AND m.branch_id=e.branch_id
-                                                    AND m.equipment_id=e.id AND m.type='received') AS lastStockReceivedDate
+                                                 (SELECT DATE_FORMAT(MAX(m.created_at),'%Y-%m-%d')
+                                                  FROM inventory_movements m
+                                                  WHERE m.branch_inventory_id=e.inventory_id
+                                                    AND m.store_id=e.store_id AND m.branch_id=e.branch_id
+                                                    AND m.movement_type='received') AS lastStockReceivedDate
                                           FROM ${V2_RENTAL_EQUIPMENT} e JOIN ${V2_RENTAL_CATEGORIES} c ON c.id=e.category_id
                                           WHERE e.store_id=? AND e.branch_id=? AND e.archived_at IS NULL ORDER BY e.name LIMIT 300`,
         [scope.storeId, scope.branchId]);
-    const [allocations] = await db.execute(`SELECT a.id AS allocationId,a.booking_reference AS bookingReference,
-                                                   a.equipment_id AS equipmentId,e.name AS equipmentName,e.equipment_number AS equipmentNumber,
-                                                   a.quantity,DATE_FORMAT(a.start_date,'%Y-%m-%d') AS startDate,
-                                                   DATE_FORMAT(a.end_date,'%Y-%m-%d') AS endDate,a.status,
-                                                   a.prepared_at AS preparedAt,a.returned_at AS returnedAt,
-                                                   COALESCE(a.returned_received_units,a.quantity) AS returnedReceivedUnits,
-                                                   COALESCE(a.inspection_cleaning_units,IF(a.inspection_status='cleaning',a.quantity,0)) AS cleaningUnits,
-                                                   COALESCE(a.inspection_damaged_units,IF(a.inspection_status='damaged',a.quantity,0)) AS damagedUnits,
-                                                   b.name AS clientName,b.booking_type AS bookingType,b.status AS bookingStatus,
-                                                   b.package_name AS packageName,
-                                                   DATE_FORMAT(b.event_date,'%Y-%m-%d') AS eventDate,
-                                                   b.event_time AS eventTime,
-                                                   COALESCE(b.agreed_price,0) AS bookingTotal,
-                                                   COALESCE(b.amount_paid,0) AS amountPaid,
-                                                   COALESCE(b.balance,0) AS bookingBalance,
-                                                   f.refundable_deposit_required AS depositRequired,
-                                                   f.deposit_collected AS depositCollected,
-                                                   CASE WHEN a.inspection_status='damaged' AND m.id IS NOT NULL AND m.quantity_remaining=0
-                                                            THEN 'cleared' ELSE a.inspection_status END AS inspectionStatus,
-                                                   a.inspection_notes AS inspectionNotes
-                                            FROM ${V2_RENTAL_ALLOCATIONS} a
-                                                     JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=a.equipment_id AND e.store_id=a.store_id AND e.branch_id=a.branch_id AND e.archived_at IS NULL
-                                                     JOIN ${V2_BOOKINGS} b ON b.id=a.booking_id
-                                                AND LOWER(b.status) IN ('confirmed','preparing','released','return inspection','pending settlement','approved','completed')
-                                                     LEFT JOIN ${V2_BOOKING_FINANCIALS} f ON f.booking_id=b.id
-                                                     LEFT JOIN ${V2_MAINTENANCE_RECORDS} m ON m.id=a.maintenance_record_id
-                                            WHERE a.store_id=? AND a.branch_id=? AND (a.status IN ('reserved','checked_out')
-                                                OR (a.status='returned' AND (a.inspection_status IN ('pending','cleaning')
-                                                    OR (a.inspection_status='damaged' AND COALESCE(m.quantity_remaining,0)>0))))
-                                            ORDER BY a.end_date ASC,a.start_date ASC,a.id ASC LIMIT 300`,[scope.storeId,scope.branchId]);
+    const [allocationRows] = await readWorkspace("active booking allocations", `SELECT a.id AS allocationId,b.id AS bookingId,b.booking_reference AS bookingReference,
+               a.equipment_id AS equipmentId,e.equipment_name AS equipmentName,e.equipment_number AS equipmentNumber,
+               a.quantity, DATE_FORMAT(COALESCE(b.rental_start_date,b.event_date),'%Y-%m-%d') AS startDate,
+               DATE_FORMAT(COALESCE(b.rental_end_date,b.event_end_date,b.rental_start_date,b.event_date),'%Y-%m-%d') AS endDate,
+               CASE WHEN a.item_status='released' THEN 'checked_out'
+                    WHEN a.item_status='reserved' THEN 'reserved' ELSE 'returned' END AS status,
+               a.prepared_at AS preparedAt,a.returned_at AS returnedAt,
+               COALESCE(CASE WHEN a.returned_at IS NULL THEN NULL ELSE a.returned_quantity END,a.quantity) AS returnedReceivedUnits,
+               COALESCE(a.used_quantity,IF(a.item_status='cleaning',a.quantity,0)) AS cleaningUnits,
+               COALESCE(a.damaged_quantity,IF(a.item_status='damaged',a.quantity,0)) AS damagedUnits,
+               c.full_name AS clientName,b.booking_type AS bookingType,b.status AS bookingStatus,
+               COALESCE(pk.package_name,'') AS packageName,
+               DATE_FORMAT(b.event_date,'%Y-%m-%d') AS eventDate,b.event_time AS eventTime,
+               COALESCE(b.agreed_price,0) AS bookingTotal,
+               b.refundable_deposit_required AS depositRequired,
+               CASE WHEN a.item_status='returned' THEN 'pending'
+                    WHEN a.item_status IN ('cleaning','damaged') THEN a.item_status
+                    ELSE NULL END AS inspectionStatus,
+               a.return_notes AS inspectionNotes
+        FROM bookings b
+        JOIN booking_items a ON a.booking_id=b.id AND a.store_id=b.store_id
+        JOIN branch_inventory ebi ON ebi.equipment_id=a.equipment_id AND ebi.store_id=b.store_id AND ebi.branch_id=b.branch_id
+        JOIN equipment e ON e.id=a.equipment_id AND e.store_id=b.store_id AND e.deleted_at IS NULL
+        JOIN customers c ON c.id=b.customer_id AND c.store_id=b.store_id
+        LEFT JOIN packages pk ON pk.id=b.package_id AND pk.store_id=b.store_id
+        LEFT JOIN stock_issues m ON m.id=(
+            SELECT di.id FROM stock_issues di
+            WHERE a.item_status='damaged' AND di.booking_id=b.id
+              AND di.store_id=b.store_id AND di.branch_id=b.branch_id
+              AND di.branch_inventory_id=ebi.id AND di.issue_type='maintenance'
+              AND di.reason LIKE 'Rental damage %'
+            ORDER BY di.id DESC LIMIT 1
+        )
+        WHERE b.store_id=? AND b.branch_id=? AND a.item_type='rental'
+          AND LOWER(b.status) IN ('confirmed','preparing','released','return inspection','pending settlement','approved','completed')
+          AND (a.item_status IN ('reserved','released','returned','cleaning')
+               OR (a.item_status='damaged' AND m.quantity>m.quantity_resolved))
+        ORDER BY COALESCE(b.rental_end_date,b.event_end_date,b.rental_start_date,b.event_date),
+                 COALESCE(b.rental_start_date,b.event_date),a.id
+        LIMIT 300`,
+        [scope.storeId,scope.branchId]);
+    // A separate, bounded financial read avoids MySQL expanding the historical
+    // booking/payment derived tables for every allocation before the LIMIT.
+    // Booking IDs came only from this authorized store/branch's visible queue.
+    const bookingIds = [...new Set(allocationRows.map(row=>row.bookingId))];
+    const financials = new Map();
+    if (bookingIds.length) {
+        const placeholders = bookingIds.map(()=>"?").join(",");
+        const [rows] = await readWorkspace("allocation payment balances", `SELECT b.id AS bookingId,
+            ${V2_BOOKING_PAID_SQL("b")} AS amountPaid,
+            GREATEST(COALESCE(b.agreed_price,0)-${V2_BOOKING_PAID_SQL("b")},0) AS bookingBalance,
+            COALESCE((SELECT SUM(p.amount) FROM payments p
+                      WHERE p.booking_id=b.id AND p.status<>'voided'
+                        AND p.payment_type='security_deposit'),0) AS depositCollected
+            FROM bookings b
+            WHERE b.store_id=? AND b.branch_id=? AND b.id IN (${placeholders})`,
+            [scope.storeId,scope.branchId,...bookingIds]);
+        for (const row of rows) financials.set(String(row.bookingId),row);
+    }
+    const allocations = allocationRows.map(({bookingId,...row}) => {
+        const payment = financials.get(String(bookingId));
+        // Do not invent a payment balance if a booking changed during the read.
+        if (!payment) fail(503,"A rental booking changed while loading. Please retry.");
+        return {...row,amountPaid:payment.amountPaid,bookingBalance:payment.bookingBalance,
+            depositCollected:payment.depositCollected};
+    });
     // Staff and Manager share the same five physical stock activity categories.
     // Other condition and correction movements remain in the audit ledger, not this table.
-    const [activity] = await db.execute(`SELECT m.id,m.equipment_id AS equipmentId,COALESCE(e.name,'Archived equipment') AS equipmentName,
-                                                m.type,m.quantity,DATE_FORMAT(m.occurred_at,'%Y-%m-%dT%H:%i:%s+08:00') AS occurredAt,
-                                                ${V2_VISIBLE_RENTAL_STOCK_REFERENCE_SQL} AS referenceNumber,
-                                                m.description AS description,
-                                                CASE WHEN m.type IN ('received','returned','missing_replaced') THEN 'in' ELSE 'out' END AS direction
-                                         FROM ${V2_RENTAL_MOVEMENTS} m
-                                                  LEFT JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=m.equipment_id AND e.store_id=m.store_id AND e.branch_id=m.branch_id
-                                                  LEFT JOIN ${V2_MISSING_REPORTS} miss ON m.type='missing_replaced'
-                                             AND miss.id=CAST(SUBSTRING(m.reference_number,6) AS UNSIGNED)
-                                             AND miss.store_id=m.store_id AND miss.branch_id=m.branch_id
-                                             AND miss.equipment_id=m.equipment_id
-                                         WHERE m.store_id=? AND m.branch_id=? AND m.equipment_id IS NOT NULL
-                                           AND ${V2_VISIBLE_RENTAL_STOCK_ACTIVITY_SQL}
-                                         ORDER BY m.occurred_at DESC,m.id DESC LIMIT 30`,[scope.storeId,scope.branchId]);
+    const [activity] = await readWorkspace("recent stock activity",`SELECT m.id,m.equipment_id AS equipmentId,COALESCE(e.name,'Archived equipment') AS equipmentName,
+                                                                           m.type,m.quantity,DATE_FORMAT(m.occurred_at,'%Y-%m-%dT%H:%i:%s+08:00') AS occurredAt,
+                                                                           ${V2_VISIBLE_RENTAL_STOCK_REFERENCE_SQL} AS referenceNumber,
+                                                                           m.description AS description,
+                                                                           CASE WHEN m.type IN ('received','returned','missing_replaced') THEN 'in' ELSE 'out' END AS direction
+                                                                    FROM ${V2_RENTAL_MOVEMENTS} m
+                                                                             LEFT JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=m.equipment_id AND e.store_id=m.store_id AND e.branch_id=m.branch_id
+                                                                             LEFT JOIN ${V2_MISSING_REPORTS} miss ON m.type='missing_replaced'
+                                                                        AND miss.id=CAST(SUBSTRING(m.reference_number,6) AS UNSIGNED)
+                                                                        AND miss.store_id=m.store_id AND miss.branch_id=m.branch_id
+                                                                        AND miss.equipment_id=m.equipment_id
+                                                                    WHERE m.store_id=? AND m.branch_id=? AND m.equipment_id IS NOT NULL
+                                                                      AND ${V2_VISIBLE_RENTAL_STOCK_ACTIVITY_SQL}
+                                                                    ORDER BY m.occurred_at DESC,m.id DESC LIMIT 30`,[scope.storeId,scope.branchId]);
     // Staff receiving tasks are not part of stocknbook_v2.
     const pendingReceipts=[];
-    const [missingReports]=await db.execute(`SELECT r.id,r.equipment_id AS equipmentId,e.name AS equipmentName,
-                                                    ${V2_ISSUE_BOOKING_REFERENCE_SQL("r","reason")} AS bookingReference,r.reason,
-                                                    r.quantity-r.recovered AS remainingUnits
-                                             FROM ${V2_MISSING_REPORTS} r JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=r.equipment_id AND e.branch_id=r.branch_id
-                                             WHERE r.store_id=? AND r.branch_id=? AND r.status='pending' AND e.archived_at IS NULL
-                                             ORDER BY r.created_at DESC,r.id DESC LIMIT 200`,[scope.storeId,scope.branchId]);
-    const [maintenanceTasks]=await db.execute(`SELECT m.id,m.equipment_id AS equipmentId,e.name AS equipmentName,
-                                                      m.quantity_remaining AS units,m.start_reason AS reason,
-                                                      m.condition_status AS conditionStatus,
-                                                      ${V2_ISSUE_BOOKING_REFERENCE_SQL("m","start_reason")} AS bookingReference,
-                                                      IF(m.repair_approved_at IS NULL,0,1) AS repairApproved,
-                                                      (SELECT COALESCE(SUM(q.quantity),0) FROM ${V2_COMPLETION_REQUESTS} q
-                                                       WHERE q.maintenance_record_id=m.id AND q.status='pending') AS pendingUnits
-                                               FROM ${V2_MAINTENANCE_RECORDS} m JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=m.equipment_id AND e.branch_id=m.branch_id
-                                               WHERE m.store_id=? AND m.branch_id=? AND e.archived_at IS NULL AND m.quantity_remaining>0
-                                               ORDER BY m.opened_at DESC LIMIT 200`,[scope.storeId,scope.branchId]);
+    const [missingReports]=await readWorkspace("missing equipment",`SELECT r.id,r.equipment_id AS equipmentId,e.name AS equipmentName,
+                                                                           ${V2_ISSUE_BOOKING_REFERENCE_SQL("r","reason")} AS bookingReference,r.reason,
+                                                                           r.quantity-r.recovered AS remainingUnits
+                                                                    FROM ${V2_MISSING_REPORTS} r JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=r.equipment_id AND e.branch_id=r.branch_id
+                                                                    WHERE r.store_id=? AND r.branch_id=? AND r.status='pending' AND e.archived_at IS NULL
+                                                                    ORDER BY r.created_at DESC,r.id DESC LIMIT 200`,[scope.storeId,scope.branchId]);
+    const [maintenanceTasks]=await readWorkspace("maintenance tasks",`SELECT m.id,m.equipment_id AS equipmentId,e.name AS equipmentName,
+                                                                             m.quantity_remaining AS units,m.start_reason AS reason,
+                                                                             m.condition_status AS conditionStatus,
+                                                                             ${V2_ISSUE_BOOKING_REFERENCE_SQL("m","start_reason")} AS bookingReference,
+                                                                             IF(m.repair_approved_at IS NULL,0,1) AS repairApproved,
+                                                                             (SELECT COALESCE(SUM(q.quantity),0) FROM ${V2_COMPLETION_REQUESTS} q
+                                                                              WHERE q.maintenance_record_id=m.id AND q.status='pending') AS pendingUnits
+                                                                      FROM ${V2_MAINTENANCE_RECORDS} m JOIN ${V2_RENTAL_EQUIPMENT} e ON e.id=m.equipment_id AND e.branch_id=m.branch_id
+                                                                      WHERE m.store_id=? AND m.branch_id=? AND e.archived_at IS NULL AND m.quantity_remaining>0
+                                                                      ORDER BY m.opened_at DESC LIMIT 200`,[scope.storeId,scope.branchId]);
     const unitNumbers=await identifiers.listEquipmentUnitNumbers(db,{storeId:scope.storeId,branchId:scope.branchId});
     return {success:true,equipment:equipment.map(x=>({...x,id:Number(x.id),totalUnits:Number(x.totalUnits),
             unitNumbers:unitNumbers.get(Number(x.id))||[],
@@ -2725,11 +2828,13 @@ exports.handler = async (event) => {
         let branchId = role==="owner" ? id(body.branch_id||body.branchId,"Branch ID") : null;
         let actor=trim(session.email,150)||role;
         let actorId=null;
-        db = await dbPool.getConnection();
+        const workspaceRead = action==="get_staff_rental_workspace" || action==="get_manager_inventory";
+        db = workspaceRead ? await acquireRentalWorkspaceConnection() : await dbPool.getConnection();
+        const dbAccess = workspaceRead ? boundedRentalWorkspace(db,action) : db;
         if(role==="manager") {
             const managerId=id(session.manager_id,"Manager ID");
-            const [managers]=await db.execute(`SELECT branch_id AS branchId,full_name AS managerName,status,permissions
-                                               FROM users WHERE id=? AND store_id=? AND role='manager' LIMIT 1`,[managerId,storeId]);
+            const [managers]=await dbAccess.execute(`SELECT branch_id AS branchId,full_name AS managerName,status,permissions
+                                                     FROM users WHERE id=? AND store_id=? AND role='manager' LIMIT 1`,[managerId,storeId]);
             if(!managers.length || !['active','accepted'].includes(String(managers[0].status).toLowerCase()))
                 fail(403,"An active Manager account is required.");
             branchId=id(managers[0].branchId,"Assigned branch");
@@ -2743,7 +2848,7 @@ exports.handler = async (event) => {
         }
         if(role==="staff") {
             const staffId=id(session.staff_id,"Staff ID");
-            const [staff]=await db.execute(`SELECT branch_id,full_name AS staff_name,status,permissions FROM users
+            const [staff]=await dbAccess.execute(`SELECT branch_id,full_name AS staff_name,status,permissions FROM users
                                             WHERE id=? AND store_id=? AND role='staff' LIMIT 1`,[staffId,storeId]);
             if(!staff.length||!['active','accepted'].includes(String(staff[0].status).toLowerCase()))
                 fail(403,"Active staff account required.");
@@ -2759,21 +2864,21 @@ exports.handler = async (event) => {
             actorId=staffId;
         }
         if(role==="owner") {
-            const [owners]=await db.execute(`SELECT id,full_name FROM users WHERE store_id=? AND role='owner' ORDER BY id LIMIT 1`,[storeId]);
+            const [owners]=await dbAccess.execute(`SELECT id,full_name FROM users WHERE store_id=? AND role='owner' ORDER BY id LIMIT 1`,[storeId]);
             if(owners.length){actorId=Number(owners[0].id);actor=trim(owners[0].full_name,150)||actor;}
         }
         const scope={storeId,branchId,actor,actorId,role,requestKey:""};
-        const [branches]=await db.execute(`SELECT b.id,s.store_name AS storeName,b.branch_name AS branchName,
-                                                  s.store_code AS storeCode,b.branch_code AS branchCode
-                                           FROM branches b JOIN stores s ON s.id=b.store_id
-                                           WHERE b.id=? AND b.store_id=? LIMIT 1`,[branchId,storeId]);
+        const [branches]=await dbAccess.execute(`SELECT b.id,s.store_name AS storeName,b.branch_name AS branchName,
+                                                        s.store_code AS storeCode,b.branch_code AS branchCode
+                                                 FROM branches b JOIN stores s ON s.id=b.store_id
+                                                 WHERE b.id=? AND b.store_id=? LIMIT 1`,[branchId,storeId]);
         if(!branches.length)fail(403,"Invalid branch or store association.");
         scope.storeName=branches[0].storeName;
         scope.branchName=branches[0].branchName;
-        if(action==="get_staff_rental_workspace")return reply(200,await staffRentalWorkspace(db,scope));
+        if(action==="get_staff_rental_workspace")return reply(200,await staffRentalWorkspace(dbAccess,scope));
         if(action==="get_staff_equipment_schedule")return reply(200,await staffEquipmentSchedule(db,scope,body));
         if(action==="get_staff_equipment_calendar")return reply(200,await staffEquipmentCalendar(db,scope,body));
-        if(action==="get_manager_inventory")return reply(200,await getInventory(db,scope));
+        if(action==="get_manager_inventory")return reply(200,await getInventory(dbAccess,scope));
         if(action==="check_availability")return reply(200,await checkAvailability(db,scope,body));
         const requestKey=requiredText(body.requestKey,90,"Request key");
         scope.requestKey=requestKey;

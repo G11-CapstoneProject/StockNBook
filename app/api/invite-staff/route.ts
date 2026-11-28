@@ -22,6 +22,13 @@ export async function POST(req: NextRequest) {
 
         const response = await handler(event);
 
+        if (!response) {
+            return NextResponse.json(
+                { error: "Invalid response from staff invitation server" },
+                { status: 502 }
+            );
+        }
+
         let data: unknown = {};
 
         try {

@@ -66,6 +66,13 @@ export async function POST(req: NextRequest) {
             requestContext: { http: { method: "POST" } },
         });
 
+        if (!response) {
+            return NextResponse.json(
+                { error: "Invalid store lookup response." },
+                { status: 502, headers: NO_STORE_CACHE }
+            );
+        }
+
         let data: unknown;
 
         try {

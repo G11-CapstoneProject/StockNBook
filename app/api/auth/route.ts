@@ -50,6 +50,13 @@ export async function POST(req: NextRequest) {
 
     const response = await handler(event);
 
+    if (!response) {
+      return NextResponse.json(
+          { error: "Authentication server error" },
+          { status: 502, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
     let data: unknown = {};
 
     try {

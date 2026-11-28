@@ -390,6 +390,7 @@ export function useRentalInventory(branchId?: number) {
     const [connected, setConnected] = React.useState(false);
     const inFlight = React.useRef<AbortController | null>(null);
     const loaded = React.useRef(false);
+    const retryAfter = React.useRef(0);
 
     const refresh = React.useCallback(async (force = false) => {
         // Manager branch is resolved securely from the JWT on the backend.
@@ -405,6 +406,7 @@ export function useRentalInventory(branchId?: number) {
             setMaintenanceDataReady(false); setSavedCategories([]);
             return;
         }
+        if (!force && Date.now() < retryAfter.current) return;
         if (inFlight.current) {
             if (!force) return;
             inFlight.current.abort();
@@ -414,6 +416,11 @@ export function useRentalInventory(branchId?: number) {
         inFlight.current = controller;
         if (!loaded.current) setLoading(true);
         else setRefreshing(true);
+        let timedOut = false;
+        const timeoutId = window.setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+        }, 45000);
         try {
             const result = await requestRental({action: "get_manager_inventory", ...(validBranchId ? {branch_id: validBranchId} : {})}, controller.signal);
             if (!Array.isArray(result.equipment) || !Array.isArray(result.activity)) {
@@ -459,30 +466,36 @@ export function useRentalInventory(branchId?: number) {
                     : []);
                 setRecentActivity(result.activity.map(normalizeActivity).filter((a): a is RentalActivity => Boolean(a))
                     .sort((a, b) => Date.parse(b.occurredAt) - Date.parse(a.occurredAt)));
-                setConnected(true); setError(null); loaded.current = true;
+                setConnected(true); setError(null); loaded.current = true; retryAfter.current = 0;
             }
         } catch (cause) {
-            if (!controller.signal.aborted) {
-                setError(cause instanceof Error ? cause.message : "Could not load rental inventory.");
+            if (inFlight.current === controller && (!controller.signal.aborted || timedOut)) {
+                retryAfter.current = Date.now() + 60000;
+                setConnected(false); setBookingSyncConnected(false);
+                setError(timedOut ? "Rental inventory request timed out. Please retry."
+                    : cause instanceof Error ? cause.message : "Could not load rental inventory.");
                 // If a refresh fails, retain previously loaded data, but never show it as live.
                 if (!loaded.current) { setConnected(false); setBookingSyncConnected(false); setEquipment([]); setRecentActivity([]);
                     setMaintenanceRecords([]);setMaintenanceHistory([]);setPendingInspections([]);setMonitoringDataReady(false);setPendingDamageObservations([]);setPendingReceipts([]);setMissingReports([]);setMaintenanceDataReady(false); }
             }
         } finally {
-            if (inFlight.current === controller) inFlight.current = null;
-            if (!controller.signal.aborted) { setLoading(false); setRefreshing(false); }
+            window.clearTimeout(timeoutId);
+            if (inFlight.current === controller) {
+                inFlight.current = null;
+                setLoading(false); setRefreshing(false);
+            }
         }
     }, [validBranchId, invalidExplicitBranch]);
 
     React.useEffect(() => {
-        loaded.current = false;
+        loaded.current = false; retryAfter.current = 0;
         setConnected(false); setBookingSyncConnected(false); setEquipment([]); setRecentActivity([]);
         setMaintenanceRecords([]);setMaintenanceHistory([]);setPendingInspections([]);setMonitoringDataReady(false);setPendingDamageObservations([]);setPendingReceipts([]);setMissingReports([]); setMaintenanceDataReady(false); setSavedCategories([]); setLoading(true);
         void refresh();
         const onFocus = () => { if (document.visibilityState === "visible") void refresh(); };
         window.addEventListener("focus", onFocus);
         window.addEventListener("stocknbook:rental-inventory-refresh", onFocus);
-        const interval = window.setInterval(onFocus, 15_000);
+        const interval = window.setInterval(onFocus, 30_000);
         return () => {
             inFlight.current?.abort(); inFlight.current = null;
             window.removeEventListener("focus", onFocus);
@@ -625,10 +638,12 @@ export function useStaffRentalInventory() {
     const [connected, setConnected] = React.useState(false);
     const controller = React.useRef<AbortController | null>(null);
     const loaded = React.useRef(false);
+    const retryAfter = React.useRef(0);
 
     const refresh = React.useCallback(async (force = false) => {
         // React Strict Mode may abort the initial request during effect cleanup.
         // An aborted controller must not block the next attempt to load the page.
+        if (!force && Date.now() < retryAfter.current) return;
         if (controller.current?.signal.aborted) controller.current = null;
         if (controller.current) {
             if (!force) return;
@@ -642,7 +657,7 @@ export function useStaffRentalInventory() {
         const timeoutId = window.setTimeout(() => {
             timedOut = true;
             abort.abort();
-        }, 20000);
+        }, 45000);
         try {
             const response = await rentalRequest({ action: "get_staff_rental_workspace" }, abort.signal);
             if (!Array.isArray(response.equipment) || !Array.isArray(response.allocations) || !Array.isArray(response.activity) ||
@@ -656,10 +671,11 @@ export function useStaffRentalInventory() {
                 setPendingReceipts(Array.isArray(response.pendingReceipts)?response.pendingReceipts:[]);
                 setMaintenanceTasks(Array.isArray(response.maintenanceTasks)?response.maintenanceTasks:[]);
                 setMissingReports(Array.isArray(response.missingReports)?response.missingReports:[]);
-                setConnected(true); setError(null); loaded.current = true;
+                setConnected(true); setError(null); loaded.current = true; retryAfter.current = 0;
             }
         } catch (reason) {
-            if (!abort.signal.aborted || timedOut) {
+            if (controller.current === abort && (!abort.signal.aborted || timedOut)) {
+                retryAfter.current = Date.now() + 60000;
                 setConnected(false);
                 setError(timedOut
                     ? "Rental inventory request timed out. Please retry."
@@ -682,7 +698,9 @@ export function useStaffRentalInventory() {
         void refresh();
         const onRefresh = () => { if (document.visibilityState === "visible") void refresh(); };
         window.addEventListener("focus", onRefresh);
-        const timer = window.setInterval(onRefresh, 15_000);
+        // Allow background refreshes without flooding the backend during a
+        // temporary database slowdown. The Retry and manual Refresh remain available.
+        const timer = window.setInterval(onRefresh, 30_000);
         return () => {
             controller.current?.abort();
             controller.current = null; // Allow the next effect setup to start a fresh request.

@@ -41,6 +41,10 @@ export async function GET(req: NextRequest) {
             requestContext: { http: { method: "POST" } },
         });
 
+        if (!response) {
+            return NextResponse.json({ error: "Unable to load subscription." }, { status: 502 });
+        }
+
         return NextResponse.json(parseBody(response.body), {
             status: response.statusCode || 200,
         });
@@ -82,6 +86,10 @@ export async function POST(req: NextRequest) {
             }),
             requestContext: { http: { method: "POST" } },
         });
+
+        if (!response) {
+            return NextResponse.json({ error: "Unable to update subscription." }, { status: 502 });
+        }
 
         return NextResponse.json(parseBody(response.body), {
             status: response.statusCode || 200,

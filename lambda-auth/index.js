@@ -48,15 +48,32 @@ async function accountPhoneConflict(connection, phone, fullName, storeId = null,
     return null;
 }
 
-// stores.slug already has a global UNIQUE index; this check gives an actionable
-// field error before sending an OTP rather than failing at INSERT time.
+// Store slugs are stable URL identifiers, not editable display names.
+// Keep the existing duplicate business-name policy independent of the slug.
 const DUPLICATE_BUSINESS_MESSAGE = "This business name is already registered. Please use a different business name.";
-async function businessNameAlreadyRegistered(connection, slug) {
+function cleanStoreName(value) {
+    return typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
+}
+async function businessNameAlreadyRegistered(connection, name, excludeStoreId = null) {
     const [rows] = await connection.execute(
-        "SELECT id FROM stores WHERE slug = ? LIMIT 1",
-        [slug]
+        `SELECT id FROM stores
+         WHERE TRIM(REGEXP_REPLACE(store_name, '[[:space:]]+', ' ')) = ?
+           AND (? IS NULL OR id <> ?) LIMIT 1`,
+        [name, excludeStoreId, excludeStoreId]
     );
     return rows.length > 0;
+}
+
+// Call under the store-slug allocation lock. The database UNIQUE key remains
+// the final protection against duplicate slugs, including concurrent signups.
+async function allocateUniqueStoreSlug(connection, name) {
+    const base = (generateSlug(name).slice(0, 120).replace(/-+$/, "") || "store");
+    for (let attempt = 0; attempt < 20; attempt++) {
+        const candidate = attempt === 0 ? base : `${base}-${crypto.randomBytes(6).toString("hex")}`;
+        const [rows] = await connection.execute("SELECT id FROM stores WHERE slug = ? LIMIT 1", [candidate]);
+        if (!rows.length) return candidate;
+    }
+    throw securityError(503, "Unable to create a unique booking link. Please try again.", "STORE_SLUG_BUSY");
 }
 
 function normalizedBranchLabel(value) {
@@ -404,8 +421,8 @@ const identifiers = (() => {
         const prefix = `${Number(storeId)}-${Number(branchId)}-${roleCode}-`;
         const floor = await maxSequenceFrom(connection,
             `SELECT employee_code AS value FROM users
-             WHERE store_id = ? AND branch_id = ? AND employee_code LIKE ?`,
-            [storeId, branchId, `${prefix}%`], PATTERNS.employee);
+             WHERE store_id = ? AND employee_code LIKE ?`,
+            [storeId, `${prefix}%`], PATTERNS.employee);
         const { last } = await reserveSequenceBlock(connection, { storeId, branchId, floor });
         return buildEmployeeCode(storeId, branchId, roleCode, last);
     }
@@ -4234,9 +4251,7 @@ module.exports.handler = async (event) => {
                 body.owner_name ?? body.ownerName ?? ""
             ).trim();
 
-            const storeName = String(
-                body.store_name ?? body.storeName ?? ""
-            ).trim();
+            const storeName = cleanStoreName(body.store_name ?? body.storeName);
 
             const rawPhoneNumber = String(
                 body.phone_number ?? body.phoneNumber ?? body.phone ?? ""
@@ -4280,13 +4295,11 @@ module.exports.handler = async (event) => {
                 };
             }
 
-            const slug = generateSlug(storeName);
-
-            if (!slug) {
+            if (storeName.length > 180 || !/[\p{L}\p{N}]/u.test(storeName)) {
                 return {
                     statusCode: 400,
                     headers,
-                    body: JSON.stringify({ error: "Business name must contain letters or numbers." }),
+                    body: JSON.stringify({ error: "Business name must contain letters or numbers and be at most 180 characters." }),
                 };
             }
 
@@ -4300,8 +4313,8 @@ module.exports.handler = async (event) => {
             // and name, but must use a different (globally unique) email.
             await authLock(connection, `phone:${phoneNumber}`);
             const phoneConflict = await accountPhoneConflict(connection, phoneNumber, ownerName);
-            await authLock(connection, `business-name:${slug}`);
-            const businessConflict = await businessNameAlreadyRegistered(connection, slug);
+            await authLock(connection, `business-name:${storeName}`);
+            const businessConflict = await businessNameAlreadyRegistered(connection, storeName);
             const fieldErrors = {};
             if (existing.length > 0) {
                 fieldErrors.email = "This email address is already registered.";
@@ -4407,9 +4420,7 @@ module.exports.handler = async (event) => {
             const ownerName = String(
                 body.owner_name ?? body.ownerName ?? ""
             ).trim();
-            const storeName = String(
-                body.store_name ?? body.storeName ?? ""
-            ).trim();
+            const storeName = cleanStoreName(body.store_name ?? body.storeName);
             const rawPhoneNumber = String(
                 body.phone_number ?? body.phoneNumber ?? body.phone ?? ""
             ).trim();
@@ -4451,12 +4462,11 @@ module.exports.handler = async (event) => {
                 };
             }
 
-            const slug = generateSlug(storeName);
-            if (!slug) {
+            if (storeName.length > 180 || !/[\p{L}\p{N}]/u.test(storeName)) {
                 return {
                     statusCode: 400,
                     headers,
-                    body: JSON.stringify({ error: "Business name must contain letters or numbers." }),
+                    body: JSON.stringify({ error: "Business name must contain letters or numbers and be at most 180 characters." }),
                 };
             }
 
@@ -4471,8 +4481,8 @@ module.exports.handler = async (event) => {
             // Use the same lock order as send_signup_otp (account, phone, business).
             await authLock(connection, `phone:${phoneNumber}`);
             const phoneConflict = await accountPhoneConflict(connection, phoneNumber, ownerName);
-            await authLock(connection, `business-name:${slug}`);
-            const businessConflict = await businessNameAlreadyRegistered(connection, slug);
+            await authLock(connection, `business-name:${storeName}`);
+            const businessConflict = await businessNameAlreadyRegistered(connection, storeName);
             const fieldErrors = {};
             if (existing.length > 0) fieldErrors.email = "This email address is already registered.";
             if (phoneConflict) fieldErrors.phone = phoneConflict.error;
@@ -4491,6 +4501,8 @@ module.exports.handler = async (event) => {
             const otpRecord = await checkOtp(connection, otpScope("signup", otpEmail), otp, false);
 
             const hashed = await bcrypt.hash(accountPassword, 10);
+            await authLock(connection, "store-slug-allocation");
+            const slug = await allocateUniqueStoreSlug(connection, storeName);
 
             // The store and its owner account are created together.
             let result;
@@ -4509,7 +4521,7 @@ module.exports.handler = async (event) => {
                 } catch (storeInsertError) {
                     if (storeInsertError?.code === "ER_DUP_ENTRY" &&
                         /slug/i.test(String(storeInsertError?.sqlMessage || storeInsertError?.message || ""))) {
-                        throw securityError(409, DUPLICATE_BUSINESS_MESSAGE, "BUSINESS_NAME_ALREADY_REGISTERED");
+                        throw securityError(409, "A booking link was just created with the same identifier. Please try again.", "STORE_SLUG_CONFLICT");
                     }
                     throw storeInsertError;
                 }
@@ -4558,15 +4570,61 @@ module.exports.handler = async (event) => {
             };
         }
 
+        // UPDATE STORE PROFILE: Only the authenticated owner may change the
+        // display name. Never accept a store ID or slug from the request body.
+        if (action === "update_store_profile") {
+            if (!presentedToken) {
+                throw securityError(401, "Please sign in again.", "ACCOUNT_SESSION_INVALID");
+            }
+            const decoded = jwt.verify(presentedToken, JWT_SECRET, { algorithms: ["HS256"] });
+            if (decoded.role !== "owner") {
+                throw securityError(403, "Only the store owner can edit the business name.", "STORE_PROFILE_FORBIDDEN");
+            }
+            const name = cleanStoreName(body.store_name);
+            if (!name || name.length > 180 || !/[\p{L}\p{N}]/u.test(name)) {
+                throw securityError(400, "Enter a business name containing letters or numbers (up to 180 characters).", "INVALID_STORE_NAME");
+            }
+            const storeId = Number(decoded.store_id);
+            await authLock(connection, `business-name:${name}`);
+            await connection.beginTransaction();
+            let slug;
+            try {
+                const [stores] = await connection.execute(
+                    "SELECT id, store_name, slug FROM stores WHERE id = ? FOR UPDATE",
+                    [storeId]
+                );
+                const store = stores[0];
+                if (!store) throw securityError(404, "Store not found.", "STORE_NOT_FOUND");
+                if (await businessNameAlreadyRegistered(connection, name, storeId)) {
+                    throw securityError(409, DUPLICATE_BUSINESS_MESSAGE, "BUSINESS_NAME_ALREADY_REGISTERED");
+                }
+                // Keep the public slug and the receipt/store code unchanged.
+                slug = store.slug;
+                await connection.execute(
+                    "UPDATE stores SET store_name = ?, business_name = ? WHERE id = ?",
+                    [name, name, storeId]
+                );
+                await connection.commit();
+            } catch (error) {
+                await connection.rollback();
+                throw error;
+            }
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({ success: true, store_name: name, store_slug: slug }),
+            };
+        }
+
         // GET STORE BY SLUG
         if (action === "get_store_by_slug") {
             const { slug } = body;
 
-            if (!slug) {
+            if (typeof slug !== "string" || !slug.trim() || slug.length > 255) {
                 return {
                     statusCode: 400,
                     headers,
-                    body: JSON.stringify({ error: "Missing slug" }),
+                    body: JSON.stringify({ error: "Invalid store slug" }),
                 };
             }
 
@@ -4597,12 +4655,12 @@ module.exports.handler = async (event) => {
                      ORDER BY id ASC`
                 );
 
-                const fallbackStore = storeRows.find(
+                const fallbackStores = storeRows.filter(
                     (store) => generateSlug(store.store_name || "") === slug
                 );
 
-                if (fallbackStore) {
-                    rows = [fallbackStore];
+                if (fallbackStores.length === 1) {
+                    rows = fallbackStores;
                 }
             }
 
@@ -4660,7 +4718,7 @@ module.exports.handler = async (event) => {
             };
         }
         // SAVE ONBOARDING
-        if (action === "save_onboarding") {
+        if (action === "save_onboarding" || action === "create_branch") {
 
             const authHeader =
                 event.headers?.Authorization || event.headers?.authorization || "";
@@ -4699,8 +4757,9 @@ module.exports.handler = async (event) => {
 
             const storeId = decoded.store_id;
             const { branches = [] } = body;
+            const creatingBranch = action === "create_branch";
             const shouldSendInvitationEmails =
-                body.send_invitation_emails !== false;
+                !creatingBranch && body.send_invitation_emails !== false;
 
             if (!Array.isArray(branches) || branches.length === 0) {
                 return {
@@ -4708,6 +4767,12 @@ module.exports.handler = async (event) => {
                     headers,
                     body: JSON.stringify({ error: "No branches provided" }),
                 };
+            }
+
+            if (creatingBranch && branches.some(branch =>
+                branch?.manager_name || branch?.manager_email || branch?.permissions
+            )) {
+                throw securityError(400, "Add managers in Branch Managers after creating the branch.", "MANAGER_MANAGEMENT_ONLY");
             }
 
             // Enforce the branch entitlement using the current active plan.
@@ -4765,6 +4830,17 @@ module.exports.handler = async (event) => {
                 // Serialize branch creations for this store to avoid two requests
                 // simultaneously accepting an identical branch name/contact.
                 await connection.execute(`SELECT id FROM stores WHERE id = ? FOR UPDATE`, [storeId]);
+                // Only first-time onboarding retains its initial setup invitation.
+                // Once a store has branches, all new manager accounts are created
+                // via add_manager_to_branch in the Branch Managers module.
+                if (!creatingBranch && branches.some(branch => branch?.manager_name || branch?.manager_email)) {
+                    const [existingBranches] = await connection.execute(
+                        "SELECT id FROM branches WHERE store_id = ? LIMIT 1 FOR UPDATE", [storeId]
+                    );
+                    if (existingBranches.length) {
+                        throw securityError(400, "Add managers in Branch Managers after creating the branch.", "MANAGER_MANAGEMENT_ONLY");
+                    }
+                }
                 for (const branch of branches) {
                     const branchName = String(
                         branch.branch_name || ""
@@ -4996,7 +5072,7 @@ module.exports.handler = async (event) => {
                 statusCode: 200,
                 headers,
                 body: JSON.stringify({
-                    message: "Onboarding saved successfully",
+                    message: creatingBranch ? "Branch created successfully" : "Onboarding saved successfully",
                     invite_links: inviteLinks,
                     invitation_emails_sent: invitationEmailsSent,
                     invitation_emails_failed: invitationEmailsFailed,
@@ -5828,7 +5904,7 @@ module.exports.handler = async (event) => {
                      managers.status,
                      managers.employee_code,
                      branches.branch_name,
-                     stores.store_name
+                     stores.store_name, stores.slug AS store_slug
                  FROM users managers
                           JOIN branches ON managers.branch_id = branches.id
                           JOIN stores ON managers.store_id = stores.id
@@ -5916,6 +5992,7 @@ module.exports.handler = async (event) => {
                         manager_email: manager.manager_email,
                         store_id: manager.store_id,
                         store_name: manager.store_name,
+                        store_slug: manager.store_slug,
                         branch_id: manager.branch_id,
                         branch_name: manager.branch_name,
                         permissions: effectiveEmployeePermissions(manager.permissions, "manager"),
@@ -5938,7 +6015,7 @@ module.exports.handler = async (event) => {
                      staff.status,
                      staff.employee_code,
                      branches.branch_name,
-                     stores.store_name
+                     stores.store_name, stores.slug AS store_slug
                  FROM users staff
                           JOIN branches ON staff.branch_id = branches.id
                           JOIN stores ON staff.store_id = stores.id
@@ -5992,6 +6069,7 @@ module.exports.handler = async (event) => {
                         staff_email: staff.staff_email,
                         store_id: staff.store_id,
                         store_name: staff.store_name,
+                        store_slug: staff.store_slug,
                         branch_id: staff.branch_id,
                         branch_name: staff.branch_name,
                         permissions: effectiveEmployeePermissions(staff.permissions, "staff"),
@@ -6545,6 +6623,7 @@ module.exports.handler = async (event) => {
                      id,
                      full_name AS staff_name,
                      email AS staff_email,
+                     phone AS staff_phone,
                      status,
                      permissions,
                      NULL AS invite_token,
@@ -6577,6 +6656,7 @@ module.exports.handler = async (event) => {
                         employee_code: row.employee_code || "",
                         name: row.staff_name || "Unnamed staff",
                         email: row.staff_email || "",
+                        phone: row.staff_phone || "",
                         status:
                             row.status === "inactive"
                                 ? "Inactive"
@@ -7176,127 +7256,34 @@ module.exports.handler = async (event) => {
 
         // ADD MANAGER TO AN EXISTING BRANCH
         if (action === "add_manager_to_branch") {
-            const authHeader =
-                event.headers?.Authorization ||
-                event.headers?.authorization ||
-                "";
-
-            const token = authHeader.replace("Bearer ", "");
-
-            if (!token) {
-                return {
-                    statusCode: 401,
-                    headers,
-                    body: JSON.stringify({ error: "Missing token" }),
-                };
-            }
-
-            let decoded;
-
-            try {
-                decoded = jwt.verify(token, JWT_SECRET);
-            } catch {
-                return {
-                    statusCode: 401,
-                    headers,
-                    body: JSON.stringify({ error: "Invalid token" }),
-                };
-            }
-
-            if (
-                decoded.role !== "owner" ||
-                !decoded.store_id
-            ) {
-                return {
-                    statusCode: 403,
-                    headers,
-                    body: JSON.stringify({
-                        error:
-                            "Only the store owner can add a branch manager",
-                    }),
-                };
-            }
-
+            const decoded = await requireOwnerForManagerManagement(connection, event);
             const storeId = Number(decoded.store_id);
             const branchId = Number(body.branch_id);
-            const managerName = String(
-                body.manager_name || ""
-            ).trim();
-            const managerEmail = String(
-                body.manager_email || ""
-            )
-                .trim()
-                .toLowerCase();
+            const managerName = String(body.manager_name || "").trim();
+            const managerEmail = String(body.manager_email || "").trim().toLowerCase();
+            const permissions = normalizeManagerRolePermissions();
 
-            const permissions = normalizeManagerRolePermissions(body.permissions);
-
-            if (!branchId) {
-                return {
-                    statusCode: 400,
-                    headers,
-                    body: JSON.stringify({
-                        error: "Select a branch",
-                    }),
-                };
+            if (!Number.isSafeInteger(branchId) || branchId <= 0) {
+                throw securityError(400, "Select a valid branch.", "INVALID_BRANCH");
+            }
+            if (managerName.length < 2 || managerName.length > 120) {
+                throw securityError(400, "Enter a valid manager name.", "INVALID_NAME");
+            }
+            if (managerEmail.length > 255 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(managerEmail)) {
+                throw securityError(400, "Enter a valid manager email address.", "INVALID_EMAIL");
             }
 
-            if (!managerName) {
-                return {
-                    statusCode: 400,
-                    headers,
-                    body: JSON.stringify({
-                        error: "Manager name is required",
-                    }),
-                };
+            if (!(await identifiers.ensureIdentifierSchema(connection))) {
+                throw new Error("Employee ID numbering is not set up. Run scripts/standardize-identifiers.js.");
             }
 
-            if (
-                !managerEmail ||
-                !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(
-                    managerEmail
-                )
-            ) {
-                return {
-                    statusCode: 400,
-                    headers,
-                    body: JSON.stringify({
-                        error:
-                            "Enter a valid manager email address",
-                    }),
-                };
-            }
-
-            const [branchRows] = await connection.execute(
-                `SELECT
-                     branches.id,
-                     branches.branch_name,
-                     stores.store_name
-                 FROM branches
-                          JOIN stores
-                               ON stores.id = branches.store_id
-                 WHERE branches.id = ?
-                   AND branches.store_id = ?
-                     LIMIT 1`,
-                [branchId, storeId]
-            );
-
-            if (branchRows.length === 0) {
-                return {
-                    statusCode: 404,
-                    headers,
-                    body: JSON.stringify({
-                        error:
-                            "The selected branch was not found",
-                    }),
-                };
-            }
-
-            const branch = branchRows[0];
-
-            // A downgraded store keeps its existing branches and managers,
-            // but cannot add a new manager to an over-limit branch roster.
-            // Managers have no separate numeric plan quota: one manager per
-            // branch, so the existing branch entitlement is the relevant gate.
+            // Serialize email claims with existing signup/email-change actions.
+            await authLock(connection, `account:${managerEmail}`);
+            let branch;
+            let managerResult;
+            let inviteLink;
+            // Subscription lifecycle helpers can start their own transaction;
+            // check the plan before opening the manager-assignment transaction.
             try {
                 await assertPlanLimit(connection, storeId, "branches", 0, decoded.role);
             } catch (limitError) {
@@ -7312,101 +7299,71 @@ module.exports.handler = async (event) => {
                     }),
                 };
             }
-
-            const [branchManagerRows] =
-                await connection.execute(
-                    `SELECT id
-                     FROM users
-                     WHERE branch_id = ?
-                       AND store_id = ?
-                       AND role = 'manager'
-                         LIMIT 1`,
+            await connection.beginTransaction();
+            try {
+                // Share the store lock with branch edits and manager reassignments.
+                // Two concurrent invitations cannot occupy the same branch.
+                await connection.execute("SELECT id FROM stores WHERE id = ? FOR UPDATE", [storeId]);
+                const [branchRows] = await connection.execute(
+                    `SELECT branches.id, branches.branch_name, branches.status, stores.store_name
+                     FROM branches JOIN stores ON stores.id = branches.store_id
+                     WHERE branches.id = ? AND branches.store_id = ?
+                         LIMIT 1 FOR UPDATE`,
                     [branchId, storeId]
                 );
+                branch = branchRows[0];
+                if (!branch) {
+                    throw securityError(404, "The selected branch was not found.", "BRANCH_NOT_FOUND");
+                }
+                if (String(branch.status || "active").toLowerCase() !== "active") {
+                    throw securityError(409, "Choose an active branch.", "BRANCH_INACTIVE");
+                }
 
-            if (branchManagerRows.length > 0) {
-                return {
-                    statusCode: 409,
-                    headers,
-                    body: JSON.stringify({
-                        error:
-                            "This branch already has an assigned or pending manager",
-                    }),
-                };
-            }
-
-            const [existingEmailRows] =
-                await connection.execute(
-                    `SELECT id
-                     FROM users
-                     WHERE email = ?
-                         LIMIT 1`,
-                    [managerEmail]
+                // One manager per branch, including inactive/pending accounts.
+                const [occupied] = await connection.execute(
+                    `SELECT id FROM users WHERE branch_id = ? AND store_id = ?
+                                            AND role = 'manager' LIMIT 1 FOR UPDATE`,
+                    [branchId, storeId]
                 );
+                if (occupied.length) {
+                    throw securityError(409, "This branch already has an assigned or pending manager.", "BRANCH_HAS_MANAGER");
+                }
 
-            if (existingEmailRows.length > 0) {
-                return {
-                    statusCode: 409,
-                    headers,
-                    body: JSON.stringify({
-                        error:
-                            "This email is already assigned to a manager in your store",
-                    }),
-                };
-            }
+                const [existingEmailRows] = await connection.execute(
+                    `SELECT id FROM users WHERE email = ?
+                     UNION ALL SELECT id FROM platform_admins WHERE email = ? LIMIT 1`,
+                    [managerEmail, managerEmail]
+                );
+                if (existingEmailRows.length) {
+                    throw securityError(409, "This email address is already registered.", "EMAIL_ALREADY_USED");
+                }
 
-            const inviteToken = jwt.sign(
-                {
-                    store_id: storeId,
-                    branch_id: branchId,
-                    email: managerEmail,
-                    type: "manager_invite",
-                },
-                JWT_SECRET,
-                { expiresIn: "7d" }
-            );
+                const inviteToken = jwt.sign(
+                    { store_id: storeId, branch_id: branchId, email: managerEmail, type: "manager_invite" },
+                    JWT_SECRET,
+                    { expiresIn: "7d" }
+                );
+                inviteLink = `${APP_BASE_URL}/accept-invite?token=${encodeURIComponent(inviteToken)}`;
 
-            const inviteLink =
-                `${APP_BASE_URL}/accept-invite?token=${encodeURIComponent(
-                    inviteToken
-                )}`;
-
-            // Permanent role-specific Employee ID within this store and branch.
-            if (!(await identifiers.ensureIdentifierSchema(connection))) {
-                throw new Error("Employee ID numbering is not set up. Run scripts/standardize-identifiers.js.");
-            }
-            const employeeCode = await identifiers.generateEmployeeCode(connection, {
-                storeId,
-                branchId,
-                roleCode: "MN",
-            });
-
-            const [managerResult] =
-                await connection.execute(
+                const employeeCode = await identifiers.generateEmployeeCode(connection, {
+                    storeId, branchId, roleCode: "MN",
+                });
+                [managerResult] = await connection.execute(
                     `INSERT INTO users
-                     (
-                         store_id,
-                         branch_id,
-                         role,
-                         full_name,
-                         email,
-                         invite_token_hash,
-                         permissions,
-                         status,
-                         employee_code
-                     )
-                     VALUES (?, ?, 'manager', COALESCE(?, ''), ?, SHA2(?, 256), ?, ?, ?)`,
-                    [
-                        storeId,
-                        branchId,
-                        managerName,
-                        managerEmail,
-                        inviteToken,
-                        JSON.stringify(permissions),
-                        "pending",
-                        employeeCode,
-                    ]
+                     (store_id, branch_id, role, full_name, email, invite_token_hash,
+                      permissions, status, employee_code)
+                     VALUES (?, ?, 'manager', ?, ?, SHA2(?, 256), ?, 'pending', ?)`,
+                    [storeId, branchId, managerName, managerEmail, inviteToken,
+                        JSON.stringify(permissions), employeeCode]
                 );
+                await connection.commit();
+            } catch (createError) {
+                await connection.rollback();
+                if (createError?.code === "ER_DUP_ENTRY") {
+                    throw securityError(409, "This account or employee ID already exists. Refresh and try again.", "MANAGER_CONFLICT");
+                }
+                throw createError;
+            }
 
             const invitation = {
                 manager_email: managerEmail,
@@ -7437,7 +7394,7 @@ module.exports.handler = async (event) => {
                 body: JSON.stringify({
                     message: delivery.email_sent
                         ? "Manager added and invitation email sent successfully."
-                        : "Manager added successfully, but the invitation email could not be delivered. Copy the backup invite link or use Resend later.",
+                        : "Manager added successfully, but the invitation email could not be delivered. Use Resend Invite in Pending Invites to try again.",
                     manager: {
                         id: managerResult.insertId,
                         name: managerName,
@@ -7609,7 +7566,7 @@ module.exports.handler = async (event) => {
                 body: JSON.stringify({
                     message: delivery.email_sent
                         ? "Manager invitation emailed successfully."
-                        : "The manager invitation link was refreshed, but the email could not be delivered. Copy the backup link or try Resend later.",
+                        : "The manager invitation link was refreshed, but the email could not be delivered. Use Resend Invite in Pending Invites to try again.",
                     manager_id: Number(manager.id),
                     manager_email: manager.manager_email,
                     manager_name: manager.manager_name,
@@ -7741,6 +7698,7 @@ module.exports.handler = async (event) => {
             if (phoneNumber) await authLock(connection, `phone:${phoneNumber}`);
             await connection.beginTransaction();
             try {
+                await connection.execute("SELECT id FROM stores WHERE id = ? FOR UPDATE", [storeId]);
                 const [managerRows] = await connection.execute(
                     `SELECT managers.id, managers.branch_id, managers.status, branches.branch_name
                      FROM users managers
@@ -7760,11 +7718,14 @@ module.exports.handler = async (event) => {
                 if (branchChanged) {
                     // The target branch must belong to this Owner's store.
                     const [branchRows] = await connection.execute(
-                        `SELECT id, branch_name FROM branches WHERE id = ? AND store_id = ? LIMIT 1 FOR UPDATE`,
+                        `SELECT id, branch_name, status FROM branches WHERE id = ? AND store_id = ? LIMIT 1 FOR UPDATE`,
                         [requestedBranchId, storeId]
                     );
                     if (!branchRows.length) {
                         throw securityError(404, "The selected branch was not found.", "BRANCH_NOT_FOUND");
+                    }
+                    if (String(branchRows[0].status || "active").toLowerCase() !== "active") {
+                        throw securityError(409, "Choose an active branch.", "BRANCH_INACTIVE");
                     }
                     // Existing rule: one assigned or pending manager per branch.
                     const [occupiedRows] = await connection.execute(
@@ -7807,13 +7768,15 @@ module.exports.handler = async (event) => {
                     `UPDATE users
                      SET full_name = ?,
                          phone = IF(? = 1, ?, phone),
-                         branch_id = ?
+                         branch_id = ?,
+                         auth_version = auth_version + ?
                      WHERE id = ? AND store_id = ? AND role = 'manager'`,
                     [
                         fullName,
                         hasPhone ? 1 : 0,
                         phoneNumber,
                         branchChanged ? requestedBranchId : Number(manager.branch_id),
+                        branchChanged ? 1 : 0,
                         managerId,
                         storeId,
                     ]
@@ -8325,7 +8288,7 @@ module.exports.handler = async (event) => {
 
             const storeId = decoded.store_id;
 
-            // Only the store owner may change branch details or manager permissions.
+            // Only the store owner may change branch details.
             if (decoded.role !== "owner" || !storeId) {
                 return {
                     statusCode: 403,
@@ -8343,12 +8306,10 @@ module.exports.handler = async (event) => {
                 branch_status,
                 inactive_reason,
                 branch_inactive_reason,
-                manager_name,
-                manager_email,
             } = body;
-            // Manager access is role-based; branch edits never change it.
-            const validatedManagerPermissions = normalizeManagerRolePermissions();
-            const requestedManagerEmail = String(manager_email || "").trim().toLowerCase();
+            if (body.manager_name || body.manager_email || body.permissions) {
+                throw securityError(400, "Edit manager accounts in Branch Managers.", "MANAGER_MANAGEMENT_ONLY");
+            }
 
             if (!branch_id || !branch_name) {
                 return {
@@ -8401,30 +8362,6 @@ module.exports.handler = async (event) => {
                 };
             }
 
-            // A manager's login email is never replaced from the branch form.
-            // Email changes go through the Branch Managers module, which
-            // re-verifies an active account's new address (or re-issues a
-            // pending invitation) before the change becomes effective.
-            if (requestedManagerEmail) {
-                const [assignedManagerRows] = await connection.execute(
-                    `SELECT email FROM users
-                     WHERE branch_id = ? AND store_id = ? AND role = 'manager'
-                         LIMIT 1`,
-                    [branch_id, storeId]
-                );
-                const assignedEmail = String(assignedManagerRows[0]?.email || "").trim().toLowerCase();
-                if (assignedManagerRows.length > 0 && assignedEmail !== requestedManagerEmail) {
-                    return {
-                        statusCode: 409,
-                        headers,
-                        body: JSON.stringify({
-                            error: "Change the manager's email from Branch Managers. The new address must be verified first.",
-                            code: "MANAGER_EMAIL_CHANGE_REQUIRES_VERIFICATION",
-                        }),
-                    };
-                }
-            }
-
             await connection.beginTransaction();
 
             try {
@@ -8464,21 +8401,6 @@ module.exports.handler = async (event) => {
                     };
                 }
 
-                // Only the display name can change here; an empty value keeps the
-                // existing name. Email and permissions are not modified.
-                const [managerResult] = await connection.execute(
-                    `UPDATE users
-                     SET full_name = COALESCE(NULLIF(TRIM(?), ''), full_name)
-                     WHERE branch_id = ?
-                       AND store_id = ?
-                       AND role = 'manager'`,
-                    [
-                        String(manager_name || "").slice(0, 150),
-                        branch_id,
-                        storeId,
-                    ]
-                );
-
                 await connection.commit();
 
                 return {
@@ -8487,11 +8409,9 @@ module.exports.handler = async (event) => {
                     body: JSON.stringify({
                         message: "Branch updated successfully",
                         branch_updated: branchResult.affectedRows,
-                        manager_updated: managerResult.affectedRows,
                         branch_status: normalizedBranchStatus,
                         inactive_reason:
                         normalizedInactiveReason,
-                        saved_permissions: validatedManagerPermissions,
                     }),
                 };
             } catch (err) {
@@ -8739,7 +8659,7 @@ module.exports.handler = async (event) => {
                          managers.store_id,
                          managers.branch_id,
                          branches.branch_name,
-                         stores.store_name
+                         stores.store_name, stores.slug AS store_slug
                      FROM users managers
                               JOIN branches ON managers.branch_id = branches.id
                               JOIN stores ON managers.store_id = stores.id
@@ -8793,6 +8713,7 @@ module.exports.handler = async (event) => {
                         manager_email: manager.manager_email,
                         store_id: manager.store_id,
                         store_name: manager.store_name,
+                        store_slug: manager.store_slug,
                         branch_id: manager.branch_id,
                         branch_name: manager.branch_name,
                         permissions: effectiveEmployeePermissions(manager.permissions, "manager"),
@@ -8811,7 +8732,7 @@ module.exports.handler = async (event) => {
                          staff.branch_id,
                          staff.manager_id,
                          branches.branch_name,
-                         stores.store_name
+                         stores.store_name, stores.slug AS store_slug
                      FROM users staff
                               JOIN branches ON staff.branch_id = branches.id
                               JOIN stores ON staff.store_id = stores.id
@@ -8848,6 +8769,7 @@ module.exports.handler = async (event) => {
                         staff_email: staff.staff_email,
                         store_id: staff.store_id,
                         store_name: staff.store_name,
+                        store_slug: staff.store_slug,
                         branch_id: staff.branch_id,
                         branch_name: staff.branch_name,
                         manager_id: staff.manager_id,
@@ -8992,7 +8914,7 @@ module.exports.handler = async (event) => {
             body: JSON.stringify({ error: "Invalid action" }),
         };
     } catch (err) {
-        const securityAction = /^(login|platform_admin_login|request_password_reset|verify_password_reset_otp|reset_password|send_signup_otp|verify_signup_otp|send_manager_invite_otp|verify_manager_invite_otp|send_staff_invite_otp|verify_staff_invite_otp|send_payment_otp|verify_payment_otp|submit_subscription_payment|request_manager_email_change|confirm_manager_email_change)$/.test(String(action));
+        const securityAction = /^(login|platform_admin_login|request_password_reset|verify_password_reset_otp|reset_password|send_signup_otp|verify_signup_otp|update_store_profile|send_manager_invite_otp|verify_manager_invite_otp|send_staff_invite_otp|verify_staff_invite_otp|send_payment_otp|verify_payment_otp|submit_subscription_payment|request_manager_email_change|confirm_manager_email_change)$/.test(String(action));
         if (!securityAction) {
             console.error("[stocknbook-auth] Error:", { action, message: err?.message, code: err?.code, stack: err?.stack });
             return { statusCode: Number(err?.statusCode) || 500, headers, body: JSON.stringify({ error: err?.message || "Internal server error", code: err?.code || "UNKNOWN_ERROR" }) };

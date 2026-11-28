@@ -8,6 +8,7 @@ import {
     useCallback,
     useEffect,
     useMemo,
+    useRef,
     useState,
 } from "react";
 import { useRouter } from "next/navigation";
@@ -15,10 +16,9 @@ import {
     Clock3,
     Download,
     CheckCircle2,
-    Copy,
     Filter,
     Mail,
-    Pencil,
+    Plus,
     RefreshCw,
     Search,
     UserCheck,
@@ -38,7 +38,6 @@ type BranchManager = {
     phone: string;
     branch: string;
     branchId: number;
-    emailVerified: boolean;
     status: ManagerStatus;
 };
 
@@ -46,6 +45,7 @@ type BranchOption = {
     id: number;
     name: string;
     managerEmail: string;
+    active: boolean;
 };
 
 type ManagerActionResult = {
@@ -54,32 +54,13 @@ type ManagerActionResult = {
     data: Record<string, unknown>;
 };
 
-// Same rule as the backend: 11-digit Philippine mobile number starting with 09
-// (spaces, dashes and the +63 prefix are accepted and normalized server-side).
-function isValidPhilippineMobile(value: string) {
-    const digits = value.replace(/\D/g, "");
-    const local = digits.startsWith("63")
-        ? `0${digits.slice(2)}`
-        : digits.length === 10 && digits.startsWith("9")
-            ? `0${digits}`
-            : digits;
-    return /^09\d{9}$/.test(local);
-}
-
 function formatPersonalMobile(value: string): string {
     const raw = String(value ?? "").trim();
     const digits = raw.replace(/\D/g, "");
     const local = digits.startsWith("63") ? `0${digits.slice(2)}` : digits.length === 10 && digits.startsWith("9") ? `0${digits}` : digits;
-    if (!/^09\d{0,9}$/.test(local)) return raw;
+    if (!/^09\d{9}$/.test(local)) return raw;
     return [local.slice(0, 4), local.slice(4, 7), local.slice(7, 11)].filter(Boolean).join(" ");
 }
-
-type ManagerInviteDelivery = {
-    link: string;
-    email: string;
-    emailSent: boolean;
-    emailError: string;
-};
 
 type RawManager = Record<string, unknown>;
 
@@ -135,7 +116,6 @@ function normalizeManager(value: unknown): BranchManager {
             asText(manager.branchName) ||
             "No branch assigned",
         branchId: asNumber(manager.branch_id ?? manager.branchId),
-        emailVerified: manager.email_verified === true,
         status: normalizeStatus(
             manager.status ??
             manager.manager_status ??
@@ -189,7 +169,7 @@ export default function BranchManagersPage() {
     const [updatingManagerId, setUpdatingManagerId] = useState<number | null>(null);
     const [confirmAccessChange, setConfirmAccessChange] = useState<BranchManager | null>(null);
 
-    const [notice, setNotice] = useState<{ title: string; message: string; kind: "success" | "error" } | null>(null);
+    const [notice, setNotice] = useState<{ title: string; message: string; kind: "success" | "error" | "warning" } | null>(null);
     const [search, setSearch] = useState("");
     const [statusFilter, setStatusFilter] = useState<
         "all" | ManagerStatus
@@ -197,25 +177,23 @@ export default function BranchManagersPage() {
     const [error, setError] = useState("");
     const [currentDateTime, setCurrentDateTime] = useState<Date | null>(null);
 
-    const [latestManagerInvite, setLatestManagerInvite] =
-        useState<ManagerInviteDelivery | null>(null);
     const [resendingManagerId, setResendingManagerId] =
         useState<number | null>(null);
 
-    // Owner manager account management (details, branch, email, invitation).
-    const [editingManager, setEditingManager] = useState<BranchManager | null>(null);
+    // Owner manager invitations and branch assignment.
     const [branchOptions, setBranchOptions] = useState<BranchOption[]>([]);
-    const [editName, setEditName] = useState("");
-    const [editPhone, setEditPhone] = useState("");
-    const [editBranchId, setEditBranchId] = useState(0);
-    const [savingDetails, setSavingDetails] = useState(false);
-    const [editError, setEditError] = useState("");
-    const [newEmail, setNewEmail] = useState("");
-    const [emailStep, setEmailStep] = useState<"idle" | "code">("idle");
-    const [emailCode, setEmailCode] = useState("");
-    const [emailBusy, setEmailBusy] = useState(false);
-    const [emailMessage, setEmailMessage] = useState("");
-    const [emailResendIn, setEmailResendIn] = useState(0);
+    const [branchesLoading, setBranchesLoading] = useState(false);
+    const [branchOptionsError, setBranchOptionsError] = useState("");
+    const [showAddManager, setShowAddManager] = useState(false);
+    const [addName, setAddName] = useState("");
+    const [addEmail, setAddEmail] = useState("");
+    const [addBranchId, setAddBranchId] = useState(0);
+    const [addError, setAddError] = useState("");
+    const [addingManager, setAddingManager] = useState(false);
+    const addInFlight = useRef(false);
+    const availableBranches = branchOptions.filter(branch =>
+        branch.active && !branch.managerEmail && !managers.some(manager => manager.branchId === branch.id)
+    );
     const [confirmCancelInvite, setConfirmCancelInvite] = useState<BranchManager | null>(null);
     const [cancellingManagerId, setCancellingManagerId] = useState<number | null>(null);
 
@@ -303,12 +281,6 @@ export default function BranchManagersPage() {
     }, [notice]);
 
     useEffect(() => {
-        if (emailResendIn <= 0) return;
-        const timer = window.setTimeout(() => setEmailResendIn((value) => Math.max(0, value - 1)), 1000);
-        return () => window.clearTimeout(timer);
-    }, [emailResendIn]);
-
-    useEffect(() => {
         const updateDateTime = () => setCurrentDateTime(new Date());
 
         updateDateTime();
@@ -341,7 +313,7 @@ export default function BranchManagersPage() {
         return managers.filter((manager) => {
             const matchesSearch =
                 !query ||
-                `${manager.employeeCode} ${manager.name} ${manager.email} ${manager.branch} ${getStatusLabel(
+                `${manager.employeeCode} ${manager.name} ${manager.email} ${manager.phone} ${formatPersonalMobile(manager.phone)} ${manager.branch} ${getStatusLabel(
                     manager.status
                 )}`
                     .toLowerCase()
@@ -361,9 +333,9 @@ export default function BranchManagersPage() {
         void import("@/components/dashboard/_shared")
             .then(module => module.exportTableAsPdf({
                     title: "Branch Manager List",
-                    headers: ["Employee ID", "Manager", "Email", "Branch", "Status"],
+                    headers: ["Employee ID", "Manager", "Email", "Phone Number", "Branch", "Status"],
                     rows: listedManagers.map(manager => [manager.employeeCode || "—", manager.name,
-                        manager.email, manager.branch, getStatusLabel(manager.status)]),
+                        manager.email, formatPersonalMobile(manager.phone) || "—", manager.branch, getStatusLabel(manager.status)]),
                 }, { storeName: sessionStorage.getItem("store_name") || "StockNBook",
                     branch: "All branches", dateRange: statusFilter === "all" ? "All statuses" : getStatusLabel(statusFilter as ManagerStatus) },
                 "owner_branch_managers"))
@@ -414,26 +386,16 @@ export default function BranchManagersPage() {
                 return;
             }
 
-            const inviteLink = String(data.invite_link || "").trim();
             const emailWasSent =
                 data.email_sent === true ||
                 String(data.email_status || "").toLowerCase() === "sent";
 
-            if (inviteLink) {
-                setLatestManagerInvite({
-                    link: inviteLink,
-                    email: manager.email,
-                    emailSent: emailWasSent,
-                    emailError: String(data.email_error || ""),
-                });
-            }
-
             setNotice({
-                title: emailWasSent ? "Manager invitation resent" : "Invitation link refreshed",
+                title: emailWasSent ? "Manager invitation resent" : "Invitation email not sent",
                 message: emailWasSent
                     ? `Activation email sent to ${manager.email}.`
-                    : "Email delivery failed. You can copy the backup invitation link.",
-                kind: emailWasSent ? "success" : "error",
+                    : "Email delivery failed. Please use Resend Invite in Pending Invites to try again.",
+                kind: emailWasSent ? "success" : "warning",
             });
         } catch (requestError) {
             setNotice({ title: "Unable to resend invitation",
@@ -496,161 +458,98 @@ export default function BranchManagersPage() {
 
     const loadBranchOptions = async () => {
         const token = sessionStorage.getItem("token") || localStorage.getItem("token");
-        if (!token) return;
+        setBranchesLoading(true);
+        setBranchOptions([]);
+        setBranchOptionsError("");
         try {
+            if (!token) throw new Error("Please sign in again.");
             const response = await fetch("/api/branches", {
                 method: "GET",
                 headers: { Authorization: `Bearer ${token}` },
                 cache: "no-store",
             });
             const data = await response.json().catch(() => ({}));
-            const records: unknown[] = Array.isArray(data.branches) ? data.branches : [];
+            if (!response.ok || !Array.isArray(data.branches)) {
+                throw new Error(asText(data.error) || "Unable to load branches.");
+            }
+            const records: unknown[] = data.branches;
             setBranchOptions(records.map((item) => {
                 const branch = item && typeof item === "object" ? (item as RawManager) : {};
                 return {
                     id: asNumber(branch.id),
                     name: asText(branch.branch_name) || "Unnamed branch",
                     managerEmail: asText(branch.manager_email).toLowerCase(),
+                    active: asText(branch.branch_status ?? branch.status).toLowerCase() === "active",
                 };
             }).filter((branch) => branch.id > 0));
-        } catch {
+        } catch (error) {
             setBranchOptions([]);
+            setBranchOptionsError(error instanceof Error ? error.message : "Unable to load branches.");
+        } finally {
+            setBranchesLoading(false);
         }
     };
 
-    const openManagerEditor = (manager: BranchManager) => {
-        setEditingManager(manager);
-        setEditName(manager.name === "Unnamed manager" ? "" : manager.name);
-        setEditPhone(formatPersonalMobile(manager.phone));
-        setEditBranchId(manager.branchId);
-        setEditError("");
-        setNewEmail("");
-        setEmailStep("idle");
-        setEmailCode("");
-        setEmailMessage("");
-        setEmailResendIn(0);
+    const openAddManager = () => {
+        setAddName("");
+        setAddEmail("");
+        setAddBranchId(0);
+        setAddError("");
+        setShowAddManager(true);
         void loadBranchOptions();
     };
 
-    const closeManagerEditor = () => {
-        if (savingDetails || emailBusy) return;
-        setEditingManager(null);
+    const closeAddManager = () => {
+        if (!addInFlight.current) setShowAddManager(false);
     };
 
-    const saveManagerDetails = async () => {
-        if (!editingManager) return;
-        const name = editName.trim();
+    const addManager = async () => {
+        if (addInFlight.current) return;
+        const name = addName.trim();
+        const email = addEmail.trim().toLowerCase();
         if (name.length < 2 || name.length > 120) {
-            setEditError("Enter a valid manager name.");
+            setAddError("Enter a valid manager name.");
             return;
         }
-        if (editPhone.trim() && !isValidPhilippineMobile(editPhone)) {
-            setEditError("Enter an 11-digit Philippine mobile number starting with 09.");
+        if (email.length > 255 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+            setAddError("Enter a valid manager email address.");
             return;
         }
-        setSavingDetails(true);
-        setEditError("");
+        if (branchesLoading || !availableBranches.some(branch => branch.id === addBranchId)) {
+            setAddError("Select an available active branch.");
+            return;
+        }
+        addInFlight.current = true;
+        setAddingManager(true);
+        setAddError("");
         try {
-            const result = await postManagerAction("update_manager_details", {
-                manager_id: editingManager.id,
-                full_name: name,
-                phone: editPhone.replace(/\D/g, ""),
-                branch_id: editBranchId || undefined,
+            const result = await postManagerAction("add_manager_to_branch", {
+                branch_id: addBranchId,
+                manager_name: name,
+                manager_email: email,
             });
             if (!result.ok) {
-                setEditError(resultMessage(result.data, "Unable to update the manager."));
+                setAddError(resultMessage(result.data, "Unable to add the manager."));
+                setAddBranchId(0);
+                await loadBranchOptions();
                 return;
             }
-            const inviteLink = asText(result.data.invite_link);
-            if (inviteLink) {
-                setLatestManagerInvite({
-                    link: inviteLink,
-                    email: editingManager.email,
-                    emailSent: result.data.email_sent === true,
-                    emailError: asText(result.data.email_error),
-                });
-            }
-            setEditingManager(null);
+            setShowAddManager(false);
             await loadManagers();
-            setNotice({ title: "Manager updated", message: resultMessage(result.data, "Manager details updated."), kind: "success" });
-        } catch (error) {
-            setEditError(error instanceof Error ? error.message : "Unable to update the manager.");
-        } finally {
-            setSavingDetails(false);
-        }
-    };
-
-    const requestEmailChange = async () => {
-        if (!editingManager || emailBusy || emailResendIn > 0) return;
-        const email = newEmail.trim().toLowerCase();
-        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-            setEmailMessage("Enter a valid email address.");
-            return;
-        }
-        setEmailBusy(true);
-        setEmailMessage("");
-        try {
-            const result = await postManagerAction("request_manager_email_change", {
-                manager_id: editingManager.id,
-                new_email: email,
+            const emailWasSent = result.data.email_sent === true ||
+                asText(result.data.email_status).toLowerCase() === "sent";
+            setNotice({
+                title: emailWasSent ? "Manager added successfully" : "Manager added — email not sent",
+                message: emailWasSent
+                    ? `Invitation email sent to ${email}.`
+                    : "The manager invitation is saved. Use Resend Invite in Pending Invites to try sending the email again.",
+                kind: emailWasSent ? "success" : "warning",
             });
-            const retryAfter = Number(result.data.retry_after_seconds || 0);
-            if (retryAfter > 0) setEmailResendIn(retryAfter);
-            if (!result.ok) {
-                setEmailMessage(resultMessage(result.data, "Unable to change the email address."));
-                return;
-            }
-            if (result.data.verification_required === true) {
-                setEmailStep("code");
-                setEmailCode("");
-                setEmailResendIn(Number(result.data.resend_in || 60));
-                setEmailMessage(resultMessage(result.data, "A verification code was sent to the new email address."));
-                return;
-            }
-            const inviteLink = asText(result.data.invite_link);
-            if (inviteLink) {
-                setLatestManagerInvite({
-                    link: inviteLink,
-                    email,
-                    emailSent: result.data.email_sent === true,
-                    emailError: asText(result.data.email_error),
-                });
-            }
-            setEditingManager(null);
-            await loadManagers();
-            setNotice({ title: "Invitation email updated", message: resultMessage(result.data, "A new invitation was issued."), kind: result.data.email_sent === true ? "success" : "error" });
         } catch (error) {
-            setEmailMessage(error instanceof Error ? error.message : "Unable to change the email address.");
+            setAddError(error instanceof Error ? error.message : "Unable to add the manager.");
         } finally {
-            setEmailBusy(false);
-        }
-    };
-
-    const confirmEmailChange = async () => {
-        if (!editingManager || emailBusy) return;
-        if (!/^\d{6}$/.test(emailCode)) {
-            setEmailMessage("Enter the complete 6-digit verification code.");
-            return;
-        }
-        setEmailBusy(true);
-        setEmailMessage("");
-        try {
-            const result = await postManagerAction("confirm_manager_email_change", {
-                manager_id: editingManager.id,
-                new_email: newEmail.trim().toLowerCase(),
-                otp: emailCode,
-            });
-            if (!result.ok) {
-                setEmailMessage(resultMessage(result.data, "Unable to verify the code."));
-                return;
-            }
-            setEditingManager(null);
-            await loadManagers();
-            setNotice({ title: "Login email updated", message: resultMessage(result.data, "The manager's login email was updated."), kind: "success" });
-        } catch (error) {
-            setEmailMessage(error instanceof Error ? error.message : "Unable to verify the code.");
-        } finally {
-            setEmailBusy(false);
+            addInFlight.current = false;
+            setAddingManager(false);
         }
     };
 
@@ -663,7 +562,6 @@ export default function BranchManagersPage() {
                 return;
             }
             setConfirmCancelInvite(null);
-            setLatestManagerInvite((current) => (current && current.email === manager.email ? null : current));
             await loadManagers();
             setNotice({ title: "Invitation cancelled", message: resultMessage(result.data, "The invitation link can no longer be used."), kind: "success" });
         } catch (error) {
@@ -758,70 +656,6 @@ export default function BranchManagersPage() {
                             </div>
                         )}
 
-                        {latestManagerInvite && (
-                            <section className="rounded-[18px] border border-[#E6DDF0] bg-white p-5 shadow-sm">
-                                <div className="flex flex-wrap items-start justify-between gap-3">
-                                    <div className="flex items-start gap-3">
-                                        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#EEF4FF] text-[#3367D6]">
-                                            <Mail size={18} />
-                                        </span>
-                                        <div>
-                                            <h2 className="text-[16px] font-bold text-[#1A1220]">
-                                                Latest manager invitation
-                                            </h2>
-                                            <p className="mt-0.5 text-xs text-[#7A6A84]">
-                                                {latestManagerInvite.emailSent
-                                                    ? `Invitation email sent to ${latestManagerInvite.email}.`
-                                                    : `Email could not be delivered to ${latestManagerInvite.email}. The invitation is still valid.`}
-                                            </p>
-                                        </div>
-                                    </div>
-
-                                    <span
-                                        className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${
-                                            latestManagerInvite.emailSent
-                                                ? "bg-[#EDFBF1] text-[#138342]"
-                                                : "bg-[#FFF4E6] text-[#9A5A00]"
-                                        }`}
-                                    >
-                                        {latestManagerInvite.emailSent
-                                            ? "Email sent"
-                                            : "Email not sent"}
-                                    </span>
-                                </div>
-
-                                {!latestManagerInvite.emailSent &&
-                                    latestManagerInvite.emailError && (
-                                        <p className="mt-3 rounded-xl border border-[#F0D9B5] bg-[#FFF9EF] px-3 py-2 text-xs text-[#8A5A11]">
-                                            {latestManagerInvite.emailError}
-                                        </p>
-                                    )}
-
-                                <div className="mt-4 flex flex-col gap-2 sm:flex-row">
-                                    <input
-                                        readOnly
-                                        value={latestManagerInvite.link}
-                                        className="h-[42px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFDF8] px-3 text-sm text-[#5F4E75] outline-none"
-                                    />
-                                    <button
-                                        type="button"
-                                        onClick={() => {
-                                            void navigator.clipboard.writeText(
-                                                latestManagerInvite.link
-                                            );
-                                            window.alert(
-                                                "Manager invitation link copied!"
-                                            );
-                                        }}
-                                        className="inline-flex h-[42px] items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]"
-                                    >
-                                        <Copy size={15} />
-                                        Copy
-                                    </button>
-                                </div>
-                            </section>
-                        )}
-
                         <section className="overflow-hidden rounded-[18px] border border-[#E6DDF0] bg-white shadow-sm">
                             <div className="flex flex-col gap-4 px-5 py-4 xl:flex-row xl:items-center xl:justify-between">
                                 <div className="flex min-w-0 items-center gap-3">
@@ -839,7 +673,7 @@ export default function BranchManagersPage() {
                                         <input
                                             value={search}
                                             onChange={(event) => setSearch(event.target.value)}
-                                            placeholder="Search manager name, email, branch, or status..."
+                                            placeholder="Search name, email, phone, branch, or status..."
                                             aria-label="Search managers"
                                             className="h-[48px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-4 pl-11 pr-11 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10"
                                         />
@@ -850,7 +684,7 @@ export default function BranchManagersPage() {
                                             </button>
                                         )}
                                     </div>
-                                    <div className="flex shrink-0 items-center gap-2.5">
+                                    <div className="flex shrink-0 flex-wrap items-center gap-2.5">
                                         <div className="relative">
                                             <Filter size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[#2B174C]" />
                                             <select
@@ -870,6 +704,11 @@ export default function BranchManagersPage() {
                                                 className="inline-flex h-[48px] w-[48px] shrink-0 items-center justify-center rounded-xl border border-[#E6DDF0] bg-white text-[#6D35D4] shadow-sm transition hover:bg-[#F7F1FF]">
                                             <Download size={17} />
                                         </button>
+                                        <button type="button" onClick={openAddManager} title="Add a branch manager"
+                                                className="inline-flex h-[48px] min-w-[140px] items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31]">
+                                            <Plus size={18} strokeWidth={2.2} />
+                                            Add Manager
+                                        </button>
                                     </div>
                                 </div>
                             </div>
@@ -885,17 +724,17 @@ export default function BranchManagersPage() {
                                         No managers found.
                                     </p>
                                     <p className="mt-1 text-sm text-[#7A6A84]">
-                                        Try another manager name, email, branch, or status.
+                                        Try another manager name, email, phone, branch, or status.
                                     </p>
                                 </div>
                             ) : (
                                 <div>
                                     <div
-                                        className="max-h-[360px] overflow-y-auto overflow-x-hidden overscroll-contain"
+                                        className="max-h-[360px] overflow-y-auto overflow-x-auto overscroll-contain"
                                         role="region" aria-label="Manager list" tabIndex={0}
                                     >
-                                        <table className="w-full min-w-0 table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-left [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]">
-                                            <colgroup><col className="w-[17%]" /><col className="w-[29%]" /><col className="w-[19%]" /><col className="w-[13%]" /><col className="w-[22%]" /></colgroup>
+                                        <table className="w-full min-w-[850px] table-fixed border-collapse font-sans text-center text-xs [&_th]:align-middle [&_td]:align-middle [&_th:not(:first-child)]:text-center [&_td:not(:first-child)]:text-center [&_th:first-child]:text-left [&_td:first-child]:text-left [&_td]:[overflow-wrap:anywhere]">
+                                            <colgroup><col className="w-[15%]" /><col className="w-[25%]" /><col className="w-[15%]" /><col className="w-[17%]" /><col className="w-[10%]" /><col className="w-[18%]" /></colgroup>
                                             <thead className="sticky top-0 z-10 bg-[#FFFCF8]">
                                             <tr className="border-b border-[#E6DDF0]">
                                                 <TableHeader align="left">
@@ -903,6 +742,9 @@ export default function BranchManagersPage() {
                                                 </TableHeader>
                                                 <TableHeader>
                                                     Manager
+                                                </TableHeader>
+                                                <TableHeader>
+                                                    Phone Number
                                                 </TableHeader>
                                                 <TableHeader>
                                                     Branch
@@ -940,6 +782,10 @@ export default function BranchManagersPage() {
                                                             </div>
                                                         </td>
 
+                                                        <td className="whitespace-nowrap px-3 py-2.5 text-sm text-[#1A1220]">
+                                                            {formatPersonalMobile(manager.phone) || "—"}
+                                                        </td>
+
                                                         <td className="px-3 py-2.5">
                                                             <span className="truncate text-sm font-semibold text-[#1A1220]">
                                                                 {manager.branch}
@@ -956,16 +802,6 @@ export default function BranchManagersPage() {
 
                                                         <td className="px-3 py-2.5 text-center">
                                                             <div className="flex flex-wrap items-center justify-center gap-1.5">
-                                                                <button
-                                                                    type="button"
-                                                                    disabled={isUpdating}
-                                                                    onClick={() => openManagerEditor(manager)}
-                                                                    aria-label={`Manage ${manager.name}`}
-                                                                    className="inline-flex h-[34px] items-center justify-center gap-1.5 rounded-lg bg-[#F1EBFF] px-3 text-xs font-semibold text-[#6D35D4] transition hover:bg-[#E6DCFF] disabled:cursor-not-allowed disabled:opacity-60"
-                                                                >
-                                                                    <Pencil size={13} />
-                                                                    Manage
-                                                                </button>
                                                                 <button
                                                                     type="button"
                                                                     disabled={isUpdating}
@@ -1016,7 +852,7 @@ export default function BranchManagersPage() {
                                                 <td className="px-2.5 py-2.5">{manager.email}</td>
                                                 <td className="px-2.5 py-2.5">{manager.branch}</td>
                                                 <td className="px-2.5 py-2.5"><span className="font-semibold text-[#A56607]">Pending</span></td>
-                                                <td className="px-2.5 py-2.5"><div className="flex flex-wrap items-center justify-center gap-1.5"><button type="button" onClick={() => openManagerEditor(manager)} disabled={resendingManagerId === manager.id || cancellingManagerId === manager.id} className="rounded-lg border border-[#E6DDF0] bg-white px-3 py-1.5 font-semibold text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-50">Manage</button><button type="button" onClick={() => void resendManagerInvite(manager)} disabled={resendingManagerId === manager.id || cancellingManagerId === manager.id} className="rounded-lg bg-[#F1EBFF] px-3 py-1.5 font-semibold text-[#6D35D4] hover:bg-[#E6DCFF] disabled:opacity-50">{resendingManagerId === manager.id ? "Resending..." : "Resend Invite"}</button><button type="button" onClick={() => setConfirmCancelInvite(manager)} disabled={resendingManagerId === manager.id || cancellingManagerId === manager.id} className="rounded-lg bg-[#FDEDED] px-3 py-1.5 font-semibold text-[#C13333] hover:bg-[#FADDDD] disabled:opacity-50">Cancel</button></div></td>
+                                                <td className="px-2.5 py-2.5"><div className="flex flex-wrap items-center justify-center gap-1.5"><button type="button" onClick={() => void resendManagerInvite(manager)} disabled={resendingManagerId === manager.id || cancellingManagerId === manager.id} className="rounded-lg bg-[#F1EBFF] px-3 py-1.5 font-semibold text-[#6D35D4] hover:bg-[#E6DCFF] disabled:opacity-50">{resendingManagerId === manager.id ? "Resending..." : "Resend Invite"}</button><button type="button" onClick={() => setConfirmCancelInvite(manager)} disabled={resendingManagerId === manager.id || cancellingManagerId === manager.id} className="rounded-lg bg-[#FDEDED] px-3 py-1.5 font-semibold text-[#C13333] hover:bg-[#FADDDD] disabled:opacity-50">Cancel</button></div></td>
                                             </tr>)}</tbody>
                                         </table>
                                     </div>
@@ -1033,67 +869,53 @@ export default function BranchManagersPage() {
                         </div>
                     </div>}
 
-                    {editingManager && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45 p-4" onMouseDown={e => { if (e.target === e.currentTarget) closeManagerEditor(); }}>
-                        <div role="dialog" aria-modal="true" aria-labelledby="manager-editor-title" className="max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-[20px] border border-[#E6DDF0] bg-white p-6 shadow-2xl">
+                    {showAddManager && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45 p-4" onMouseDown={e => { if (e.target === e.currentTarget) closeAddManager(); }}>
+                        <form role="dialog" aria-modal="true" aria-labelledby="add-manager-title"
+                              onSubmit={e => { e.preventDefault(); void addManager(); }}
+                              className="max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-[20px] border border-[#E6DDF0] bg-white p-6 shadow-2xl">
                             <div className="flex items-start justify-between gap-4">
-                                <div>
-                                    <h2 id="manager-editor-title" className="text-lg font-bold text-[#1A1220]">Manage Branch Manager</h2>
-                                    <p className="mt-1 text-sm text-[#7A6A84]">Update account information, branch assignment, or login email. Manager module access is assigned automatically by the Manager role.</p>
+                                <div className="flex items-center gap-3">
+                                    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F1EBFF] text-[#6D35D4]"><UsersRound size={21} /></span>
+                                    <div>
+                                        <h2 id="add-manager-title" className="text-lg font-bold text-[#1A1220]">Add Manager</h2>
+                                        <p className="mt-1 text-sm text-[#7A6A84]">Invite a manager and assign them to a branch.</p>
+                                    </div>
                                 </div>
-                                <button type="button" aria-label="Close" disabled={savingDetails || emailBusy} onClick={closeManagerEditor}><X size={18} /></button>
+                                <button type="button" aria-label="Close Add Manager dialog" disabled={addingManager} onClick={closeAddManager}><X size={18} /></button>
                             </div>
-
-                            <dl className="mt-4 grid grid-cols-2 gap-3 rounded-xl border border-[#EEE7F2] bg-[#FFFCF8] p-3.5 text-xs">
-                                <div><dt className="font-semibold uppercase tracking-wide text-[#806A8C]">Employee ID</dt><dd className="mt-0.5 font-semibold text-[#2B174C]">{editingManager.employeeCode || "—"}</dd></div>
-                                <div><dt className="font-semibold uppercase tracking-wide text-[#806A8C]">Status</dt><dd className={`mt-0.5 font-semibold ${getStatusClass(editingManager.status)}`}>{getStatusLabel(editingManager.status)}</dd></div>
-                                <div className="col-span-2"><dt className="font-semibold uppercase tracking-wide text-[#806A8C]">Login email</dt><dd className="mt-0.5 break-all text-[#2B174C]">{editingManager.email}{editingManager.status !== "pending" && editingManager.emailVerified ? " (verified)" : ""}</dd></div>
-                            </dl>
 
                             <div className="mt-5 space-y-4">
                                 <div>
-                                    <label htmlFor="manager-edit-name" className="mb-1.5 block text-sm font-medium text-[#1A1220]">Full name</label>
-                                    <input id="manager-edit-name" value={editName} onChange={e => setEditName(e.target.value)} disabled={savingDetails} placeholder="Manager full name" className="h-[44px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-3.5 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:cursor-not-allowed disabled:bg-[#F7F4F8] disabled:text-[#8A7D92]" />
+                                    <label htmlFor="add-manager-name" className="mb-1.5 block text-sm font-medium text-[#1A1220]">Full name</label>
+                                    <input id="add-manager-name" autoComplete="name" required maxLength={120} value={addName} onChange={e => setAddName(e.target.value)} disabled={addingManager} placeholder="Ana Cruz" className="h-[44px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-3.5 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:opacity-60" />
                                 </div>
                                 <div>
-                                    <label htmlFor="manager-edit-phone" className="mb-1.5 block text-sm font-medium text-[#1A1220]">Personal mobile number</label>
-                                    <input id="manager-edit-phone" type="tel" inputMode="tel" value={editPhone} onChange={e => setEditPhone(formatPersonalMobile(e.target.value))} disabled={savingDetails} placeholder="0912 345 6789" className="h-[44px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-3.5 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:cursor-not-allowed disabled:bg-[#F7F4F8] disabled:text-[#8A7D92]" />
-                                    <p className="mt-1 text-xs text-[#7A6A84]">Enter an 11-digit Philippine mobile number starting with 09.</p>
+                                    <label htmlFor="add-manager-email" className="mb-1.5 block text-sm font-medium text-[#1A1220]">Email address</label>
+                                    <input id="add-manager-email" type="email" autoComplete="email" required maxLength={255} value={addEmail} onChange={e => setAddEmail(e.target.value)} disabled={addingManager} placeholder="manager@email.com" className="h-[44px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-3.5 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:opacity-60" />
                                 </div>
                                 <div>
-                                    <label htmlFor="manager-edit-branch" className="mb-1.5 block text-sm font-medium text-[#1A1220]">Assigned branch</label>
-                                    <select id="manager-edit-branch" value={editBranchId || ""} onChange={e => setEditBranchId(Number(e.target.value))} disabled={savingDetails} className="h-[44px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-3.5 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:cursor-not-allowed disabled:bg-[#F7F4F8] disabled:text-[#8A7D92]">
-                                        {!branchOptions.some(branch => branch.id === editingManager.branchId) && editingManager.branchId > 0 && <option value={editingManager.branchId}>{editingManager.branch}</option>}
-                                        {branchOptions.map(branch => {
-                                            const occupied = branch.id !== editingManager.branchId && Boolean(branch.managerEmail) && branch.managerEmail !== editingManager.email.toLowerCase();
-                                            return <option key={branch.id} value={branch.id} disabled={occupied}>{branch.name}{occupied ? " (has a manager)" : ""}</option>;
-                                        })}
+                                    <label htmlFor="add-manager-branch" className="mb-1.5 block text-sm font-medium text-[#1A1220]">Assigned branch</label>
+                                    <select id="add-manager-branch" required value={addBranchId || ""} onChange={e => setAddBranchId(Number(e.target.value))} disabled={addingManager || branchesLoading || !!branchOptionsError || !availableBranches.length} className="h-[44px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-3.5 text-sm text-[#1A1220] outline-none shadow-sm focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:opacity-60">
+                                        <option value="">{branchesLoading ? "Loading branches..." : "Select a branch"}</option>
+                                        {availableBranches.map(branch => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
                                     </select>
-                                    <p className="mt-1 text-xs text-[#7A6A84]">{editingManager.status === "pending" ? "Changing the branch issues a new invitation; the previous link stops working." : "After a branch change the manager must sign in again and can access only the new branch."}</p>
+                                    {branchOptionsError ? (
+                                        <p role="alert" className="mt-1 text-xs text-[#C13333]">{branchOptionsError} <button type="button" className="font-semibold underline" onClick={() => void loadBranchOptions()} disabled={addingManager}>Retry</button></p>
+                                    ) : !branchesLoading && !availableBranches.length ? (
+                                        <p className="mt-1 text-xs text-[#A56607]">No active branches without an assigned manager are available. Create a branch in Branches or cancel a pending invitation if appropriate.</p>
+                                    ) : <p className="mt-1 text-xs text-[#7A6A84]">Only active branches without an assigned or pending manager are available.</p>}
                                 </div>
-                                {editError && <p role="alert" className="rounded-xl border border-[#F3C4C4] bg-[#FFF2F2] px-3 py-2 text-xs font-medium text-[#9B1C1C]">{editError}</p>}
-                                <div className="flex justify-end">
-                                    <button type="button" onClick={() => void saveManagerDetails()} disabled={savingDetails || emailBusy} className="rounded-xl bg-[#2B174C] px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:opacity-50">{savingDetails ? "Saving..." : "Save details"}</button>
+                                <div className="rounded-xl border border-[#E6DDF0] bg-[#FFFCF8] p-3.5 text-xs leading-5 text-[#5F4E75]">
+                                    <p className="font-semibold text-[#2B174C]">Manager access</p>
+                                    <p>Managers automatically receive the Manager role permissions for their assigned branch, subject to your subscription plan. An invitation email will be sent so the manager can activate their account.</p>
+                                </div>
+                                {addError && <p role="alert" className="rounded-xl border border-[#F3C4C4] bg-[#FFF2F2] px-3 py-2 text-xs font-medium text-[#9B1C1C]">{addError}</p>}
+                                <div className="flex gap-3 border-t border-[#E6DDF0] pt-4">
+                                    <button type="button" disabled={addingManager} onClick={closeAddManager} className="flex-1 rounded-xl border border-[#E6DDF0] px-4 py-2.5 text-sm font-semibold text-[#2B174C] hover:bg-[#F7F1FF] disabled:opacity-50">Cancel</button>
+                                    <button type="submit" disabled={addingManager || branchesLoading || !!branchOptionsError || !addName.trim() || !addEmail.trim() || !availableBranches.some(branch => branch.id === addBranchId)} className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-[#2B174C] px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:opacity-50"><Plus size={16} />{addingManager ? "Adding..." : "Add Manager"}</button>
                                 </div>
                             </div>
-
-                            <div className="mt-5 border-t border-[#E6DDF0] pt-5">
-                                <h3 className="text-sm font-bold text-[#1A1220]">Change login email</h3>
-                                <p className="mt-1 text-xs leading-5 text-[#7A6A84]">{editingManager.status === "pending"
-                                    ? "The invitation is re-sent to the new address and the previous invitation link stops working."
-                                    : "A verification code is sent to the new address. The login email changes only after you enter the code the manager received. Passwords are never visible to or editable by the owner."}</p>
-                                <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-                                    <input type="email" value={newEmail} onChange={e => { setNewEmail(e.target.value); if (emailStep === "code") { setEmailStep("idle"); setEmailCode(""); } }} disabled={emailBusy} placeholder="new.manager@email.com" aria-label="New login email" className="h-[44px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-3.5 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:cursor-not-allowed disabled:bg-[#F7F4F8] disabled:text-[#8A7D92]" />
-                                    <button type="button" onClick={() => void requestEmailChange()} disabled={emailBusy || emailResendIn > 0 || !newEmail.trim()} className="shrink-0 rounded-xl border border-[#E6DDF0] bg-white px-4 py-2 text-sm font-semibold text-[#2B174C] transition hover:bg-[#F7F1FF] disabled:opacity-50">
-                                        {emailBusy && emailStep === "idle" ? "Sending..." : emailResendIn > 0 ? `Resend in ${emailResendIn}s` : editingManager.status === "pending" ? "Update & resend" : emailStep === "code" ? "Resend code" : "Send code"}
-                                    </button>
-                                </div>
-                                {emailStep === "code" && <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-                                    <input value={emailCode} onChange={e => setEmailCode(e.target.value.replace(/\D/g, "").slice(0, 6))} disabled={emailBusy} inputMode="numeric" autoComplete="one-time-code" placeholder="6-digit code" aria-label="Verification code" className="h-[44px] w-full rounded-xl border border-[#E6DDF0] bg-[#FFFEFC] px-3.5 text-sm text-[#1A1220] outline-none shadow-sm placeholder:text-[#9B8AAA] transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10 disabled:cursor-not-allowed disabled:bg-[#F7F4F8] disabled:text-[#8A7D92]" />
-                                    <button type="button" onClick={() => void confirmEmailChange()} disabled={emailBusy || emailCode.length !== 6} className="shrink-0 rounded-xl bg-[#2B174C] px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1B0D31] disabled:opacity-50">{emailBusy ? "Verifying..." : "Verify & update"}</button>
-                                </div>}
-                                {emailMessage && <p role="status" className="mt-2 text-xs text-[#5F4E75]">{emailMessage}</p>}
-                            </div>
-                        </div>
+                        </form>
                     </div>}
 
                     {confirmCancelInvite && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45 p-4" onMouseDown={e => { if (e.target === e.currentTarget && !cancellingManagerId) setConfirmCancelInvite(null); }}>
@@ -1104,7 +926,7 @@ export default function BranchManagersPage() {
                     </div>}
 
                     {notice && <div role="status" aria-live="polite" className="fixed bottom-5 right-5 z-[100] flex w-[min(390px,calc(100vw-32px))] items-start gap-3 rounded-[18px] border border-[#E6DDF0] bg-white p-4 shadow-xl">
-                        <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${notice.kind === "success" ? "bg-[#E8F7EE] text-[#138342]" : "bg-[#FDEDED] text-[#C13333]"}`}>{notice.kind === "success" ? <CheckCircle2 size={20}/> : <UserX size={20}/>}</span>
+                        <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${notice.kind === "success" ? "bg-[#E8F7EE] text-[#138342]" : notice.kind === "warning" ? "bg-[#FFF6DF] text-[#A56607]" : "bg-[#FDEDED] text-[#C13333]"}`}>{notice.kind === "success" ? <CheckCircle2 size={20}/> : notice.kind === "warning" ? <Mail size={20}/> : <UserX size={20}/>}</span>
                         <div className="flex-1"><p className="text-sm font-bold text-[#1A1220]">{notice.title}</p><p className="mt-1 text-xs text-[#7A6A84]">{notice.message}</p></div><button type="button" onClick={() => setNotice(null)} aria-label="Dismiss notification" className="text-[#7A6A84]"><X size={16}/></button>
                     </div>}
 

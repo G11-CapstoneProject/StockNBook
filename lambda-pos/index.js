@@ -911,12 +911,14 @@ const getOwnerSalesReport = (() => {
         return { available: true, table: 'bookings', fields: {}, hasCostSnapshot: false, hasTaxData: true };
     }
 
-    function posSql({ storeId, branchId, dateFrom, dateTo, orderColumns, bookingSchema, exactOrderId }) {
+    // PERFORMANCE FIX: withCost=false skips the cost lookup for queries that never read cost/profit.
+    // item, cashierName and cashierRole are filled in afterwards for the returned page only.
+    function posSql({ storeId, branchId, dateFrom, dateTo, orderColumns, bookingSchema, exactOrderId, withCost = true }) {
         const where = ["o.store_id = ?", "LOWER(TRIM(o.status)) = 'completed'", "UPPER(COALESCE(o.payment_mode,'')) IN ('CASH','GCASH','BANK_TRANSFER')",
             "(UPPER(TRIM(COALESCE(o.customer_type, ''))) = 'WALK_IN' OR (TRIM(COALESCE(o.customer_type, '')) = '' AND o.order_id LIKE '%-POS-%'))"];
         // One store-specific cost aggregation, avoiding a full cross-tenant GROUP BY.
         // Bind order: item-cost subquery first, followed by orders WHERE predicates.
-        const params = [storeId, storeId];
+        const params = withCost ? [storeId, storeId] : [storeId];
         // A POS payment tied to an existing booking is not a second sale.
         for (const column of ['booking_id', 'booking_reference', 'related_booking_id']) {
             if (orderColumns.has(column)) where.push(`o.${id(column)} IS NULL`);
@@ -937,31 +939,27 @@ const getOwnerSalesReport = (() => {
                          'Walk-in' AS customerName, NULL AS customerContactNumber, 'WALK_IN' AS salesSource,
                          o.payment_mode AS paymentMode, o.tax_type AS taxType,
                          o.total AS total, o.vat_amount AS vatAmount,
-                         CASE WHEN ic.rowCount > 0 AND ic.missingCount = 0 THEN ic.cost ELSE NULL END AS totalCost,
+                         ${withCost ? `CASE WHEN ic.rowCount > 0 AND ic.missingCount = 0 THEN ic.cost ELSE NULL END AS totalCost,
                          CASE WHEN ic.rowCount > 0 AND ic.missingCount = 0
-                                  THEN o.total - COALESCE(o.vat_amount,0) - ic.cost ELSE NULL END AS profit,
-                         o.item AS item,
+                                  THEN o.total - COALESCE(o.vat_amount,0) - ic.cost ELSE NULL END AS profit,` : 'NULL AS totalCost, NULL AS profit,'}
+                         NULL AS item,
                          o.cashier_id AS cashierId,
-                         (SELECT ea.user_name FROM employee_actions ea
-                          WHERE ea.store_id=o.store_id AND ea.reference_number = o.order_id
-                            AND ea.action = 'Completed POS transaction' ORDER BY ea.id DESC LIMIT 1) AS cashierName,
-        (SELECT ea.user_role FROM employee_actions ea
-         WHERE ea.store_id=o.store_id AND ea.reference_number = o.order_id
-         AND ea.action = 'Completed POS transaction' ORDER BY ea.id DESC LIMIT 1) AS cashierRole,
+                         NULL AS cashierName,
+                         NULL AS cashierRole,
         DATE_FORMAT(o.order_date, '%Y-%m-%d') AS reportDate,
         DATE_FORMAT(o.created_at, '%Y-%m-%d %H:%i:%s') AS transactionAt,
                          NULL AS additionalCharges, NULL AS depositRefunded, NULL AS bookingKey,
                          NULL AS bookingPaid, NULL AS bookingRefunded, NULL AS depositCollected,
                          NULL AS depositApplied, NULL AS chargePaid, NULL AS depositRequired,
                          NULL AS settlementStatus
-                     FROM ${V2_POS_ORDERS_WITH_ITEM} o
+                     FROM ${V2_POS_ORDERS} o
                          LEFT JOIN branches br ON br.store_id=o.store_id AND br.id=o.branch_id
-                         LEFT JOIN (
-                         SELECT store_id, order_id, COUNT(*) AS rowCount,
+                         ${withCost ? `LEFT JOIN (
+                         SELECT order_id AS order_pk, COUNT(*) AS rowCount,
                          SUM(CASE WHEN cost_price_at_sale IS NULL THEN 1 ELSE 0 END) AS missingCount,
                          SUM(cost_price_at_sale * quantity) AS cost
-                         FROM ${V2_POS_ORDER_ITEMS} order_items WHERE store_id = ? GROUP BY store_id, order_id
-                         ) ic ON ic.store_id=o.store_id AND ic.order_id=o.order_id
+                         FROM order_items WHERE store_id = ? GROUP BY order_id
+                         ) ic ON ic.order_pk=o.order_pk` : ''}
                      WHERE ${where.join(' AND ')}`;
         return { sql, params };
     }
@@ -1056,6 +1054,10 @@ const getOwnerSalesReport = (() => {
         if (bookingSchema.available) sources.push(bookingSql(bookingSchema, {storeId,branchId,dateFrom,dateTo}));
         const unionSql = sources.map((s) => `(${s.sql})`).join(' UNION ALL ');
         const unionParams = sources.flatMap((s) => s.params);
+        // PERFORMANCE FIX: same rows without the cost lookup, for VAT, counts, export and payment methods.
+        const lightSources = [posSql({ storeId, branchId, dateFrom, dateTo, orderColumns, bookingSchema, withCost: false }), ...sources.slice(1)];
+        const lightSql = lightSources.map((s) => `(${s.sql})`).join(' UNION ALL ');
+        const lightParams = lightSources.flatMap((s) => s.params);
 
         // Only the persisted store registration determines whether the Owner VAT
         // panel is shown. Historical order VAT snapshots are never recomputed.
@@ -1071,7 +1073,7 @@ const getOwnerSalesReport = (() => {
         // VAT figures follow branch, dates and Sales Source; they cover every
         // matching transaction, not only the paginated Orders table.
         const vatSourceWhere = source === 'ALL' ? '' : 'WHERE v.salesSource = ?';
-        const vatParams = source === 'ALL' ? unionParams : [...unionParams, source];
+        const vatParams = source === 'ALL' ? lightParams : [...lightParams, source];
         const taxSql = "UPPER(TRIM(COALESCE(v.taxType,'')))";
         const vatEligibleSql = `(${taxSql} IN ('VAT','VAT_REGISTERED') OR
         (${taxSql} = '' AND v.vatAmount > 0))`;
@@ -1088,7 +1090,7 @@ const getOwnerSalesReport = (() => {
                     COALESCE(SUM(CASE WHEN ${vatVerifiedSql} THEN v.total ELSE 0 END),0) AS customerTotal,
                     SUM(CASE WHEN ${vatUnverifiedSql} THEN 1 ELSE 0 END) AS unverifiedRecords,
                     COUNT(*) AS transactionCount
-                FROM (${unionSql}) v ${vatSourceWhere}`, vatParams);
+                FROM (${lightSql}) v ${vatSourceWhere}`, vatParams);
             const unverifiedRecords = Number(vatTotals.unverifiedRecords || 0);
             const complete = (source === 'WALK_IN' || bookingSchema.available) && unverifiedRecords === 0;
             vatSummary = {
@@ -1116,7 +1118,7 @@ const getOwnerSalesReport = (() => {
             // Match the Orders table filters. Branch and dates are already applied
             // inside each source query; these remaining filters combine with them.
             const exportWhere = [];
-            const exportParams = [...unionParams];
+            const exportParams = [...lightParams];
             if (source !== 'ALL') {
                 exportWhere.push('v.salesSource = ?');
                 exportParams.push(source);
@@ -1135,7 +1137,7 @@ const getOwnerSalesReport = (() => {
             const [vatRows] = await db.execute(`
                 SELECT v.orderId, v.branchName, v.reportDate, v.transactionAt,
                        v.salesSource, v.paymentMode, v.taxType, v.total, v.vatAmount
-                FROM (${unionSql}) v ${exportWhereSql}
+                FROM (${lightSql}) v ${exportWhereSql}
                 ORDER BY v.transactionAt DESC, v.orderId DESC
                     LIMIT ${MAX_EXPORT_ROWS + 1}`, exportParams);
             if (vatRows.length > MAX_EXPORT_ROWS) {
@@ -1233,7 +1235,7 @@ const getOwnerSalesReport = (() => {
         if (payment) { outerWhere.push('FIND_IN_SET(?, UPPER(COALESCE(r.paymentMode,\'\'))) > 0'); outerParams.push(payment); }
         if (search) { outerWhere.push('(r.orderId LIKE ? OR r.customerName LIKE ?)'); outerParams.push(`%${search}%`,`%${search}%`); }
         const filterSql = outerWhere.length ? `WHERE ${outerWhere.join(' AND ')}` : '';
-        const [[count]] = await db.execute(`SELECT COUNT(*) AS total FROM (${unionSql}) r ${filterSql}`, [...unionParams,...outerParams]);
+        const [[count]] = await db.execute(`SELECT COUNT(*) AS total FROM (${lightSql}) r ${filterSql}`, [...lightParams,...outerParams]);
         let filteredSummary = null;
         if (body.branch_reporting === true) {
             const [[branchTotals]] = await db.execute(`
@@ -1241,7 +1243,7 @@ const getOwnerSalesReport = (() => {
                        COALESCE(SUM(r.vatAmount), 0) AS vat,
                        COALESCE(SUM(CASE WHEN r.salesSource = 'BOOKING' THEN r.total ELSE 0 END), 0) AS bookingSales,
                        COALESCE(SUM(CASE WHEN r.salesSource = 'WALK_IN' THEN r.total ELSE 0 END), 0) AS walkInSales
-                FROM (${unionSql}) r ${filterSql}`, [...unionParams, ...outerParams]);
+                FROM (${lightSql}) r ${filterSql}`, [...lightParams, ...outerParams]);
             filteredSummary = {
                 transactions: Number(branchTotals.transactions || 0),
                 sales: money(branchTotals.sales), vat: money(branchTotals.vat),
@@ -1256,8 +1258,10 @@ const getOwnerSalesReport = (() => {
         const [rows] = await db.execute(`SELECT r.* FROM (${unionSql}) r ${filterSql}
                                          ORDER BY r.transactionAt ${sortOrder}, r.orderId ${sortOrder}
                                              LIMIT ${pageSize} OFFSET ${offset}`, [...unionParams,...outerParams]);
-        const [methods] = await db.execute(`SELECT DISTINCT r.paymentMode AS method FROM (${unionSql}) r
-                                            WHERE r.paymentMode IS NOT NULL AND TRIM(r.paymentMode) <> '' ORDER BY method`,unionParams);
+        // PERFORMANCE FIX: item summary and cashier for the walk-in rows on this page only.
+        await fillPosItemAndCashier(db, storeId, rows.filter((r) => r.salesSource === 'WALK_IN'));
+        const [methods] = await db.execute(`SELECT DISTINCT r.paymentMode AS method FROM (${lightSql}) r
+                                            WHERE r.paymentMode IS NOT NULL AND TRIM(r.paymentMode) <> '' ORDER BY method`,lightParams);
         return {
             orders: rows.map(r=>({
                 orderId: String(r.orderId), branchId: r.branchId, branchName: r.branchName,
@@ -1337,11 +1341,14 @@ const getOwnerSalesReport = (() => {
         if (source === 'WALK_IN') {
             // Use the immutable order_items snapshots, not current catalog prices.
             // Preserve missing prices as NULL rather than silently converting to 0.
+            // PERFORMANCE FIX: look the order up by its store + Order No. (indexed).
             const [stored] = await db.execute(
-                `SELECT product_name AS name, quantity, unit_price AS unitPrice,
-                        line_total AS lineTotal
-                 FROM ${V2_POS_ORDER_ITEMS} order_items WHERE store_id = ? AND order_id = ?
-                 ORDER BY id ASC LIMIT 501`,
+                `SELECT poi.product_name_snapshot AS name, poi.quantity, poi.unit_price AS unitPrice,
+                        poi.line_total AS lineTotal
+                 FROM orders pio
+                          JOIN order_items poi ON poi.order_id = pio.order_id AND poi.store_id = pio.store_id
+                 WHERE pio.store_id = ? AND pio.order_number = ?
+                 ORDER BY poi.id ASC LIMIT 501`,
                 [storeId, orderId]
             );
             items = stored.slice(0, 500).map((line) => ({
@@ -1425,7 +1432,7 @@ const POS_CASHIER_ROLE_SQL = `(SELECT ea.user_role FROM employee_actions ea
 const POS_WALKIN_ORDER_FILTER_SQL = `(
     UPPER(TRIM(COALESCE(o.customer_type, ''))) = 'WALK_IN'
     OR o.order_id LIKE '%-POS-%'
-)`;
+) AND LOWER(TRIM(o.status)) = 'completed'`;
 
 // All POS sales are paid at checkout and stored in orders/order_items.
 // Extra POS status and credit tables are not used by this module.
@@ -1614,6 +1621,26 @@ function getVariantName(line) {
         "",
         150
     );
+}
+
+// Plain text for the audit table. Unicode escapes prevent source-file encoding
+// damage to currency symbols and separators.
+function formatCompletedWalkInAudit(items, total, paymentMode, taxType, vatableSales, vatAmount) {
+    const money = (amount) => `\u20b1${Number(amount).toLocaleString("en-PH", {
+        minimumFractionDigits: 2, maximumFractionDigits: 2,
+    })}`;
+    const payment = { CASH: "Cash", GCASH: "GCash", BANK_TRANSFER: "Bank Transfer" }[paymentMode] || paymentMode;
+    const parts = [
+        items && `Items: ${items}`,
+        `Total: ${money(total)}`,
+        `Payment: ${payment}`,
+    ];
+    if (taxType === "VAT") {
+        parts.push(`VATable Sales: ${money(vatableSales)}`, `VAT: ${money(vatAmount)}`);
+    } else {
+        parts.push("Non-VAT");
+    }
+    return parts.filter(Boolean).join(" \u00b7 ");
 }
 
 function formatOrderItems(items) {
@@ -1930,6 +1957,85 @@ async function insertOrderItems(
 }
 
 
+// ===== PERFORMANCE FIX: item summary + cashier for returned rows only BEGIN =====
+/*
+ * The item summary ("Name - Variant xQty, ...") and the cashier name used to be
+ * worked out inside the SQL for EVERY order in the database before filtering.
+ * With years of sales that took many minutes and POS stopped loading.
+ * They are now loaded only for the rows being returned, with the same values.
+ * Cashier comes from the 'Completed POS transaction' log as before; when an order
+ * has no log row, the user who processed the order is shown instead.
+ */
+async function fillPosItemAndCashier(connection, storeId, rows) {
+    const list = (Array.isArray(rows) ? rows : []).filter((row) => row && row.orderId != null);
+    if (list.length === 0) return;
+    const keyOf = (value) => String(value ?? "").trim().toLowerCase();
+    const ids = Array.from(new Set(list.map((row) => String(row.orderId).trim()).filter(Boolean)));
+    const items = new Map();
+    const cashiers = new Map();
+    const CHUNK_SIZE = 500;
+    for (let start = 0; start < ids.length; start += CHUNK_SIZE) {
+        const chunk = ids.slice(start, start + CHUNK_SIZE);
+        const placeholders = chunk.map(() => "?").join(",");
+        const [itemRows] = await connection.execute(
+            `SELECT po.order_number AS orderId,
+                 LEFT(GROUP_CONCAT(CONCAT(poi.product_name_snapshot,
+                 CASE WHEN piv.is_default = 1 THEN '' ELSE CONCAT(' - ', piv.variant_name) END,
+                 ' x', poi.quantity) ORDER BY poi.id SEPARATOR ', '), 255) AS item,
+                 MAX(pu.full_name) AS userName, MAX(pu.role) AS userRole
+             FROM orders po
+                 LEFT JOIN order_items poi ON poi.order_id = po.order_id
+                 LEFT JOIN product_variants piv ON piv.id = poi.variant_id
+                 LEFT JOIN users pu ON pu.id = po.processed_by AND pu.store_id = po.store_id
+             WHERE po.store_id = ? AND po.order_number IN (${placeholders})
+             GROUP BY po.order_id, po.order_number`,
+            [storeId, ...chunk]
+        );
+        for (const row of itemRows) items.set(keyOf(row.orderId), row);
+        if (ids.length > CHUNK_SIZE) continue; // long lists read the log once, below
+        const [logRows] = await connection.execute(
+            `SELECT ea.reference_number AS orderId, ea.user_name AS cashierName, ea.user_role AS cashierRole
+             FROM employee_actions ea
+             WHERE ea.store_id = ? AND ea.action = 'Completed POS transaction'
+               AND ea.reference_number IN (${placeholders})
+             ORDER BY ea.id DESC`,
+            [storeId, ...chunk]
+        );
+        // Newest log row per order, exactly like the old ORDER BY id DESC LIMIT 1.
+        for (const row of logRows) {
+            const key = keyOf(row.orderId);
+            if (!cashiers.has(key)) cashiers.set(key, row);
+        }
+    }
+    if (ids.length > CHUNK_SIZE) {
+        const wanted = new Set(ids.map(keyOf));
+        const [logRows] = await connection.execute(
+            `SELECT ea.reference_number AS orderId, ea.user_name AS cashierName, ea.user_role AS cashierRole
+             FROM employee_actions ea
+             WHERE ea.store_id = ? AND ea.action = 'Completed POS transaction'
+             ORDER BY ea.id DESC`,
+            [storeId]
+        );
+        for (const row of logRows) {
+            const key = keyOf(row.orderId);
+            if (wanted.has(key) && !cashiers.has(key)) cashiers.set(key, row);
+        }
+    }
+    const roleLabel = (role) => {
+        const text = String(role || "").trim().toLowerCase();
+        return text ? text.charAt(0).toUpperCase() + text.slice(1) : null;
+    };
+    for (const row of list) {
+        const key = keyOf(row.orderId);
+        const itemRow = items.get(key);
+        const logRow = cashiers.get(key);
+        row.item = itemRow?.item ?? null;
+        row.cashierName = logRow ? logRow.cashierName : (itemRow?.userName ?? null);
+        row.cashierRole = logRow ? logRow.cashierRole : roleLabel(itemRow?.userRole);
+    }
+}
+// ===== PERFORMANCE FIX: item summary + cashier for returned rows only END =====
+
 async function loadOrderItemsForOrders(connection, storeId, orderIds) {
     const safeOrderIds = Array.from(
         new Set(
@@ -1961,20 +2067,24 @@ async function loadOrderItemsForOrders(connection, storeId, orderIds) {
         const placeholders = chunk
             .map(() => "?")
             .join(",");
+        // PERFORMANCE FIX: find the orders by store + Order No. (indexed) instead of
+        // reading every order item in the database for each batch.
         const [rows] = await connection.execute(
             `SELECT
-                 oi.order_id AS orderId,
-                 oi.product_id AS productId,
-                 oi.variant_id AS variantId,
-                 oi.product_name AS name,
-                 oi.quantity,
-                 oi.unit_price AS unitPrice,
-                 oi.line_total AS lineTotal,
-                 COALESCE(oi.cost_price_at_sale, 0) AS costPrice
-             FROM ${V2_POS_ORDER_ITEMS} oi
-             WHERE oi.store_id = ?
-               AND oi.order_id IN (${placeholders})
-             ORDER BY oi.order_id ASC, oi.id ASC`,
+                 pio.order_number AS orderId,
+                 piv.product_id AS productId,
+                 CASE WHEN piv.is_default = 1 THEN NULL ELSE poi.variant_id END AS variantId,
+                 poi.product_name_snapshot AS name,
+                 poi.quantity,
+                 poi.unit_price AS unitPrice,
+                 poi.line_total AS lineTotal,
+                 COALESCE(poi.cost_price_at_sale, 0) AS costPrice
+             FROM orders pio
+                      JOIN order_items poi ON poi.order_id = pio.order_id AND poi.store_id = pio.store_id
+                      JOIN product_variants piv ON piv.id = poi.variant_id
+             WHERE pio.store_id = ?
+               AND pio.order_number IN (${placeholders})
+             ORDER BY pio.order_number ASC, poi.id ASC`,
             [storeId, ...chunk]
         );
         for (const row of rows) {
@@ -2453,6 +2563,147 @@ exports.handler = async (event) => {
             });
         }
 
+        // Manager-only full reversal of a completed walk-in order.
+        // Bookings live in the separate bookings table and are never changed here.
+        if (action === "void_order") {
+            if (tokenRole !== "manager") {
+                return jsonResponse(403, headers, { error: "Only the assigned branch Manager can void walk-in transactions." });
+            }
+            if (requestedBranchId && requestedBranchId !== tokenBranchId) {
+                return jsonResponse(403, headers, { error: "Only the assigned branch can be accessed." });
+            }
+            const orderNumber = typeof body.order_id === "string" ? body.order_id.trim() : "";
+            const source = String(body.sales_source ?? "").trim().toUpperCase();
+            const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+            if (!orderNumber || orderNumber.length > 80 || source !== "WALK_IN") {
+                return badRequest(headers, "A valid walk-in Order ID is required. Bookings cannot be voided.");
+            }
+            if (!reason || reason.length > 250) {
+                return badRequest(headers, "Enter a reason for voiding (maximum 250 characters).");
+            }
+
+            // Serialize simultaneous void requests and restore the exact persisted
+            // variant quantities. All changes, including audit entries, are atomic.
+            await connection.beginTransaction();
+            try {
+                const [orders] = await connection.execute(
+                    `SELECT order_id, order_number, total, payment_mode, status
+                     FROM orders
+                     WHERE store_id = ? AND branch_id = ? AND order_number = ?
+                         FOR UPDATE`,
+                    [storeId, tokenBranchId, orderNumber]
+                );
+                if (orders.length !== 1) {
+                    await connection.rollback();
+                    return jsonResponse(404, headers, { error: "Walk-in transaction not found in your assigned branch." });
+                }
+                const order = orders[0];
+                const orderPk = order.order_id;
+                const status = String(order.status || "").trim().toLowerCase();
+                if (status !== "completed") {
+                    await connection.rollback();
+                    return jsonResponse(409, headers, { error: status === "voided" ? "This transaction has already been voided." : "Only completed walk-in transactions can be voided." });
+                }
+                if (!["CASH", "GCASH", "BANK_TRANSFER"].includes(String(order.payment_mode || "").toUpperCase())) {
+                    await connection.rollback();
+                    return jsonResponse(409, headers, { error: "Only completed walk-in checkout transactions can be voided." });
+                }
+                const [lines] = await connection.execute(
+                    `SELECT variant_id, quantity, product_name_snapshot
+                     FROM order_items WHERE order_id = ? AND store_id = ?
+                     ORDER BY variant_id, id FOR UPDATE`,
+                    [orderPk, storeId]
+                );
+                if (!lines.length) {
+                    await connection.rollback();
+                    return jsonResponse(409, headers, { error: "This transaction has no verified item history. Nothing was voided." });
+                }
+                const quantities = new Map();
+                for (const line of lines) {
+                    const quantity = Number(line.quantity);
+                    if (!Number.isSafeInteger(quantity) || quantity <= 0) {
+                        await connection.rollback();
+                        return jsonResponse(409, headers, { error: "Invalid historical item quantity. Nothing was voided." });
+                    }
+                    const variantId = String(line.variant_id);
+                    const existing = quantities.get(variantId);
+                    quantities.set(variantId, {
+                        quantity: (existing?.quantity || 0) + quantity,
+                        name: String(line.product_name_snapshot || "Product"),
+                    });
+                }
+
+                const actor = await getActingEmployee(connection, decodedToken);
+                const returned = [];
+                for (const [variantId, line] of quantities) {
+                    // Keep deleted/inactive catalog items inactive; restore their
+                    // retained original branch stock row, not a different variant.
+                    const [stock] = await connection.execute(
+                        `SELECT id, on_hand_quantity FROM branch_inventory
+                         WHERE store_id = ? AND branch_id = ? AND variant_id = ?
+                             FOR UPDATE`,
+                        [storeId, tokenBranchId, variantId]
+                    );
+                    if (stock.length !== 1) {
+                        await connection.rollback();
+                        return jsonResponse(409, headers, { error: "An original inventory record is missing. Nothing was voided; contact the administrator." });
+                    }
+                    const before = Number(stock[0].on_hand_quantity);
+                    const after = before + line.quantity;
+                    if (!Number.isSafeInteger(after) || after > 4294967295 || line.quantity > 2147483647) {
+                        await connection.rollback();
+                        return jsonResponse(409, headers, { error: "Returned quantity exceeds the inventory limit. Nothing was voided." });
+                    }
+                    await connection.execute(
+                        `UPDATE branch_inventory SET on_hand_quantity = ?
+                         WHERE id = ? AND store_id = ? AND branch_id = ?`,
+                        [after, stock[0].id, storeId, tokenBranchId]
+                    );
+                    await v2RecordMovement(connection, {
+                        storeId, branchId: tokenBranchId, inventoryId: stock[0].id,
+                        movementType: "POS_VOID", delta: line.quantity, before, after,
+                        referenceType: "POS_ORDER", referenceId: orderPk, reference: order.order_number,
+                        actorId: actor.id,
+                        notes: `Voided walk-in sale: ${line.name} x${line.quantity}. Reason: ${reason}`,
+                    });
+                    returned.push(`${line.name} x${line.quantity}`);
+                }
+                // Preserve payment amounts and original timestamps, but cancel the
+                // recorded sale/payment. No external cash or e-wallet refund is sent.
+                await connection.execute(
+                    `UPDATE payments SET status = 'voided'
+                     WHERE store_id = ? AND branch_id = ? AND order_id = ?
+                       AND booking_id IS NULL AND LOWER(TRIM(status)) = 'recorded'`,
+                    [storeId, tokenBranchId, orderPk]
+                );
+                const [updated] = await connection.execute(
+                    `UPDATE orders SET status = 'voided'
+                     WHERE order_id = ? AND store_id = ? AND branch_id = ?
+                       AND LOWER(TRIM(status)) = 'completed'`,
+                    [orderPk, storeId, tokenBranchId]
+                );
+                if (updated.affectedRows !== 1) {
+                    await connection.rollback();
+                    return jsonResponse(409, headers, { error: "This transaction is no longer eligible for voiding." });
+                }
+                await logEmployeeAction(connection, {
+                    storeId, branchId: tokenBranchId, employee: actor,
+                    module: "Sales / POS", action: "Voided walk-in transaction",
+                    referenceNumber: order.order_number, referenceId: orderPk,
+                    details: `Reason: ${reason} | Sales reversed: ₱${Number(order.total).toFixed(2)} | Payment: ${order.payment_mode} | Returned: ${returned.join(", ")}`,
+                });
+                await connection.commit();
+                return jsonResponse(200, headers, {
+                    success: true, orderId: order.order_number, salesReversed: Number(order.total),
+                    returnedUnits: [...quantities.values()].reduce((sum, line) => sum + line.quantity, 0),
+                });
+            } catch (error) {
+                await connection.rollback();
+                console.error("POS void failed:", error);
+                return jsonResponse(500, headers, { error: "Unable to void the transaction. No changes were saved. Please refresh and try again." });
+            }
+        }
+
         if (action === "create_order") {
             // Order IDs are generated by the server (STORE-BRANCH-MMDDYY-XXXX).
             // Any order_id sent by the browser is ignored.
@@ -2636,7 +2887,7 @@ exports.handler = async (event) => {
                         referenceNumber: orderId,
                         action: "Completed POS transaction",
                         referenceId: orderId,
-                        details: `${item} — Grand Total ₱${total} — ${paymentMode} — ${taxType} — VATable ₱${vatableSales} — VAT ₱${vatAmount}`,
+                        details: formatCompletedWalkInAudit(item, total, paymentMode, taxType, vatableSales, vatAmount),
                     });
 
                     await connection.commit();
@@ -2666,12 +2917,12 @@ exports.handler = async (event) => {
                              o.cashier_id AS cashierId,
                              NULL AS cashierName,
                              NULL AS cashierRole,
-                             o.item,
+                             NULL AS item,
                              o.total,
                              o.total AS grandTotal,
                              DATE_FORMAT(o.order_date, '%Y-%m-%d') AS orderDate,
                              DATE_FORMAT(o.created_at, '%Y-%m-%d %H:%i:%s') AS createdAt
-                         FROM ${V2_POS_ORDERS_WITH_ITEM} o
+                         FROM ${V2_POS_ORDERS} o
                                   LEFT JOIN branches b
                                             ON b.id = o.branch_id
                                                 AND b.store_id = o.store_id
@@ -2679,6 +2930,8 @@ exports.handler = async (event) => {
                              LIMIT 1`,
                         [orderId, storeId]
                     );
+                    // PERFORMANCE FIX: item summary for this one order only.
+                    await fillPosItemAndCashier(connection, storeId, rows);
 
                     const orderItemsById = await loadOrderItemsForOrders(
                         connection,
@@ -2916,6 +3169,7 @@ exports.handler = async (event) => {
                 return jsonResponse(200, headers, {
                     success: true, orders, pagination: report.pagination,
                     summary: report.filteredSummary,
+                    canVoidWalkIn: posAccess === "full",
                     taxRegistration: report.taxRegistration,
                     bookingIntegration: report.bookingIntegration,
                 });
@@ -3011,7 +3265,7 @@ exports.handler = async (event) => {
                      COALESCE(SUM(COALESCE(oi.cost_price_at_sale,0) * COALESCE(oi.quantity,0)),0) AS cost
                      FROM ${V2_POS_ORDERS} o
                      LEFT JOIN ${V2_POS_ORDER_ITEMS} oi
-                     ON oi.order_id = o.order_id
+                     ON oi.order_pk = o.order_pk
                      AND oi.store_id = o.store_id
                      WHERE o.store_id = ?
                      AND o.order_date >= ?
@@ -3072,7 +3326,7 @@ exports.handler = async (event) => {
                      SUM(CASE WHEN o.order_date >= ? THEN oi.quantity ELSE 0 END) AS yearUnits
                  FROM ${V2_POS_ORDER_ITEMS} oi
                           INNER JOIN ${V2_POS_ORDERS} o
-                                     ON o.order_id = oi.order_id
+                                     ON o.order_pk = oi.order_pk
                                          AND o.store_id = oi.store_id
                  WHERE o.store_id = ?
                    AND o.order_date >= ?
@@ -3219,11 +3473,12 @@ exports.handler = async (event) => {
                 COALESCE(item_cost.cost, 0) AS totalCost,
                 (o.total - COALESCE(o.vat_amount, 0) - COALESCE(item_cost.cost, 0)) AS profit,`
                 : 'NULL AS totalCost, NULL AS profit,';
+            // PERFORMANCE FIX: cost is summed for this store only (was every store), per order key.
             const joinMetrics = includeFinancials ? `LEFT JOIN (
-                SELECT store_id, order_id,
+                SELECT order_id AS order_pk,
                     SUM(COALESCE(cost_price_at_sale,0) * quantity) AS cost
-                FROM ${V2_POS_ORDER_ITEMS} order_items GROUP BY store_id, order_id
-            ) AS item_cost ON item_cost.order_id = o.order_id AND item_cost.store_id = o.store_id` : '';
+                FROM order_items WHERE store_id = ? GROUP BY order_id
+            ) AS item_cost ON item_cost.order_pk = o.order_pk` : '';
             let query = `SELECT
                              o.order_id AS orderId, o.store_id AS storeId, o.branch_id AS branchId,
                              COALESCE(NULLIF(TRIM(b.branch_name),''), CONCAT('Branch ', o.branch_id)) AS branchName,
@@ -3234,20 +3489,22 @@ exports.handler = async (event) => {
                              o.customer_payment AS totalPaid, GREATEST(0,o.total-COALESCE(o.customer_payment,0)) AS balance,
                              'PAID' AS collectionStatus, o.change_due AS changeDue,
                              o.cashier_id AS cashierId,
-                             ${POS_CASHIER_NAME_SQL} AS cashierName,
-                             ${POS_CASHIER_ROLE_SQL} AS cashierRole,
-                             o.item, o.total, o.total AS grandTotal,
+                             NULL AS cashierName,
+                             NULL AS cashierRole,
+                             NULL AS item, o.total, o.total AS grandTotal,
                              CASE WHEN UPPER(o.tax_type)='VAT' THEN 'VAT_REGISTERED' ELSE 'NON_VAT' END AS taxRegistration,
                              ${metrics}
                                  DATE_FORMAT(o.order_date,'%Y-%m-%d') AS orderDate,
                              DATE_FORMAT(o.created_at,'%Y-%m-%d %H:%i:%s') AS createdAt
-                         FROM ${V2_POS_ORDERS_WITH_ITEM} o
+                         FROM ${V2_POS_ORDERS} o
                                   LEFT JOIN branches b ON b.id=o.branch_id AND b.store_id=o.store_id
                              ${joinMetrics}
                          WHERE ${whereSql}
                          ORDER BY o.created_at DESC, o.order_id DESC`;
             if (paginate) query += ` LIMIT ${pageSize} OFFSET ${offset}`;
-            const [rows] = await connection.execute(query, params);
+            const [rows] = await connection.execute(query, includeFinancials ? [storeId, ...params] : params);
+            // PERFORMANCE FIX: item summary and cashier for the returned rows only.
+            await fillPosItemAndCashier(connection, storeId, rows);
             const includeItems = body.include_order_items === true || body.includeOrderItems === true || isBranchUser;
             let orders = rows;
             if (includeItems && rows.length) {
@@ -3281,10 +3538,10 @@ exports.handler = async (event) => {
                                                                  COALESCE(SUM(COALESCE(c.cost,0)),0) AS cost,
                                                                  COALESCE(SUM(o.total-COALESCE(o.vat_amount,0)-COALESCE(c.cost,0)),0) AS profit
                                                              FROM ${V2_POS_ORDERS} o LEFT JOIN (
-                                                                 SELECT store_id,order_id,SUM(COALESCE(cost_price_at_sale,0)*quantity) AS cost
-                                                                 FROM ${V2_POS_ORDER_ITEMS} order_items GROUP BY store_id,order_id
-                                                             ) c ON c.order_id=o.order_id AND c.store_id=o.store_id
-                                                             WHERE ${whereSql} AND ${POS_SALE_FILTER_SQL}`,params);
+                                                                 SELECT order_id AS order_pk,SUM(COALESCE(cost_price_at_sale,0)*quantity) AS cost
+                                                                 FROM order_items WHERE store_id = ? GROUP BY order_id
+                                                             ) c ON c.order_pk=o.order_pk
+                                                             WHERE ${whereSql} AND ${POS_SALE_FILTER_SQL}`,[storeId, ...params]);
                 summary = {transactions:Number(totals.transactions||0),sales:roundMoney(totals.sales),
                     cost:roundMoney(totals.cost), profit:roundMoney(totals.profit)};
             }
@@ -3341,8 +3598,7 @@ exports.handler = async (event) => {
             return badRequest(headers, "Customer credit is not supported by StockNBook POS.");
         }
 
-        // Unsupported operations, including legacy transaction mutations,
-        // are rejected here. Completed POS sales are read-only.
+        // Unsupported operations, including legacy transaction mutations, are rejected here.
         return badRequest(
             headers,
             "Invalid action."

@@ -332,6 +332,7 @@ export function usePOS() {
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
     const hasLoadedRef = useRef(false);
+    const loadRequestIdRef = useRef(0);
 
     // Owner history starts without date restrictions. The server paginates
     // all branches rather than downloading every sale into the browser.
@@ -374,6 +375,7 @@ export function usePOS() {
     const [managerPaymentFilter, setManagerPaymentFilterState] = useState<"ALL" | "CASH" | "GCASH" | "BANK_TRANSFER">("ALL");
     const [managerBookingAvailable, setManagerBookingAvailable] = useState<boolean | null>(null);
     const [managerOrderError, setManagerOrderError] = useState<string | null>(null);
+    const [canVoidWalkIn, setCanVoidWalkIn] = useState(false);
     const setManagerSalesSource = useCallback((value: "ALL" | "BOOKING" | "WALK_IN") => {
         setManagerSalesSourceState(value);
         setManagerOrderPage(1);
@@ -459,6 +461,7 @@ export function usePOS() {
         const token = sessionStorage.getItem("token");
         if (!token) return;
 
+        const requestId = ++loadRequestIdRef.current;
         const currentRole = readRole();
         const currentBranchId = readBranchId();
         const currentBranchName = readBranchName();
@@ -570,7 +573,8 @@ export function usePOS() {
             const categoriesData = categoriesRes
                 ? await safeJson<CategoryApiResponse>(categoriesRes)
                 : null;
-            const ordersData = await safeJson<PosOrdersApiResponse & OwnerRevenueReport>(ordersRes);
+            const ordersData = await safeJson<PosOrdersApiResponse & OwnerRevenueReport & { canVoidWalkIn?: boolean }>(ordersRes);
+            if (requestId !== loadRequestIdRef.current) return;
             if (isCurrentOwner) {
                 if (ordersRes.ok && ordersData.summary && ordersData.bookingIntegration) {
                     setOwnerRevenue({
@@ -640,10 +644,13 @@ export function usePOS() {
 
                 if (isCurrentManager) {
                     setManagerOrderError(null);
+                    setCanVoidWalkIn(ordersData.canVoidWalkIn === true);
                     setManagerBookingAvailable(ordersData.bookingIntegration?.available ?? null);
                     const pagination = ordersData.pagination;
                     setManagerOrderTotal(Number(pagination?.total ?? mapped.length));
-                    setManagerOrderTotalPages(Math.max(1, Number(pagination?.totalPages ?? 1)));
+                    const totalPages = Math.max(1, Number(pagination?.totalPages ?? 1));
+                    setManagerOrderTotalPages(totalPages);
+                    if (managerOrderPage > totalPages) setManagerOrderPage(totalPages);
                     setManagerOrderSummary({
                         transactions: Number(ordersData.summary?.transactions ?? 0),
                         sales: Number(ordersData.summary?.sales ?? 0),
@@ -683,6 +690,7 @@ export function usePOS() {
                 }
             } else if (isCurrentManager) {
                 setManagerOrderError(ordersData.error || "Unable to load branch transactions.");
+                setCanVoidWalkIn(false);
                 setManagerBookingAvailable(null);
                 setOrders([]);
                 setManagerOrderTotal(0);
@@ -691,9 +699,11 @@ export function usePOS() {
             }
 
         } catch (err) {
+            if (requestId !== loadRequestIdRef.current) return;
             console.warn("POS loadData failed:", err);
             if (isCurrentManager) {
                 setManagerOrderError("Unable to retrieve live branch transactions. Verify the POS API connection.");
+                setCanVoidWalkIn(false);
                 setManagerBookingAvailable(null);
                 setOrders([]);
                 setManagerOrderTotal(0);
@@ -1524,6 +1534,7 @@ export function usePOS() {
         setManagerPaymentFilter,
         managerBookingAvailable,
         managerOrderError,
+        canVoidWalkIn,
         managerOrderPage,
         setManagerOrderPage,
         managerOrderPageSize,

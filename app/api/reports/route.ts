@@ -609,8 +609,9 @@ async function loadSales(
                  LEFT JOIN branches br
                            ON br.id = o.branch_id AND br.store_id = o.store_id
                  LEFT JOIN ${V2_POS_ORDER_ITEMS} oi
-                           ON oi.order_id = o.order_id
+                           ON oi.order_pk = o.order_pk AND oi.store_id = o.store_id
         WHERE o.store_id = ?
+          AND LOWER(TRIM(o.status)) = 'completed'
           AND o.order_date BETWEEN ? AND ?
     `;
 
@@ -929,12 +930,43 @@ function isStaffManagementAudit(module: string) {
     return asText(module).toLowerCase().replace(/[\s_-]+/g, " ") === "staff management";
 }
 
-// Only booking fulfillment terminology changes; POS / Sales remains unchanged.
+// Earlier POS code wrote mojibake into the stored text. Normalize only the
+// completed walk-in audit display; preserve the original records in the DB.
+function formatLegacyWalkInAuditDetails(details: string) {
+    const clean = details
+        .replace(/\u00e2\u20ac\u201d|\u00e2\u0080\u0094/g, "\u2014")
+        .replace(/\u00e2\u201a\u00b1|\u00e2\u0082\u00b1/g, "\u20b1");
+    const legacy = /^(.*?)\s*\u2014\s*Grand Total\s*\u20b1?([\d,]+(?:\.\d+)?)\s*\u2014\s*(CASH|GCASH|BANK_TRANSFER)\s*\u2014\s*(VAT|VAT_REGISTERED|NON_VAT|NON_VAT_REGISTERED)\s*\u2014\s*VATable\s*\u20b1?([\d,]+(?:\.\d+)?)\s*\u2014\s*VAT\s*\u20b1?([\d,]+(?:\.\d+)?)\.?$/i.exec(clean.trim());
+    // New records are already formatted, and unrecognized historical formats
+    // should not lose any content just because they do not match the template.
+    if (!legacy) return clean.replace(/\s*\u2014\s*/g, " \u00b7 ");
+    const [, items, total, paymentMode, taxType, vatableSales, vatAmount] = legacy;
+    const money = (value: string) => `\u20b1${Number(value.replace(/,/g, "")).toLocaleString("en-PH", {
+        minimumFractionDigits: 2, maximumFractionDigits: 2,
+    })}`;
+    const payment: Record<string, string> = { CASH: "Cash", GCASH: "GCash", BANK_TRANSFER: "Bank Transfer" };
+    const parts = [
+        items.trim() && `Items: ${items.trim()}`,
+        `Total: ${money(total)}`,
+        `Payment: ${payment[paymentMode.toUpperCase()]}`,
+    ];
+    if (["VAT", "VAT_REGISTERED"].includes(taxType.toUpperCase())) {
+        parts.push(`VATable Sales: ${money(vatableSales)}`, `VAT: ${money(vatAmount)}`);
+    } else {
+        parts.push("Non-VAT");
+    }
+    return parts.filter(Boolean).join(" \u00b7 ");
+}
+
 function auditDisplayAction(record: { module: string; action: string; details: string }) {
-    if (normalizeAuditModule(record.module) !== "Bookings") {
+    const displayModule = normalizeAuditModule(record.module);
+    const action = record.action.trim().toLowerCase();
+    if (displayModule === "Sales / POS" && ["completed pos transaction", "completed walk-in transaction", "completed walk in transaction"].includes(action)) {
+        return { action: "Completed walk-in transaction", details: formatLegacyWalkInAuditDetails(record.details) };
+    }
+    if (displayModule !== "Bookings") {
         return { action: record.action, details: record.details };
     }
-    const action = record.action.trim().toLowerCase();
     if (action === "prepared sales booking inclusion") {
         return { action: "Prepared consumable product", details: record.details };
     }

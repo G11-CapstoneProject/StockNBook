@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
     CheckCircle2,
@@ -93,6 +93,60 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
     const [downloadingInvoice, setDownloadingInvoice] = useState<string | null>(null);
     const [downloadingReport, setDownloadingReport] = useState(false);
     const [reportError, setReportError] = useState<string | null>(null);
+    const [voidOrder, setVoidOrder] = useState<Order | null>(null);
+    const [voidReason, setVoidReason] = useState("");
+    const [voiding, setVoiding] = useState(false);
+    const [voidError, setVoidError] = useState<string | null>(null);
+    const [voidToast, setVoidToast] = useState<SaleSuccessToastMessage | null>(null);
+    const closeVoidToast = useCallback(() => setVoidToast(null), []);
+    const voidingRef = useRef(false);
+    const voidDialogRef = useRef<HTMLDialogElement>(null);
+    useEffect(() => {
+        if (voidOrder && !voidDialogRef.current?.open) voidDialogRef.current?.showModal();
+        if (!voidOrder && voidDialogRef.current?.open) voidDialogRef.current.close();
+    }, [voidOrder]);
+    const openVoidDialog = (order: Order) => {
+        if (!pos.canVoidWalkIn || order.salesSource !== "WALK_IN") return;
+        setVoidReason("");
+        setVoidError(null);
+        setVoidToast(null);
+        setVoidOrder(order);
+    };
+    const confirmVoid = async () => {
+        if (!voidOrder || !pos.canVoidWalkIn || voidOrder.salesSource !== "WALK_IN" || !voidReason.trim() || voidingRef.current) return;
+        voidingRef.current = true;
+        setVoiding(true);
+        setVoidError(null);
+        try {
+            const token = sessionStorage.getItem("token");
+            if (!token) throw new Error("Please log in again.");
+            const response = await fetch("/api/pos", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                body: JSON.stringify({ action: "void_order", order_id: voidOrder.id, sales_source: "WALK_IN", reason: voidReason.trim() }),
+            });
+            const data = await response.json() as { success?: boolean; error?: string; salesReversed?: number; returnedUnits?: number };
+            if (!response.ok || !data.success) {
+                if (response.status === 409) void pos.refreshAll({ silent: true });
+                throw new Error(data.error || "Unable to void the transaction.");
+            }
+            const key = orderKey(voidOrder);
+            setDetails(previous => { const next = { ...previous }; delete next[key]; return next; });
+            setExpandedOrderKey(null);
+            setVoidOrder(null);
+            const returnedUnits = Number(data.returnedUnits ?? 0);
+            setVoidToast({
+                title: "Transaction voided successfully",
+                message: `${returnedUnits} ${returnedUnits === 1 ? "unit" : "units"} returned to inventory. ${peso(Number(data.salesReversed ?? 0))} deducted from sales.`,
+            });
+            await pos.refreshAll();
+        } catch (error) {
+            setVoidError(error instanceof Error ? error.message : "Unable to void the transaction.");
+        } finally {
+            voidingRef.current = false;
+            setVoiding(false);
+        }
+    };
     const [selectedKpi, setSelectedKpi] = useState<POSKpiKey | null>(null);
     // The Owner/Manager period selector uses Philippine calendar dates and also
     // applies the initial "Today" filter on first render.
@@ -270,7 +324,9 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
     };
 
     const filterClass = "h-[42px] w-full min-w-0 rounded-xl border border-[#E3D8EA] bg-white px-3 text-sm text-[#1A1220] outline-none shadow-sm transition focus:border-[#2B174C] focus:ring-4 focus:ring-[#2B174C]/10";
-    const tableGrid = "grid w-full min-w-0 grid-cols-[minmax(0,2fr)_minmax(0,1.1fr)_minmax(0,.9fr)_minmax(0,.7fr)_minmax(0,1.45fr)_minmax(0,1fr)] gap-3";
+    const tableGrid = `grid w-full min-w-0 gap-3 ${pos.canVoidWalkIn
+        ? "grid-cols-[minmax(0,2fr)_minmax(0,1.1fr)_minmax(0,.9fr)_minmax(0,.8fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(72px,.7fr)]"
+        : "grid-cols-[minmax(0,2fr)_minmax(0,1.1fr)_minmax(0,.9fr)_minmax(0,.7fr)_minmax(0,1.45fr)_minmax(0,1fr)]"}`;
 
     return (
         <POSLayout role="manager" isOwner={false} activeBranchName={pos.activeBranchName} onRefresh={() => pos.refreshAll()}>
@@ -348,7 +404,7 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
                     )}
                     <div className="max-h-[560px] min-h-0 overflow-y-auto overscroll-contain rounded-xl border border-[#E6DDF0]">
                         <div className={`${tableGrid} sticky top-0 z-10 border-b border-[#E6DDF0] bg-[#F9F6FD] px-4 py-3 text-xs font-semibold text-[#5F4E75]`}>
-                            <div>Order ID</div><div>Date / Time</div><div>Payment</div><div>Sales Source</div><div>Sales</div><div>Processed By</div>
+                            <div>Order ID</div><div>Date / Time</div><div>Payment</div><div>Sales Source</div><div>Sales</div><div>Processed By</div>{pos.canVoidWalkIn && <div className="text-center">Action</div>}
                         </div>
                         {orders.length === 0 ? (
                             <div className="px-4 py-12 text-center text-sm text-[#9B8AAA]">No branch transactions match these filters.</div>
@@ -376,6 +432,16 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
                                         <p className="font-semibold text-[#4F3572]">{salesSourceLabel(order)}</p>
                                         <p className="font-bold text-[#2B174C]">{peso(order.total)}</p>
                                         <p className="break-words text-[#2B174C]">{cashier}</p>
+                                        {pos.canVoidWalkIn && <div className="flex justify-center">
+                                            {order.salesSource === "WALK_IN" ? (
+                                                <button type="button" disabled={voiding} onClick={() => openVoidDialog(order)}
+                                                        aria-label={`Void walk-in transaction ${order.id}`}
+                                                        title="Void walk-in transaction"
+                                                        className="inline-flex items-center gap-1 whitespace-nowrap rounded-lg border border-[#F3C7C4] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#B42318] transition hover:bg-[#FEF0EF] disabled:opacity-50">
+                                                    <Trash2 size={13} /> Void
+                                                </button>
+                                            ) : <span className="text-[#9B8AAA]">—</span>}
+                                        </div>}
                                     </div>
                                     {expanded && (
                                         <div className="bg-[#FBF9FF] px-4 py-4 sm:pl-12">
@@ -431,6 +497,39 @@ function ManagerSalesView({ pos }: { pos: UsePOSReturn }) {
                     </div>
                 </section>
             </div>
+            <SaleSuccessToast toast={voidToast} onClose={closeVoidToast} />
+            <dialog ref={voidDialogRef} aria-labelledby="void-title"
+                    onCancel={event => { event.preventDefault(); if (!voidingRef.current) setVoidOrder(null); }}
+                    className="m-auto w-[calc(100%-2rem)] max-w-md rounded-2xl border border-[#E6DDF0] bg-white p-0 text-[#1A1220] shadow-2xl backdrop:bg-black/40">
+                {voidOrder && <div className="p-5 space-y-4">
+                    <div className="flex items-start gap-3">
+                        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#FEEBEA] text-[#B42318]"><Trash2 size={20} /></span>
+                        <div>
+                            <h2 id="void-title" className="text-base font-bold text-[#2B174C]">Void Walk-in Transaction?</h2>
+                            <p className="mt-1 break-all text-xs text-[#7A6A84]">{voidOrder.id}</p>
+                        </div>
+                    </div>
+                    <div className="rounded-xl border border-[#E6DDF0] bg-[#FAF7FF] p-3 text-sm">
+                        <p className="flex justify-between gap-3 font-semibold"><span>Sales to reverse</span><span>{peso(voidOrder.total)}</span></p>
+                        <p className="mt-1 text-xs text-[#7A6A84]">All purchased quantities will be returned to this branch's inventory. This transaction will no longer count toward sales.</p>
+                    </div>
+                    <p className="text-xs leading-5 text-[#806A8C]">Confirm only after the products are returned and any actual customer payment reversal is arranged. This action does not automatically refund cash, GCash or bank transfers.</p>
+                    <label htmlFor="void-reason" className="block text-xs font-semibold text-[#2B174C]">
+                        Reason for voiding
+                        <textarea id="void-reason" value={voidReason} rows={3} maxLength={250} disabled={voiding}
+                                  onChange={event => setVoidReason(event.target.value)}
+                                  placeholder="Enter reason..." required
+                                  className="mt-1.5 w-full resize-none rounded-xl border border-[#E3D8EA] p-3 text-sm font-normal outline-none focus:border-[#2B174C]" />
+                    </label>
+                    {voidError && <p role="alert" className="text-xs font-medium text-[#B42318]">{voidError}</p>}
+                    <div className="flex justify-end gap-2">
+                        <button type="button" disabled={voiding} onClick={() => setVoidOrder(null)}
+                                className="rounded-xl border border-[#D8CBE7] px-4 py-2 text-sm font-semibold text-[#2B174C] disabled:opacity-50">Cancel</button>
+                        <button type="button" disabled={voiding || !voidReason.trim() || !pos.canVoidWalkIn} onClick={() => void confirmVoid()}
+                                className="rounded-xl bg-[#B42318] px-4 py-2 text-sm font-semibold text-white hover:bg-[#922019] disabled:cursor-not-allowed disabled:opacity-50">{voiding ? "Voiding..." : "Confirm Void"}</button>
+                    </div>
+                </div>}
+            </dialog>
             {selectedKpi && (
                 <POSKpiDetailModal manager kpiKey={selectedKpi} detail={kpiDetails[selectedKpi]}
                                    onClose={() => setSelectedKpi(null)} />
@@ -451,7 +550,7 @@ export function BranchPOSView({ pos }: { pos: UsePOSReturn }) {
     // Hooks must execute in the same order for Manager and Staff renders.
     const [staffPaymentFilter, setStaffPaymentFilter] = useState<"ALL" | "CASH" | "GCASH" | "BANK_TRANSFER">("ALL");
     const isManager = pos.role === "manager";
-    // Only Staff render checkout; Manager has a separate read-only sales view.
+    // Only Staff render checkout; Manager has a separate sales/void view.
     if (isManager) return <ManagerSalesView pos={pos} />;
     const staffTodayOrders = pos.todayOrders.filter(isWalkInPosOrder);
     const displayedTodayOrders = staffPaymentFilter === "ALL" ? staffTodayOrders : staffTodayOrders.filter(order =>
